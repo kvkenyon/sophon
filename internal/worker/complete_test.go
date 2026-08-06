@@ -239,7 +239,8 @@ func newCompletionFixture(t *testing.T, newCommit bool) completionFixture {
 	_, err = store.RecordWorkerSession(ctx, domain.CommandID("cmd_worker_"+suffix), db.RecordWorkerSessionInput{
 		TaskID: task.ID, Attempt: 1, ExpectedVersion: task.Version, Actor: "test",
 		Session: domain.WorkerSession{ID: domain.SessionID("wsn_" + suffix), Runtime: "codex", HerdrSessionName: "fm-lab-test",
-			HerdrWorkspaceID: "w1", HerdrTabID: "w1:t1", HerdrPaneID: "w1:p1"},
+			HerdrWorkspaceID: "w1", HerdrTabID: "w1:t1", HerdrPaneID: "w1:p1",
+			HerdrAgentName: "pi-task-a1", AgentSessionID: "codex-session-1"},
 	})
 	if err != nil {
 		t.Fatal(err)

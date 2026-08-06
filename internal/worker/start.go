@@ -101,7 +101,8 @@ func (s *Starter) Start(ctx context.Context, taskID domain.TaskID) (StartResult,
 		TaskID: taskID, Attempt: attempt, ExpectedVersion: current.Version, Actor: "scheduler",
 		Session: domain.WorkerSession{ID: domain.SessionID(sessionID), Runtime: "codex",
 			HerdrSessionName: runtimeSession.SessionName, HerdrWorkspaceID: runtimeSession.WorkspaceID,
-			HerdrTabID: runtimeSession.TabID, HerdrPaneID: runtimeSession.PaneID},
+			HerdrTabID: runtimeSession.TabID, HerdrPaneID: runtimeSession.PaneID,
+			HerdrAgentName: runtimeSession.AgentName, AgentSessionID: runtimeSession.AgentSessionID},
 	})
 	if err != nil {
 		return StartResult{}, fmt.Errorf("record worker session: %w", err)

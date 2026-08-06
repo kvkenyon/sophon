@@ -45,6 +45,10 @@ func (h *recordingHerdr) Observe(context.Context, herdr.Session) (herdr.State, e
 	return herdr.StateRunning, nil
 }
 
+func (h *recordingHerdr) Wake(_ context.Context, session herdr.Session, _ string) (herdr.Session, error) {
+	return session, nil
+}
+
 func TestStarterRunsMissionTaskLeaseBriefHerdrSlice(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -78,7 +82,8 @@ func TestStarterRunsMissionTaskLeaseBriefHerdrSlice(t *testing.T) {
 		BaseSHA: "0123456789abcdef0123456789abcdef01234567",
 	}}
 	herdrAdapter := &recordingHerdr{session: herdr.Session{
-		AgentName: "codex-task", SessionName: "fm-lab-start", WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1",
+		AgentName: "codex-task", AgentSessionID: "codex-session-start", SessionName: "fm-lab-start",
+		WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1",
 	}}
 	starter := Starter{Store: store, Treehouse: acquirer, Herdr: herdrAdapter,
 		Briefs: BriefGenerator{BaseDir: filepath.Join(root, "tasks")}, Validation: []string{"go test ./..."}}
@@ -89,7 +94,8 @@ func TestStarterRunsMissionTaskLeaseBriefHerdrSlice(t *testing.T) {
 	if result.Task.State != domain.TaskRunning || acquirer.calls != 1 || herdrAdapter.calls != 1 {
 		t.Fatalf("start result = %+v, acquire calls=%d Herdr calls=%d", result, acquirer.calls, herdrAdapter.calls)
 	}
-	if result.WorkerSession.HerdrPaneID != "w1:p1" || result.WorkerSession.HerdrTabID != "w1:t1" {
+	if result.WorkerSession.HerdrPaneID != "w1:p1" || result.WorkerSession.HerdrTabID != "w1:t1" ||
+		result.WorkerSession.HerdrAgentName != "codex-task" || result.WorkerSession.AgentSessionID != "codex-session-start" {
 		t.Fatalf("recorded worker session = %+v", result.WorkerSession)
 	}
 	if herdrAdapter.request.WorktreePath != "/worktrees/start" || !strings.Contains(herdrAdapter.request.Brief, "task criterion") {

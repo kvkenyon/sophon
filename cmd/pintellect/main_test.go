@@ -128,7 +128,11 @@ esac
 set -eu
 case "$1 $2" in
   "workspace create") printf '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}\n' ;;
-  "agent start"|"agent prompt") printf '{"result":{"ok":true}}\n' ;;
+  "pane run"|"agent rename") printf '{"result":{"ok":true}}\n' ;;
+  "pane read") printf 'OpenAI Codex\n' ;;
+  "pane get") printf '{"result":{"pane":{"pane_id":"w1:p1"}}}\n' ;;
+  "agent get") printf '{"result":{"agent":{"pane_id":"w1:p1","agent_status":"idle","state_change_seq":1}}}\n' ;;
+  "agent prompt") printf '{"result":{"agent":{"pane_id":"w1:p1","agent_session":{"value":"codex-session-cli"}},"ok":true}}\n' ;;
   *) exit 2 ;;
 esac
 `

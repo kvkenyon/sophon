@@ -145,7 +145,11 @@ const (
 	WorkerSessionStarting WorkerSessionState = "starting"
 	WorkerSessionRunning  WorkerSessionState = "running"
 	WorkerSessionIdle     WorkerSessionState = "idle"
+	WorkerSessionInactive WorkerSessionState = "inactive"
 	WorkerSessionLost     WorkerSessionState = "lost"
+	WorkerSessionFailed   WorkerSessionState = "failed"
+	WorkerSessionStopping WorkerSessionState = "stopping"
+	WorkerSessionStopped  WorkerSessionState = "stopped"
 )
 
 // WorkerSession records durable Herdr placement. PaneID is the operational
@@ -156,12 +160,21 @@ type WorkerSession struct {
 	Attempt          int                `json:"attempt"`
 	Runtime          string             `json:"runtime"`
 	State            WorkerSessionState `json:"state"`
+	Version          int64              `json:"version"`
 	HerdrSessionName string             `json:"herdr_session_name"`
 	HerdrWorkspaceID string             `json:"herdr_workspace_id"`
 	HerdrTabID       string             `json:"herdr_tab_id"`
 	HerdrPaneID      string             `json:"herdr_pane_id"`
+	HerdrAgentName   string             `json:"herdr_agent_name"`
+	AgentSessionID   string             `json:"agent_session_id"`
 	CreatedAt        time.Time          `json:"created_at"`
 	UpdatedAt        time.Time          `json:"updated_at"`
+	LastObservedAt   *time.Time         `json:"last_observed_at,omitempty"`
+	IdleAt           *time.Time         `json:"idle_at,omitempty"`
+	InactiveAt       *time.Time         `json:"inactive_at,omitempty"`
+	RecoveryPromptAt *time.Time         `json:"recovery_prompt_at,omitempty"`
+	StoppedAt        *time.Time         `json:"stopped_at,omitempty"`
+	FailureReason    string             `json:"failure_reason,omitempty"`
 }
 
 type VerificationResult struct {

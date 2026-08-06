@@ -114,6 +114,7 @@ var (
 	ErrStaleAttempt     = errors.New("task attempt is not current")
 	ErrLeaseExists      = errors.New("task attempt already has a Treehouse lease")
 	ErrLeaseConflict    = errors.New("Treehouse lease identity or state changed")
+	ErrRecoveryPrompted = errors.New("worker recovery prompt already reserved")
 )
 
 // ConflictError is returned after a failed conditional update. Current is the
