@@ -68,6 +68,69 @@ func TestCommandAdapterStartsCodexAndDeliversBriefAsInitialPrompt(t *testing.T) 
 	}
 }
 
+func TestCommandAdapterHandlesFreshCodexLaunchScreens(t *testing.T) {
+	trustScreen := `Do you trust the contents of this directory?
+
+1. Yes, continue`
+	hooksScreen := `Do you trust these hooks?
+
+Continue without trusting`
+	tests := []struct {
+		name      string
+		responses []runnerResponse
+		wantCalls [][]string
+		wantErr   string
+	}{
+		{
+			name:      "folder trust then composer",
+			responses: []runnerResponse{{stdout: trustScreen}, {stdout: `{"result":{"type":"keys_sent"}}`}, {stdout: "OpenAI Codex"}},
+			wantCalls: [][]string{
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+				{"pane", "send-keys", "w1:p1", "enter", "--session", "fm-lab-contract"},
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+			},
+		},
+		{
+			name:      "folder trust and hooks then composer",
+			responses: []runnerResponse{{stdout: trustScreen}, {stdout: `{"result":{"type":"keys_sent"}}`}, {stdout: hooksScreen}, {stdout: `{"result":{"type":"keys_sent"}}`}, {stdout: "OpenAI Codex"}},
+			wantCalls: [][]string{
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+				{"pane", "send-keys", "w1:p1", "enter", "--session", "fm-lab-contract"},
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+				{"pane", "send-keys", "w1:p1", "down", "down", "enter", "--session", "fm-lab-contract"},
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+			},
+		},
+		{
+			name:      "composer directly",
+			responses: []runnerResponse{{stdout: "OpenAI Codex"}},
+			wantCalls: [][]string{{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"}},
+		},
+		{
+			name:      "unknown screen is informative",
+			responses: []runnerResponse{{stdout: "A different confirmation screen"}},
+			wantErr:   "visible pane:\nA different confirmation screen",
+			wantCalls: [][]string{{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeRunner{responses: test.responses}
+			adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
+			err := adapter.waitForCodexComposer(context.Background(), "w1:p1")
+			if test.wantErr == "" && err != nil {
+				t.Fatal(err)
+			}
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("wait error = %v, want content %q", err, test.wantErr)
+			}
+			if !reflect.DeepEqual(runner.calls, test.wantCalls) {
+				t.Fatalf("Herdr calls = %#v, want %#v", runner.calls, test.wantCalls)
+			}
+		})
+	}
+}
+
 func TestCommandAdapterObservesRunningIdleAndLost(t *testing.T) {
 	present := `{"result":{"pane":{"pane_id":"w1:p1"}}}`
 	tests := []struct {

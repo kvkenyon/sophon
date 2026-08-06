@@ -331,6 +331,8 @@ func (a *CommandAdapter) waitForCodexComposer(ctx context.Context, paneID string
 	defer deadline.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+	folderTrustAccepted := false
+	hooksDeclined := false
 	for {
 		visible, err := a.readPane(ctx, paneID)
 		if err != nil {
@@ -338,6 +340,26 @@ func (a *CommandAdapter) waitForCodexComposer(ctx context.Context, paneID string
 		}
 		if strings.Contains(visible, "OpenAI Codex") {
 			return nil
+		}
+		switch {
+		case isCodexFolderTrustScreen(visible):
+			if !folderTrustAccepted {
+				if err := a.sendKeys(ctx, paneID, "enter"); err != nil {
+					return fmt.Errorf("accept Codex folder trust: %w", err)
+				}
+				folderTrustAccepted = true
+			}
+		case isCodexHooksTrustScreen(visible):
+			if !hooksDeclined {
+				// Product workers never trust project hooks. The Codex prompt
+				// selects this option with Down, Down, Enter.
+				if err := a.sendKeys(ctx, paneID, "down", "down", "enter"); err != nil {
+					return fmt.Errorf("decline Codex hooks trust: %w", err)
+				}
+				hooksDeclined = true
+			}
+		case strings.TrimSpace(visible) != "":
+			return fmt.Errorf("Codex composer did not appear; visible pane:\n%s", visible)
 		}
 		select {
 		case <-ctx.Done():
@@ -347,6 +369,25 @@ func (a *CommandAdapter) waitForCodexComposer(ctx context.Context, paneID string
 		case <-ticker.C:
 		}
 	}
+}
+
+func isCodexFolderTrustScreen(visible string) bool {
+	return strings.Contains(visible, "Do you trust the contents of this directory?") &&
+		strings.Contains(visible, "Yes, continue")
+}
+
+func isCodexHooksTrustScreen(visible string) bool {
+	return strings.Contains(strings.ToLower(visible), "hooks") &&
+		strings.Contains(visible, "Continue without trusting")
+}
+
+func (a *CommandAdapter) sendKeys(ctx context.Context, paneID string, keys ...string) error {
+	args := append([]string{"pane", "send-keys", paneID}, keys...)
+	_, stderr, err := a.run(ctx, args...)
+	if err != nil {
+		return commandError("send keys to Codex", err, stderr)
+	}
+	return nil
 }
 
 func (a *CommandAdapter) Observe(ctx context.Context, session Session) (State, error) {
