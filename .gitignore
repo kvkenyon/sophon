@@ -1,0 +1,17 @@
+# Binaries
+pintellect
+pintellectd
+
+# Go build/test artifacts
+*.test
+*.out
+/dist/
+
+# SQLite runtime data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# OS noise
+.DS_Store
