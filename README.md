@@ -11,7 +11,7 @@ The full product and engineering specification lives at [docs/parallel-intellect
 ## Stack
 
 - Control plane: Go + SQLite (`pintellect` CLI, `pintellectd` daemon)
-- Commander: Prime Agent (first-class), Pi / Claude Code / Codex as alternatives
+- Commander runtimes: Pi, Claude Code, Codex
 - Workers: Pi, Claude Code, Codex
 - Terminal runtime: Herdr
 - Worktree runtime: Treehouse

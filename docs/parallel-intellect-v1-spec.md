@@ -3,8 +3,7 @@
 
 **Status:** Build specification  
 **Product:** Parallel Intellect  
-**Primary commander:** Prime Agent<br>
-**Alternative commanders:** Pi, Claude Code, Codex<br>
+**Commander runtimes:** Pi, Claude Code, Codex<br>
 **Workers:** Pi, Claude Code, Codex  
 **Terminal runtime:** Herdr  
 **Worktree runtime:** Treehouse  
@@ -86,7 +85,7 @@ The human should not have to manually:
 
 # 3. Design foundations
 
-Parallel Intellect combines four existing systems rather than reimplementing them.
+Parallel Intellect combines four existing systems and a runtime-adapter boundary rather than reimplementing them.
 
 ## FirstMate
 
@@ -115,23 +114,18 @@ Replace:
 
 FirstMate already contains a large behavioral contract and modular skills around these responsibilities.  
 
-## Prime Agent
+## Commander runtimes
 
-Prime Agent is the recommended commander because its architecture is designed for persistent long-running work.
+Pi, Claude Code, and Codex are co-equal commander runtimes. Parallel Intellect supplies each with a persistent, Herdr-managed session and a structured CLI/API surface for missions, tasks, signals, and recovery.
 
 Useful concepts adopted by Parallel Intellect include:
 
 - persistent commander sessions;
-- programmatic orchestration;
-- persistent goals;
-- recursive cognitive subagents;
-- automatic context compaction;
+- programmatic orchestration over structured state;
 - explicit autonomous budgets;
-- addressable agents;
-- headless RPC operation;
-- durable skills and memory.
-
-Prime Agent supports long-running daemon-backed sessions and programmatic subagents that remain addressable across compaction and restoration.  
+- addressable sessions;
+- event-driven wakeups;
+- durable prompts and memory.
 
 ## Herdr
 
@@ -158,7 +152,7 @@ Parallel Intellect coordinates it rather than rebuilding its review loop.
 Each system owns one topology.
 
 ```text
-Prime Agent
+Commander runtime
     │
     │ reasoning topology
     ▼
@@ -188,7 +182,7 @@ Human
   │
   ▼
 Commander
-Prime Agent / Pi / Claude / Codex
+Pi / Claude Code / Codex
   │
   ▼
 pintellectd
@@ -202,7 +196,7 @@ pintellectd
   ├── event timeline
   ├── recovery
   │
-  ├── Prime RPC
+  ├── commander runtime adapter
   ├── Herdr
   ├── Treehouse
   ├── Git
@@ -239,8 +233,7 @@ Version 1 supports:
 
 - local single-user operation;
 - one persistent commander;
-- Prime Agent as first-class commander;
-- Pi, Claude Code, Codex as alternative commanders;
+- Pi, Claude Code, and Codex as co-equal commanders;
 - Pi, Claude Code, Codex workers;
 - multiple projects;
 - multiple missions;
@@ -711,7 +704,7 @@ Recommended layout:
 ```text
 Parallel Intellect
 ├── Commander
-│   └── Prime Agent
+│   └── Pi / Claude Code / Codex
 │
 ├── hifive
 │   ├── invitation-race
@@ -735,35 +728,18 @@ They are not identity.
 Supported:
 
 ```text
-prime
 pi
 claude
 codex
 ```
 
-Recommended:
-
-```text
-prime
-```
-
-Prime is integrated through RPC rather than terminal scraping.
-
-Prime's RPC interface supports commands, event streaming, steering, follow-ups, cancellation, state inspection, and other headless operations. 
+All commander runtimes use a terminal-driven adapter through Herdr, just like workers. The adapter provides prompting, steering, follow-ups, cancellation, state inspection, event wakeups, and session persistence without relying on runtime-specific RPC.
 
 ---
 
-# 19. Prime commander architecture
+# 19. Commander session architecture
 
-Launch:
-
-```bash
-prime-agent \
-  --mode rpc \
-  --session-dir ~/.parallel-intellect/commanders/<id>
-```
-
-Parallel Intellect maintains an RPC client.
+Parallel Intellect creates each commander as a Herdr-managed terminal session and persists its runtime, Herdr placement, and resumable session identity. A runtime adapter translates the common commander operations to Pi, Claude Code, or Codex.
 
 Conceptual interface:
 
@@ -784,101 +760,17 @@ type Commander interface {
 
 ---
 
-# 20. Prime Python skill
+# 20. Commander control surface
 
-Prime receives a Python-backed skill:
+The `pintellect` CLI and local API are the common control surface for every commander runtime. Prompts teach commanders to query structured mission and task state, create and update work through command-idempotent operations, message workers, resolve signals, retry or cancel tasks, and request delivery.
 
-```text
-parallel_intellect
-```
-
-Example:
-
-```python
-from parallel_intellect import intellect
-
-mission = await intellect.create_mission(
-    project="hifive",
-    title="Improve invitation reliability",
-    objective="Prevent duplicate concurrent acceptance.",
-)
-```
-
-Task creation:
-
-```python
-task = await intellect.create_task(
-    mission_id=mission.id,
-    kind="implementation",
-    title="Fix concurrent invitation acceptance",
-    worker="codex",
-    acceptance_criteria=[
-        "At most one acceptance succeeds",
-        "Concurrent loser gets deterministic conflict",
-        "Regression test exists",
-    ],
-)
-```
-
-Other methods:
-
-```python
-await intellect.projects()
-
-await intellect.mission(id)
-await intellect.tasks(mission_id)
-
-await intellect.task(id)
-
-await intellect.message_worker(id, message)
-
-await intellect.create_signal(...)
-await intellect.resolve_signal(...)
-
-await intellect.retry_task(id)
-await intellect.cancel_task(id)
-await intellect.deliver_task(id)
-
-await intellect.status()
-```
-
-The Python package is only a typed RPC client.
-
-Authoritative logic remains in Go.
+Authoritative logic remains in Go. A future runtime may be added behind the commander adapter interface when it satisfies the same lifecycle and conformance requirements.
 
 ---
 
-# 21. Prime cognitive subagents
+# 21. Commander reasoning boundaries
 
-Prime may use native recursive subagents for reasoning.
-
-Examples:
-
-```text
-planner
-critic
-architecture-reviewer
-result-synthesizer
-test-gap-reviewer
-```
-
-These may:
-
-- analyze task plans;
-- compare worker reports;
-- inspect existing artifacts;
-- critique architecture;
-- identify missing tests.
-
-They may not:
-
-- acquire Treehouse leases;
-- alter mission/task state;
-- modify registered repositories;
-- push code;
-- deliver PRs.
-
-Repository-changing work always becomes a Parallel Intellect task.
+Commanders may use their own reasoning tools to analyze plans, compare worker reports, inspect artifacts, critique architecture, and identify missing tests. They may not acquire Treehouse leases, alter mission or task state outside the control surface, modify registered repositories, push code, or deliver PRs. Repository-changing work always becomes a Parallel Intellect task.
 
 ---
 
@@ -888,13 +780,8 @@ The commander should operate on structured state rather than repeatedly interpre
 
 Good:
 
-```python
-tasks = await intellect.tasks(mission.id)
-
-blocked = [
-    t for t in tasks
-    if t.state == "blocked"
-]
+```text
+pintellect task list --mission <id> --state blocked
 ```
 
 Bad:
@@ -903,7 +790,7 @@ Bad:
 Read five terminal windows and infer which one is blocked.
 ```
 
-Prime's persistent Python environment makes this especially powerful because the commander may calculate over structured mission state while keeping model context small.
+The CLI/API lets any commander calculate over structured mission state while keeping model context small.
 
 ---
 
@@ -1404,7 +1291,7 @@ max_fix_rounds = 5
 Commander:
 
 ```toml
-[commander.prime.autonomous]
+[commander.autonomous]
 max_turns = 30
 max_duration = "45m"
 ```
@@ -1949,7 +1836,7 @@ On startup:
 open SQLite
 run migrations
 connect Herdr
-connect Prime session
+reconnect commander session
 inspect Treehouse
 inspect active tasks
 reconcile external state
@@ -2032,7 +1919,7 @@ pintellect project inspect hifive
 Commander:
 
 ```bash
-pintellect commander start --agent prime
+pintellect commander start --agent codex
 pintellect commander attach
 pintellect commander status
 ```
@@ -2160,7 +2047,7 @@ delivery duration
 
 Parallel Intellect is a coordinator, not a sandbox.
 
-Workers and Prime can execute local code under user permissions.
+Workers and commanders can execute local code under user permissions.
 
 Protections:
 
@@ -2238,22 +2125,23 @@ lost process
 Herdr restart
 ```
 
-## Prime RPC
+## Commander adapter
 
 Test:
 
 ```text
-start
+start Pi
+start Claude
+start Codex
 prompt
 events
 steer
 follow_up
 abort
 state
-compaction
 resume
 malformed message
-RPC process restart
+Herdr process restart
 ```
 
 ## Treehouse
@@ -2324,9 +2212,6 @@ Periodic matrix:
 
 | Commander | Worker |
 |---|---|
-| Prime | Pi |
-| Prime | Claude |
-| Prime | Codex |
 | Pi | Pi |
 | Pi | Claude |
 | Pi | Codex |
@@ -2337,7 +2222,7 @@ Periodic matrix:
 | Codex | Claude |
 | Codex | Codex |
 
-Prime is the priority path.
+All listed commander/worker combinations are supported.
 
 ---
 
@@ -2351,7 +2236,6 @@ parallel-intellect/
 │
 ├── internal/
 │   ├── commander/
-│   │   ├── prime/
 │   │   ├── pi/
 │   │   ├── claude/
 │   │   └── codex/
@@ -2377,9 +2261,6 @@ parallel-intellect/
 │   ├── commander/
 │   ├── workers/
 │   └── skills/
-│
-├── integrations/
-│   └── prime/
 │
 ├── migrations/
 ├── testdata/
@@ -2498,20 +2379,20 @@ fix/wake loop
 
 ---
 
-## Milestone 7 — Prime commander
+## Milestone 7 — Commander runtimes
 
 Add:
 
 ```text
-Prime RPC adapter
-Prime session persistence
-Parallel Intellect Python skill
-mission decomposition
+commander adapter interface
+Pi, Claude Code, and Codex commander sessions via Herdr
+commander session persistence
 event wakeups
 steering
 follow-ups
-cognitive subagents
 ```
+
+Mission-decomposition behavior is carried by the commander prompt set rather than a runtime-specific RPC.
 
 ---
 
@@ -2568,7 +2449,7 @@ Build:
 ```text
 daemon restart
 Herdr restart
-Prime restart
+commander session restart
 worker disappearance
 Treehouse mismatch
 delivery interruption
@@ -2601,7 +2482,7 @@ Operator says:
 
 > The invitation flow occasionally allows duplicate acceptance. Find the cause, fix it, have another agent review the change, and open a PR if it passes validation.
 
-Prime commander:
+Codex commander:
 
 1. creates a scout or implementation task;
 2. chooses Codex;
@@ -2622,7 +2503,7 @@ Prime commander:
 17. Parallel Intellect records exact PR + SHA;
 18. worker becomes idle/inactive;
 19. mission becomes completed;
-20. Prime presents the operator with:
+20. Codex presents the operator with:
     - what was wrong;
     - what changed;
     - validation evidence;
@@ -2645,7 +2526,7 @@ The product is:
 
 > **a deterministic operating system for coordinating probabilistic software agents.**
 
-Prime Agent may dynamically decide:
+The commander agent may dynamically decide:
 
 ```text
 what to investigate
@@ -2677,9 +2558,7 @@ That boundary is the product.
 
 **Parallel Intellect coordinates multiple coding agents as one reliable engineering system.**
 
-Prime Agent provides persistent high-level reasoning.
-
-Pi, Claude Code, and Codex operate as durable specialist workers.
+The commander agent provides persistent high-level reasoning; Pi, Claude Code, and Codex are supported as co-equal commander runtimes and durable specialist workers.
 
 Herdr keeps their sessions alive and visible.
 
