@@ -44,6 +44,18 @@ func (s *Store) CreateProject(ctx context.Context, commandID domain.CommandID, i
 	})
 }
 
+func (s *Store) ProjectByPath(ctx context.Context, path string) (domain.ProjectID, error) {
+	var projectID domain.ProjectID
+	err := s.db.QueryRowContext(ctx, "SELECT id FROM projects WHERE path = ?", path).Scan(&projectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("load project by path: %w", err)
+	}
+	return projectID, nil
+}
+
 type CreateMissionInput struct {
 	ProjectID          domain.ProjectID     `json:"project_id"`
 	CommanderSessionID domain.SessionID     `json:"commander_session_id,omitempty"`
@@ -96,17 +108,18 @@ func (s *Store) CreateMission(ctx context.Context, commandID domain.CommandID, i
 }
 
 type CreateTaskInput struct {
-	MissionID    domain.MissionID    `json:"mission_id"`
-	ParentTaskID *domain.TaskID      `json:"parent_task_id,omitempty"`
-	BaseTaskID   *domain.TaskID      `json:"base_task_id,omitempty"`
-	BaseSHA      string              `json:"base_sha,omitempty"`
-	Kind         domain.TaskKind     `json:"kind"`
-	Title        string              `json:"title"`
-	Objective    string              `json:"objective"`
-	Priority     int                 `json:"priority"`
-	WorkerAgent  string              `json:"worker_agent,omitempty"`
-	DeliveryMode domain.DeliveryMode `json:"delivery_mode"`
-	Branch       string              `json:"branch,omitempty"`
+	MissionID          domain.MissionID    `json:"mission_id"`
+	ParentTaskID       *domain.TaskID      `json:"parent_task_id,omitempty"`
+	BaseTaskID         *domain.TaskID      `json:"base_task_id,omitempty"`
+	BaseSHA            string              `json:"base_sha,omitempty"`
+	Kind               domain.TaskKind     `json:"kind"`
+	Title              string              `json:"title"`
+	Objective          string              `json:"objective"`
+	AcceptanceCriteria []domain.Criterion  `json:"acceptance_criteria,omitempty"`
+	Priority           int                 `json:"priority"`
+	WorkerAgent        string              `json:"worker_agent,omitempty"`
+	DeliveryMode       domain.DeliveryMode `json:"delivery_mode"`
+	Branch             string              `json:"branch,omitempty"`
 }
 
 func (s *Store) CreateTask(ctx context.Context, commandID domain.CommandID, in CreateTaskInput) (domain.Task, error) {
@@ -119,19 +132,24 @@ func (s *Store) CreateTask(ctx context.Context, commandID domain.CommandID, in C
 			return domain.Task{}, err
 		}
 		now := time.Now().UTC()
+		criteria, err := json.Marshal(in.AcceptanceCriteria)
+		if err != nil {
+			return domain.Task{}, fmt.Errorf("encode task acceptance criteria: %w", err)
+		}
 		t := domain.Task{
 			ID: domain.TaskID(rawID), MissionID: in.MissionID, ParentTaskID: in.ParentTaskID,
 			BaseTaskID: in.BaseTaskID, BaseSHA: in.BaseSHA, Kind: in.Kind, Title: in.Title,
-			Objective: in.Objective, State: domain.TaskQueued, Version: 1, Priority: in.Priority,
+			Objective: in.Objective, AcceptanceCriteria: in.AcceptanceCriteria,
+			State: domain.TaskQueued, Version: 1, Priority: in.Priority,
 			WorkerAgent: in.WorkerAgent, DeliveryMode: in.DeliveryMode, CurrentAttempt: 1,
 			CreatedAt: now, UpdatedAt: now,
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(
-			id, mission_id, parent_task_id, base_task_id, base_sha, kind, title, objective,
+			id, mission_id, parent_task_id, base_task_id, base_sha, kind, title, objective, acceptance_criteria_json,
 			state, version, priority, worker_agent, delivery_mode, current_attempt, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			t.ID, t.MissionID, taskIDValue(t.ParentTaskID), taskIDValue(t.BaseTaskID), nullableString(t.BaseSHA),
-			t.Kind, t.Title, t.Objective, t.State, t.Version, t.Priority, nullableString(t.WorkerAgent),
+			t.Kind, t.Title, t.Objective, criteria, t.State, t.Version, t.Priority, nullableString(t.WorkerAgent),
 			t.DeliveryMode, t.CurrentAttempt, formatTime(now), formatTime(now)); err != nil {
 			return domain.Task{}, fmt.Errorf("insert task: %w", err)
 		}
@@ -331,7 +349,8 @@ func (s *Store) Task(ctx context.Context, taskID domain.TaskID) (domain.Task, er
 
 func (s *Store) Attempt(ctx context.Context, taskID domain.TaskID, attempt int) (domain.TaskAttempt, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT task_id, attempt, base_sha, head_sha, branch, worktree_path,
-		treehouse_lease_id, treehouse_lease_holder, worker_session_id, created_at, started_at, completed_at
+		treehouse_lease_id, treehouse_lease_holder, worker_session_id, result_path, result_sha256,
+		result_json, created_at, started_at, completed_at
 		FROM task_attempts WHERE task_id = ? AND attempt = ?`, taskID, attempt)
 	return scanAttempt(row)
 }
@@ -344,7 +363,7 @@ type taskQuerier interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-const taskSelect = `SELECT id, mission_id, parent_task_id, base_task_id, base_sha, kind, title, objective,
+const taskSelect = `SELECT id, mission_id, parent_task_id, base_task_id, base_sha, kind, title, objective, acceptance_criteria_json,
 	state, version, priority, worker_agent, delivery_mode, current_attempt, created_at, updated_at, completed_at
 	FROM tasks WHERE id = ?`
 
@@ -359,8 +378,9 @@ func getTaskQuery(ctx context.Context, q taskQuerier, taskID domain.TaskID) (dom
 func scanTask(row rowScanner) (domain.Task, error) {
 	var t domain.Task
 	var parent, baseTask, baseSHA, worker, created, updated, completed sql.NullString
+	var criteria []byte
 	if err := row.Scan(&t.ID, &t.MissionID, &parent, &baseTask, &baseSHA, &t.Kind, &t.Title, &t.Objective,
-		&t.State, &t.Version, &t.Priority, &worker, &t.DeliveryMode, &t.CurrentAttempt,
+		&criteria, &t.State, &t.Version, &t.Priority, &worker, &t.DeliveryMode, &t.CurrentAttempt,
 		&created, &updated, &completed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Task{}, ErrNotFound
@@ -377,6 +397,9 @@ func scanTask(row rowScanner) (domain.Task, error) {
 	}
 	t.BaseSHA = baseSHA.String
 	t.WorkerAgent = worker.String
+	if err := json.Unmarshal(criteria, &t.AcceptanceCriteria); err != nil {
+		return domain.Task{}, fmt.Errorf("decode task acceptance criteria: %w", err)
+	}
 	var err error
 	t.CreatedAt, err = parseTime(created.String)
 	if err == nil {
@@ -393,9 +416,11 @@ func scanTask(row rowScanner) (domain.Task, error) {
 
 func scanAttempt(row rowScanner) (domain.TaskAttempt, error) {
 	var a domain.TaskAttempt
-	var baseSHA, headSHA, branch, worktree, leaseID, leaseHolder, worker, created, started, completed sql.NullString
+	var baseSHA, headSHA, branch, worktree, leaseID, leaseHolder, worker, resultPath, resultSHA, resultJSON sql.NullString
+	var created, started, completed sql.NullString
 	if err := row.Scan(&a.TaskID, &a.Attempt, &baseSHA, &headSHA, &branch, &worktree,
-		&leaseID, &leaseHolder, &worker, &created, &started, &completed); err != nil {
+		&leaseID, &leaseHolder, &worker, &resultPath, &resultSHA, &resultJSON,
+		&created, &started, &completed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.TaskAttempt{}, ErrNotFound
 		}
@@ -404,6 +429,14 @@ func scanAttempt(row rowScanner) (domain.TaskAttempt, error) {
 	a.BaseSHA, a.HeadSHA, a.Branch, a.WorktreePath = baseSHA.String, headSHA.String, branch.String, worktree.String
 	a.TreehouseLeaseID, a.TreehouseLeaseHolder = leaseID.String, leaseHolder.String
 	a.WorkerSessionID = domain.SessionID(worker.String)
+	a.ResultPath, a.ResultSHA256 = resultPath.String, resultSHA.String
+	if resultJSON.Valid {
+		var result domain.WorkerResult
+		if err := json.Unmarshal([]byte(resultJSON.String), &result); err != nil {
+			return domain.TaskAttempt{}, fmt.Errorf("decode worker result: %w", err)
+		}
+		a.Result = &result
+	}
 	var err error
 	a.CreatedAt, err = parseTime(created.String)
 	if err == nil && started.Valid {

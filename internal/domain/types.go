@@ -118,38 +118,81 @@ const (
 )
 
 type Task struct {
-	ID             TaskID       `json:"id"`
-	MissionID      MissionID    `json:"mission_id"`
-	ParentTaskID   *TaskID      `json:"parent_task_id,omitempty"`
-	BaseTaskID     *TaskID      `json:"base_task_id,omitempty"`
-	BaseSHA        string       `json:"base_sha,omitempty"`
-	Kind           TaskKind     `json:"kind"`
-	Title          string       `json:"title"`
-	Objective      string       `json:"objective"`
-	State          TaskState    `json:"state"`
-	Version        int64        `json:"version"`
-	Priority       int          `json:"priority"`
-	WorkerAgent    string       `json:"worker_agent,omitempty"`
-	DeliveryMode   DeliveryMode `json:"delivery_mode"`
-	CurrentAttempt int          `json:"current_attempt"`
-	CreatedAt      time.Time    `json:"created_at"`
-	UpdatedAt      time.Time    `json:"updated_at"`
-	CompletedAt    *time.Time   `json:"completed_at,omitempty"`
+	ID                 TaskID       `json:"id"`
+	MissionID          MissionID    `json:"mission_id"`
+	ParentTaskID       *TaskID      `json:"parent_task_id,omitempty"`
+	BaseTaskID         *TaskID      `json:"base_task_id,omitempty"`
+	BaseSHA            string       `json:"base_sha,omitempty"`
+	Kind               TaskKind     `json:"kind"`
+	Title              string       `json:"title"`
+	Objective          string       `json:"objective"`
+	AcceptanceCriteria []Criterion  `json:"acceptance_criteria"`
+	State              TaskState    `json:"state"`
+	Version            int64        `json:"version"`
+	Priority           int          `json:"priority"`
+	WorkerAgent        string       `json:"worker_agent,omitempty"`
+	DeliveryMode       DeliveryMode `json:"delivery_mode"`
+	CurrentAttempt     int          `json:"current_attempt"`
+	CreatedAt          time.Time    `json:"created_at"`
+	UpdatedAt          time.Time    `json:"updated_at"`
+	CompletedAt        *time.Time   `json:"completed_at,omitempty"`
+}
+
+type WorkerSessionState string
+
+const (
+	WorkerSessionStarting WorkerSessionState = "starting"
+	WorkerSessionRunning  WorkerSessionState = "running"
+	WorkerSessionIdle     WorkerSessionState = "idle"
+	WorkerSessionLost     WorkerSessionState = "lost"
+)
+
+// WorkerSession records durable Herdr placement. PaneID is the operational
+// identity; workspace and tab IDs are retained only for observation and UI.
+type WorkerSession struct {
+	ID               SessionID          `json:"id"`
+	TaskID           TaskID             `json:"task_id"`
+	Attempt          int                `json:"attempt"`
+	Runtime          string             `json:"runtime"`
+	State            WorkerSessionState `json:"state"`
+	HerdrSessionName string             `json:"herdr_session_name"`
+	HerdrWorkspaceID string             `json:"herdr_workspace_id"`
+	HerdrTabID       string             `json:"herdr_tab_id"`
+	HerdrPaneID      string             `json:"herdr_pane_id"`
+	CreatedAt        time.Time          `json:"created_at"`
+	UpdatedAt        time.Time          `json:"updated_at"`
+}
+
+type VerificationResult struct {
+	Command  string `json:"command"`
+	ExitCode int    `json:"exit_code"`
+}
+
+type WorkerResult struct {
+	Version      int                  `json:"version"`
+	Status       string               `json:"status"`
+	Summary      string               `json:"summary"`
+	Verification []VerificationResult `json:"verification"`
+	ChangedFiles []string             `json:"changed_files"`
+	Risks        []string             `json:"risks"`
 }
 
 type TaskAttempt struct {
-	TaskID               TaskID     `json:"task_id"`
-	Attempt              int        `json:"attempt"`
-	BaseSHA              string     `json:"base_sha,omitempty"`
-	HeadSHA              string     `json:"head_sha,omitempty"`
-	Branch               string     `json:"branch,omitempty"`
-	WorktreePath         string     `json:"worktree_path,omitempty"`
-	TreehouseLeaseID     string     `json:"treehouse_lease_id,omitempty"`
-	TreehouseLeaseHolder string     `json:"treehouse_lease_holder,omitempty"`
-	WorkerSessionID      SessionID  `json:"worker_session_id,omitempty"`
-	CreatedAt            time.Time  `json:"created_at"`
-	StartedAt            *time.Time `json:"started_at,omitempty"`
-	CompletedAt          *time.Time `json:"completed_at,omitempty"`
+	TaskID               TaskID        `json:"task_id"`
+	Attempt              int           `json:"attempt"`
+	BaseSHA              string        `json:"base_sha,omitempty"`
+	HeadSHA              string        `json:"head_sha,omitempty"`
+	Branch               string        `json:"branch,omitempty"`
+	WorktreePath         string        `json:"worktree_path,omitempty"`
+	TreehouseLeaseID     string        `json:"treehouse_lease_id,omitempty"`
+	TreehouseLeaseHolder string        `json:"treehouse_lease_holder,omitempty"`
+	WorkerSessionID      SessionID     `json:"worker_session_id,omitempty"`
+	ResultPath           string        `json:"result_path,omitempty"`
+	ResultSHA256         string        `json:"result_sha256,omitempty"`
+	Result               *WorkerResult `json:"result,omitempty"`
+	CreatedAt            time.Time     `json:"created_at"`
+	StartedAt            *time.Time    `json:"started_at,omitempty"`
+	CompletedAt          *time.Time    `json:"completed_at,omitempty"`
 }
 
 type Event struct {

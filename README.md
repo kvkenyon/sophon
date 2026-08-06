@@ -21,3 +21,16 @@ The full product and engineering specification lives at [docs/parallel-intellect
 ## Repository layout
 
 See spec section 60. Implementation follows the milestone order in spec section 61.
+
+## Milestone 3 vertical slice
+
+The first executable path is CLI-driven:
+
+```bash
+pintellect mission create --project /path/to/project --title "Mission" --objective "Goal"
+pintellect task create MSN_ID --title "Task" --objective "Change" --acceptance "Criterion"
+pintellect task start TSK_ID --herdr-session NAME
+pintellect worker complete TSK_ID --attempt 1 --head-sha SHA --result ~/.parallel-intellect/tasks/TSK_ID/1/result.json
+```
+
+`task start` acquires a Treehouse lease, writes the generated brief, and launches Codex through Herdr. Completion reaches `ready` only after current-attempt, live-lease, Git ancestry/head/cleanliness, and strict result-schema verification.

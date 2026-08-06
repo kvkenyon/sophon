@@ -6,6 +6,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Use `commander` for the coordinator-agent role in code, schema, CLI, events, and logs; `operator` remains the human role and `prime` remains a runtime name.
 - Task lifecycle policy is authoritative in `internal/task/state_machine.go`; SQLite writes must go through the command-idempotent CAS operations in `internal/db` so projection changes and events commit atomically.
 - The installed Treehouse lease JSON supplies path and lease identity but not Git metadata; `internal/treehouse` derives branch/base SHA through `internal/git` and all returns must retain both conditional lease guards.
+- The M3 one-Codex slice is owned by `internal/worker`; Herdr commands stay behind `internal/herdr.Adapter`, pane ID is runtime identity, and completion accepts only the attempt-scoped `~/.parallel-intellect/tasks/<task>/<attempt>/result.json` after live lease and Git verification.
 - Add schema changes as numbered, forward-only files in `migrations/`; run `go test ./...` and `go build ./...` before delivery.
 
 ## Maintaining this file
