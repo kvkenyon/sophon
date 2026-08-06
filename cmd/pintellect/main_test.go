@@ -12,9 +12,65 @@ import (
 	"testing"
 	"time"
 
+	"parallel-intellect/internal/db"
 	"parallel-intellect/internal/domain"
+	"parallel-intellect/internal/signals"
 	"parallel-intellect/internal/worker"
 )
+
+func TestCLISignalListInspectAndResolveJSON(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID, err := store.CreateProject(ctx, "cmd_cli_signal_project", db.CreateProjectInput{
+		Name: "signals", Path: filepath.Join(t.TempDir(), "signals"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mission, err := store.CreateMission(ctx, "cmd_cli_signal_mission", db.CreateMissionInput{
+		ProjectID: projectID, Title: "Signals", Objective: "Exercise signal CLI",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := store.CreateSignal(ctx, "cmd_cli_signal_create", db.CreateSignalInput{
+		MissionID: mission.ID, Kind: signals.SignalDecision,
+		Question: "Which path?", Actor: "commander",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var listed []signals.Signal
+	if err := json.Unmarshal(runCLI(t, "signal", "list", "--db", dbPath, "--json"), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ID != created.ID {
+		t.Fatalf("listed signals = %+v", listed)
+	}
+	var inspected signals.Signal
+	if err := json.Unmarshal(runCLI(t, "signal", "inspect", string(created.ID), "--db", dbPath, "--json"), &inspected); err != nil {
+		t.Fatal(err)
+	}
+	if inspected.Question != created.Question {
+		t.Fatalf("inspected signal = %+v", inspected)
+	}
+	var resolved signals.Signal
+	if err := json.Unmarshal(runCLI(t, "signal", "resolve", string(created.ID), "--db", dbPath,
+		"--answer", "Take the strict path.", "--json"), &resolved); err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Status != signals.SignalResolved || resolved.Answer == nil || *resolved.Answer != "Take the strict path." {
+		t.Fatalf("resolved signal = %+v", resolved)
+	}
+}
 
 func TestCLIOneCodexWorkerVerticalSliceWithHermeticAdapters(t *testing.T) {
 	root := t.TempDir()

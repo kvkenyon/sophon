@@ -211,6 +211,17 @@ func (s *Store) TransitionTask(ctx context.Context, commandID domain.CommandID, 
 		if err := taskpolicy.ValidateTransition(candidate, in.To); err != nil {
 			return domain.Task{}, err
 		}
+		if current.State == domain.TaskQueued && current.Version == in.ExpectedVersion &&
+			current.CurrentAttempt == in.Attempt && in.ExpectedState == domain.TaskQueued &&
+			in.To == domain.TaskProvisioning {
+			openSignals, err := openSignalDependenciesTx(ctx, tx, in.TaskID)
+			if err != nil {
+				return domain.Task{}, err
+			}
+			if len(openSignals) != 0 {
+				return domain.Task{}, &OpenSignalDependenciesError{SignalIDs: openSignals}
+			}
+		}
 
 		now := time.Now().UTC()
 		var completed any

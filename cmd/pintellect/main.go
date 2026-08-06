@@ -46,6 +46,8 @@ func run(ctx context.Context, args []string) error {
 		return task(ctx, args[1:])
 	case "worker":
 		return workerCommand(ctx, args[1:])
+	case "signal":
+		return signalCommand(ctx, args[1:])
 	case "commander":
 		return commander(args[1:])
 	default:
@@ -347,5 +349,9 @@ func usage() {
   pintellect task start TASK [--herdr-session NAME] [--db PATH]
   pintellect worker complete TASK --attempt N --head-sha SHA --result FILE [--db PATH]
   pintellect task|mission timeline ID [--db PATH] [--json]
+  pintellect signal list [--mission ID] [--status STATUS] [--db PATH] [--json]
+  pintellect signal inspect <id> [--db PATH] [--json]
+  pintellect signal resolve <id> --answer ANSWER [--command-id ID] [--db PATH] [--json]
+  pintellect commander start|attach|status
   pintellect version`)
 }
