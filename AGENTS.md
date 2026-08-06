@@ -2,8 +2,10 @@
 
 This file is the project's committed home for project-intrinsic agent knowledge: build, test, release, architecture, and sharp-edge notes that should travel with the code.
 
-- Add durable project-specific notes here as they are discovered through real work.
 - The vendored FirstMate behavioral baseline is under `prompts/upstream/firstmate/`; its pinned provenance is `VERSION`, and `docs/rule-classification.md` is the authoritative V1 adaptation map.
+- Use `commander` for the coordinator-agent role in code, schema, CLI, events, and logs; `operator` remains the human role and `prime` remains a runtime name.
+- Task lifecycle policy is authoritative in `internal/task/state_machine.go`; SQLite writes must go through the command-idempotent CAS operations in `internal/db` so projection changes and events commit atomically.
+- Add schema changes as numbered, forward-only files in `migrations/`; run `go test ./...` and `go build ./...` before delivery.
 
 ## Maintaining this file
 
