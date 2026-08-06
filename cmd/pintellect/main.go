@@ -59,7 +59,7 @@ func run(ctx context.Context, args []string) error {
 
 func initialize(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("init", flag.ContinueOnError)
-	path := flags.String("db", "parallel-intellect.db", "SQLite database path")
+	path := flags.String("db", "", "SQLite database path")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -84,7 +84,7 @@ func mission(ctx context.Context, args []string) error {
 
 func missionCreate(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("mission create", flag.ContinueOnError)
-	dbPath := flags.String("db", "parallel-intellect.db", "SQLite database path")
+	dbPath := flags.String("db", "", "SQLite database path")
 	projectPath := flags.String("project", "", "registered project path")
 	projectName := flags.String("project-name", "", "registered project name")
 	title := flags.String("title", "", "mission title")
@@ -154,7 +154,7 @@ func task(ctx context.Context, args []string) error {
 
 func taskCreate(ctx context.Context, missionID domain.MissionID, args []string) error {
 	flags := flag.NewFlagSet("task create", flag.ContinueOnError)
-	dbPath := flags.String("db", "parallel-intellect.db", "SQLite database path")
+	dbPath := flags.String("db", "", "SQLite database path")
 	title := flags.String("title", "", "task title")
 	objective := flags.String("objective", "", "task objective")
 	delivery := flags.String("delivery", string(domain.DeliveryBranch), "delivery mode")
@@ -193,7 +193,7 @@ func taskCreate(ctx context.Context, missionID domain.MissionID, args []string) 
 
 func taskStart(ctx context.Context, taskID domain.TaskID, args []string) error {
 	flags := flag.NewFlagSet("task start", flag.ContinueOnError)
-	dbPath := flags.String("db", "parallel-intellect.db", "SQLite database path")
+	dbPath := flags.String("db", "", "SQLite database path")
 	treehouseBinary := flags.String("treehouse", "treehouse", "Treehouse CLI binary")
 	herdrBinary := flags.String("herdr", "herdr", "Herdr CLI binary")
 	herdrSession := flags.String("herdr-session", "default", "explicit Herdr session name")
@@ -227,7 +227,7 @@ func taskStart(ctx context.Context, taskID domain.TaskID, args []string) error {
 
 func taskValidate(ctx context.Context, taskID domain.TaskID, args []string) error {
 	flags := flag.NewFlagSet("task validate", flag.ContinueOnError)
-	dbPath := flags.String("db", "parallel-intellect.db", "SQLite database path")
+	dbPath := flags.String("db", "", "SQLite database path")
 	gitBinary := flags.String("git", "git", "Git binary")
 	validatorVersion := flags.String("validator-version", "command-v1", "version of the command validator")
 	var unitTests, typechecks, lints, projectValidations stringList
@@ -304,7 +304,7 @@ func workerCommand(ctx context.Context, args []string) error {
 
 func workerComplete(ctx context.Context, taskID domain.TaskID, args []string) error {
 	flags := flag.NewFlagSet("worker complete", flag.ContinueOnError)
-	dbPath := flags.String("db", "parallel-intellect.db", "SQLite database path")
+	dbPath := flags.String("db", "", "SQLite database path")
 	treehouseBinary := flags.String("treehouse", "treehouse", "Treehouse CLI binary")
 	taskFiles := flags.String("task-files", "", "task artifact base directory")
 	attempt := flags.Int("attempt", 0, "task attempt")
@@ -346,7 +346,7 @@ func commander(args []string) error {
 
 func timeline(ctx context.Context, kind, rawID string, args []string) error {
 	flags := flag.NewFlagSet("timeline", flag.ContinueOnError)
-	path := flags.String("db", "parallel-intellect.db", "SQLite database path")
+	path := flags.String("db", "", "SQLite database path")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if err := flags.Parse(args); err != nil {
 		return err

@@ -19,7 +19,7 @@ func signalCommand(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "list":
 		flags := flag.NewFlagSet("signal list", flag.ContinueOnError)
-		path := flags.String("db", "parallel-intellect.db", "SQLite database path")
+		path := flags.String("db", "", "SQLite database path")
 		jsonOutput := flags.Bool("json", false, "emit JSON")
 		missionID := flags.String("mission", "", "filter by mission ID")
 		status := flags.String("status", "", "filter by signal status")
@@ -52,7 +52,7 @@ func signalCommand(ctx context.Context, args []string) error {
 			return errors.New("expected: pintellect signal inspect <id> [--db PATH] [--json]")
 		}
 		flags := flag.NewFlagSet("signal inspect", flag.ContinueOnError)
-		path := flags.String("db", "parallel-intellect.db", "SQLite database path")
+		path := flags.String("db", "", "SQLite database path")
 		jsonOutput := flags.Bool("json", false, "emit JSON")
 		if err := flags.Parse(args[2:]); err != nil {
 			return err
@@ -88,7 +88,7 @@ func signalCommand(ctx context.Context, args []string) error {
 			return errors.New("expected: pintellect signal resolve <id> --answer ANSWER [--db PATH] [--json]")
 		}
 		flags := flag.NewFlagSet("signal resolve", flag.ContinueOnError)
-		path := flags.String("db", "parallel-intellect.db", "SQLite database path")
+		path := flags.String("db", "", "SQLite database path")
 		jsonOutput := flags.Bool("json", false, "emit JSON")
 		answer := flags.String("answer", "", "operator answer")
 		commandID := flags.String("command-id", "", "idempotency key")

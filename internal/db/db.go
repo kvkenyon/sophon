@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/url"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -25,6 +26,18 @@ type Store struct {
 // Open opens a SQLite database, enables reliability pragmas, and applies all
 // embedded forward-only migrations. The path may be ":memory:" for tests.
 func Open(ctx context.Context, path string) (*Store, error) {
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("resolve control-plane home: %w", err)
+		}
+		path = filepath.Join(home, ".parallel-intellect", "pintellect.db")
+	}
+	if path != ":memory:" {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return nil, fmt.Errorf("create database directory: %w", err)
+		}
+	}
 	dsn := sqliteDSN(path)
 	database, err := sql.Open("sqlite", dsn)
 	if err != nil {

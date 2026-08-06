@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	path := flag.String("db", "parallel-intellect.db", "SQLite database path")
+	path := flag.String("db", "", "SQLite database path")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
