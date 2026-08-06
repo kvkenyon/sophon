@@ -14,6 +14,34 @@ type (
 	CommandID string
 )
 
+type TreehouseLeaseState string
+
+const (
+	TreehouseLeaseActive   TreehouseLeaseState = "active"
+	TreehouseLeaseReleased TreehouseLeaseState = "released"
+	TreehouseLeaseFenced   TreehouseLeaseState = "fenced"
+	TreehouseLeaseMissing  TreehouseLeaseState = "missing"
+)
+
+// TreehouseLease is the durable identity binding one task attempt to one
+// Treehouse worktree. ProjectPath is runtime-only routing metadata loaded from
+// the registered project; it is intentionally excluded from persisted command
+// results and events.
+type TreehouseLease struct {
+	LeaseID      string              `json:"lease_id"`
+	TaskID       TaskID              `json:"task_id"`
+	Attempt      int                 `json:"attempt"`
+	LeaseHolder  string              `json:"lease_holder"`
+	WorktreePath string              `json:"worktree_path"`
+	Project      string              `json:"project"`
+	ProjectPath  string              `json:"-"`
+	Branch       string              `json:"branch"`
+	BaseSHA      string              `json:"base_sha"`
+	State        TreehouseLeaseState `json:"state"`
+	AcquiredAt   time.Time           `json:"acquired_at"`
+	ReleasedAt   *time.Time          `json:"released_at,omitempty"`
+}
+
 type Criterion struct {
 	Description string `json:"description"`
 }

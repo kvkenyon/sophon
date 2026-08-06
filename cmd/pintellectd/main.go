@@ -10,6 +10,8 @@ import (
 	"syscall"
 
 	"parallel-intellect/internal/db"
+	gitcontrol "parallel-intellect/internal/git"
+	"parallel-intellect/internal/treehouse"
 )
 
 func main() {
@@ -24,7 +26,13 @@ func main() {
 	}
 	defer store.Close()
 
-	log.Printf("pintellectd initialized database %s; scheduler integrations are not enabled in milestone 1", *path)
+	leaseService := treehouse.NewService(store, treehouse.NewCommandClient("treehouse"), gitcontrol.NewClient())
+	reconciled, err := leaseService.Reconcile(ctx)
+	if err != nil {
+		log.Fatal(fmt.Errorf("reconcile Treehouse leases: %w", err))
+	}
+	log.Printf("pintellectd initialized database %s; Treehouse leases valid=%d fenced=%d missing=%d",
+		*path, reconciled.Valid, reconciled.Fenced, reconciled.Missing)
 	<-ctx.Done()
 	log.Print("pintellectd stopped")
 }

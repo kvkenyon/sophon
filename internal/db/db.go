@@ -111,6 +111,9 @@ var (
 	ErrCommandConflict  = errors.New("command id reused with different request")
 	ErrAttemptBudget    = errors.New("mission task-attempt budget exhausted")
 	ErrTaskNotRetryable = errors.New("task is not retryable")
+	ErrStaleAttempt     = errors.New("task attempt is not current")
+	ErrLeaseExists      = errors.New("task attempt already has a Treehouse lease")
+	ErrLeaseConflict    = errors.New("Treehouse lease identity or state changed")
 )
 
 // ConflictError is returned after a failed conditional update. Current is the
