@@ -1,7 +1,7 @@
 # FirstMate rule classification
 
 This is the Milestone 0 classification of the imported baseline at [`prompts/upstream/firstmate/`](../prompts/upstream/firstmate/).
-“Both” means the control plane must reject or prevent an invalid state and the derived captain/worker prompt must explain the corresponding operating policy.
+“Both” means the control plane must reject or prevent an invalid state and the derived commander/worker prompt must explain the corresponding operating policy.
 Mechanism names in the vendored text (`fm-*` scripts, `FM_HOME`, tmux, files, watcher hooks, and no-mistakes subcommands) are not V1 mechanisms.
 For each such rule, the classification below applies to its behavioral constraint, not to copying its shell implementation.
 
@@ -77,7 +77,7 @@ For each such rule, the classification below applies to its behavioral constrain
 ## Implementation priority
 
 The “Both” and “deterministic” portions become Go control-plane invariants in later milestones: task/attempt fencing, legal transitions, lease and worktree ownership, task-to-worker communication boundaries, signal creation/resolution, validation ownership, delivery approval, and teardown protection.
-The behavioral portions remain in derived captain and worker prompts: task decomposition, diagnostic judgment, authority interpretation, escalation composition, evidence summaries, and concise status presentation.
+The behavioral portions remain in derived commander and worker prompts: task decomposition, diagnostic judgment, authority interpretation, escalation composition, evidence summaries, and concise status presentation.
 
 No vendored prompt is edited to apply this classification.
 Derived prompts must cite this document and the unchanged upstream source they adapt.

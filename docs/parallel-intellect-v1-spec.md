@@ -3,8 +3,8 @@
 
 **Status:** Build specification  
 **Product:** Parallel Intellect  
-**Primary captain:** Prime Agent  
-**Alternative captains:** Pi, Claude Code, Codex  
+**Primary commander:** Prime Agent<br>
+**Alternative commanders:** Pi, Claude Code, Codex<br>
 **Workers:** Pi, Claude Code, Codex  
 **Terminal runtime:** Herdr  
 **Worktree runtime:** Treehouse  
@@ -18,9 +18,9 @@
 
 Parallel Intellect is a local control plane for autonomous software engineering.
 
-A human interacts with one persistent **captain agent**. The captain understands objectives, decomposes work, delegates tasks to specialized workers, monitors progress, responds to findings, and synthesizes results.
+A human interacts with one persistent **commander agent**. The commander understands objectives, decomposes work, delegates tasks to specialized workers, monitors progress, responds to findings, and synthesizes results.
 
-Parallel Intellect sits underneath the captain and makes multi-agent work reliable.
+Parallel Intellect sits underneath the commander and makes multi-agent work reliable.
 
 It owns:
 
@@ -58,7 +58,7 @@ The desired user experience is:
 ```text
 Human
   ↓
-Captain
+Commander
   ↓
 "Fix this bug, investigate that slowdown,
 and clean up these tests."
@@ -117,11 +117,11 @@ FirstMate already contains a large behavioral contract and modular skills around
 
 ## Prime Agent
 
-Prime Agent is the recommended captain because its architecture is designed for persistent long-running work.
+Prime Agent is the recommended commander because its architecture is designed for persistent long-running work.
 
 Useful concepts adopted by Parallel Intellect include:
 
-- persistent captain sessions;
+- persistent commander sessions;
 - programmatic orchestration;
 - persistent goals;
 - recursive cognitive subagents;
@@ -187,7 +187,7 @@ More concretely:
 Human
   │
   ▼
-Captain
+Commander
 Prime Agent / Pi / Claude / Codex
   │
   ▼
@@ -218,7 +218,7 @@ Use straightforward terminology.
 | Term | Definition |
 |---|---|
 | **Operator** | Human user |
-| **Captain** | Main coordinating agent |
+| **Commander** | Main coordinating agent |
 | **Mission** | High-level operator objective |
 | **Task** | One independently schedulable unit of work |
 | **Worker** | Agent assigned to a task |
@@ -238,9 +238,9 @@ Do not expose elaborate role-playing terminology throughout the product.
 Version 1 supports:
 
 - local single-user operation;
-- one persistent captain;
-- Prime Agent as first-class captain;
-- Pi, Claude Code, Codex as alternative captains;
+- one persistent commander;
+- Prime Agent as first-class commander;
+- Pi, Claude Code, Codex as alternative commanders;
 - Pi, Claude Code, Codex workers;
 - multiple projects;
 - multiple missions;
@@ -352,7 +352,7 @@ A mission contains:
 type Mission struct {
     ID                 MissionID
     ProjectID          ProjectID
-    CaptainSessionID   SessionID
+    CommanderSessionID SessionID
 
     Title              string
     Objective          string
@@ -387,9 +387,9 @@ type MissionBudget struct {
 
 # 10. Mission completion
 
-The captain may recommend that a mission is complete.
+The commander may recommend that a mission is complete.
 
-The captain does not authoritatively complete it.
+The commander does not authoritatively complete it.
 
 Mission completion requires:
 
@@ -413,7 +413,7 @@ completing
 completed
 ```
 
-The captain produces a final semantic summary after deterministic completion eligibility has been established.
+The commander produces a final semantic summary after deterministic completion eligibility has been established.
 
 ---
 
@@ -710,7 +710,7 @@ Recommended layout:
 
 ```text
 Parallel Intellect
-├── Captain
+├── Commander
 │   └── Prime Agent
 │
 ├── hifive
@@ -730,7 +730,7 @@ They are not identity.
 
 ---
 
-# 18. Captain runtimes
+# 18. Commander runtimes
 
 Supported:
 
@@ -753,14 +753,14 @@ Prime's RPC interface supports commands, event streaming, steering, follow-ups, 
 
 ---
 
-# 19. Prime captain architecture
+# 19. Prime commander architecture
 
 Launch:
 
 ```bash
 prime-agent \
   --mode rpc \
-  --session-dir ~/.parallel-intellect/captains/<id>
+  --session-dir ~/.parallel-intellect/commanders/<id>
 ```
 
 Parallel Intellect maintains an RPC client.
@@ -768,17 +768,17 @@ Parallel Intellect maintains an RPC client.
 Conceptual interface:
 
 ```go
-type Captain interface {
-    Start(context.Context, CaptainConfig) (*Session, error)
+type Commander interface {
+    Start(context.Context, CommanderConfig) (*Session, error)
 
     Prompt(context.Context, SessionID, Message) error
     Steer(context.Context, SessionID, Message) error
     FollowUp(context.Context, SessionID, Message) error
 
-    State(context.Context, SessionID) (CaptainState, error)
+    State(context.Context, SessionID) (CommanderState, error)
     Abort(context.Context, SessionID) error
 
-    Events(context.Context, SessionID) (<-chan CaptainEvent, error)
+    Events(context.Context, SessionID) (<-chan CommanderEvent, error)
 }
 ```
 
@@ -882,9 +882,9 @@ Repository-changing work always becomes a Parallel Intellect task.
 
 ---
 
-# 22. Programmatic captain philosophy
+# 22. Programmatic commander philosophy
 
-The captain should operate on structured state rather than repeatedly interpreting prose.
+The commander should operate on structured state rather than repeatedly interpreting prose.
 
 Good:
 
@@ -903,7 +903,7 @@ Bad:
 Read five terminal windows and infer which one is blocked.
 ```
 
-Prime's persistent Python environment makes this especially powerful because the captain may calculate over structured mission state while keeping model context small. 
+Prime's persistent Python environment makes this especially powerful because the commander may calculate over structured mission state while keeping model context small.
 
 ---
 
@@ -921,7 +921,7 @@ prompts/
 │       ├── AGENTS.md
 │       └── skills/
 │
-├── captain/
+├── commander/
 ├── workers/
 └── skills/
 ```
@@ -944,7 +944,7 @@ Parallel Intellect:
 
 ```text
 human = operator
-coordinator = captain
+coordinator = commander
 executor = worker
 ```
 
@@ -953,7 +953,7 @@ Mapping:
 | FirstMate | Parallel Intellect |
 |---|---|
 | Captain | Operator |
-| FirstMate | Captain |
+| FirstMate | Commander |
 | Crewmate | Worker |
 | Fleet | Mission/workers |
 | Captain decision | Operator signal |
@@ -1055,7 +1055,7 @@ Enforce mechanically and explain behaviorally.
 
 Examples:
 
-- captain does not edit projects;
+- commander does not edit projects;
 - worker does not release worktree;
 - unresolved decisions become signals;
 - task completion must be structured;
@@ -1249,9 +1249,9 @@ This preserves the key behavior of FirstMate's durable decision lifecycle.
 
 Adapt FirstMate's authority rules.
 
-Captain may autonomously make implementation choices required to satisfy the already accepted contract.
+Commander may autonomously make implementation choices required to satisfy the already accepted contract.
 
-Captain must escalate when a choice:
+Commander must escalate when a choice:
 
 - materially expands product behavior;
 - adds a new guarantee;
@@ -1261,7 +1261,7 @@ Captain must escalate when a choice:
 - performs destructive action;
 - requires security-sensitive authority.
 
-A reviewer saying something is "required" does not itself expand captain authority.
+A reviewer saying something is "required" does not itself expand commander authority.
 
 FirstMate already encodes this useful distinction between satisfying accepted intent and expanding the contract. 
 
@@ -1352,7 +1352,7 @@ Do not spawn a fresh worker unless:
 
 - original session is unavailable;
 - task is explicitly retried;
-- captain intentionally requests another specialist.
+- commander intentionally requests another specialist.
 
 ---
 
@@ -1401,10 +1401,10 @@ max_restarts = 2
 max_fix_rounds = 5
 ```
 
-Captain:
+Commander:
 
 ```toml
-[captain.prime.autonomous]
+[commander.prime.autonomous]
 max_turns = 30
 max_duration = "45m"
 ```
@@ -1491,7 +1491,7 @@ Never rewrite historical events.
 
 # 39. Mission digest
 
-Raw history should not have to fit in captain context.
+Raw history should not have to fit in commander context.
 
 Each mission therefore has:
 
@@ -1632,7 +1632,7 @@ V1:
 
 ```text
 agent may propose
-operator/captain may promote where policy allows
+operator/commander may promote where policy allows
 ```
 
 No autonomous mutation of critical policy.
@@ -1663,12 +1663,12 @@ Agent self-improvement applies only above this deterministic boundary.
 
 Add messaging to the v1 data model.
 
-Initial production use may remain captain-mediated.
+Initial production use may remain commander-mediated.
 
 Schema should support:
 
 ```text
-captain ↔ worker
+commander ↔ worker
 worker ↔ sibling worker
 ```
 
@@ -1842,7 +1842,7 @@ Core tables:
 
 ```text
 projects
-captain_sessions
+commander_sessions
 missions
 tasks
 task_attempts
@@ -2029,12 +2029,12 @@ pintellect project list
 pintellect project inspect hifive
 ```
 
-Captain:
+Commander:
 
 ```bash
-pintellect captain start --agent prime
-pintellect captain attach
-pintellect captain status
+pintellect commander start --agent prime
+pintellect commander attach
+pintellect commander status
 ```
 
 Missions:
@@ -2081,7 +2081,7 @@ where applicable.
 
 # 53. FirstMate-derived commands
 
-Provide captain skills equivalent to:
+Provide commander skills equivalent to:
 
 ```text
 /status
@@ -2165,7 +2165,7 @@ Workers and Prime can execute local code under user permissions.
 Protections:
 
 - worktree isolation;
-- no captain repository mutation;
+- no commander repository mutation;
 - structured task scope;
 - deterministic delivery gates;
 - merge disabled;
@@ -2192,7 +2192,7 @@ V1 is not complete until these hold:
 8. Committed state survives daemon crashes.
 9. Active work is never silently destroyed.
 10. A missing worker is not silently replaced while its lease exists.
-11. Captain cannot directly mutate internal task state.
+11. Commander cannot directly mutate internal task state.
 12. Every significant state mutation is auditable.
 13. Every unresolved operator decision has durable identity.
 14. Agent self-improvement cannot weaken control-plane policy.
@@ -2322,7 +2322,7 @@ Never silent ambiguity.
 
 Periodic matrix:
 
-| Captain | Worker |
+| Commander | Worker |
 |---|---|
 | Prime | Pi |
 | Prime | Claude |
@@ -2350,7 +2350,7 @@ parallel-intellect/
 │   └── pintellectd/
 │
 ├── internal/
-│   ├── captain/
+│   ├── commander/
 │   │   ├── prime/
 │   │   ├── pi/
 │   │   ├── claude/
@@ -2374,7 +2374,7 @@ parallel-intellect/
 │   ├── upstream/
 │   │   └── firstmate/
 │   │
-│   ├── captain/
+│   ├── commander/
 │   ├── workers/
 │   └── skills/
 │
@@ -2498,7 +2498,7 @@ fix/wake loop
 
 ---
 
-## Milestone 7 — Prime captain
+## Milestone 7 — Prime commander
 
 Add:
 
@@ -2515,7 +2515,7 @@ cognitive subagents
 
 ---
 
-## Milestone 8 — FirstMate-derived captain skills
+## Milestone 8 — FirstMate-derived commander skills
 
 Port:
 
@@ -2601,7 +2601,7 @@ Operator says:
 
 > The invitation flow occasionally allows duplicate acceptance. Find the cause, fix it, have another agent review the change, and open a PR if it passes validation.
 
-Prime captain:
+Prime commander:
 
 1. creates a scout or implementation task;
 2. chooses Codex;
@@ -2611,7 +2611,7 @@ Prime captain:
 6. Codex commits;
 7. Codex sends structured completion;
 8. Parallel Intellect verifies SHA and lease;
-9. captain creates a review task for Claude;
+9. commander creates a review task for Claude;
 10. Claude identifies a missing concurrency test;
 11. Parallel Intellect wakes the original Codex worker;
 12. Codex adds the test;
