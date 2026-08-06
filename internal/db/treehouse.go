@@ -241,6 +241,41 @@ func (s *Store) MarkTreehouseLeaseReleased(ctx context.Context, commandID domain
 	})
 }
 
+// FenceTreehouseLeaseAfterReleaseFailure records an ambiguous conditional
+// return. The lease is never released by path alone and the task lifecycle is
+// intentionally left alone: cancellation is already terminal.
+func (s *Store) FenceTreehouseLeaseAfterReleaseFailure(ctx context.Context, commandID domain.CommandID, in ReleaseTreehouseLeaseInput, reason string) (domain.TreehouseLease, error) {
+	if in.TaskID == "" || in.Attempt < 1 || in.LeaseID == "" || in.LeaseHolder == "" || in.Actor == "" {
+		return domain.TreehouseLease{}, errors.New("task, attempt, lease identity, and actor are required")
+	}
+	return runCommand(ctx, s, commandID, "treehouse.lease.release_failure", struct {
+		ReleaseTreehouseLeaseInput
+		Reason string `json:"reason"`
+	}{in, reason}, func(tx *sql.Tx) (domain.TreehouseLease, error) {
+		result, err := tx.ExecContext(ctx, `UPDATE treehouse_leases SET state = ? WHERE task_id = ? AND attempt = ? AND lease_id = ? AND lease_holder = ? AND state = ?`,
+			domain.TreehouseLeaseFenced, in.TaskID, in.Attempt, in.LeaseID, in.LeaseHolder, domain.TreehouseLeaseActive)
+		if err != nil {
+			return domain.TreehouseLease{}, fmt.Errorf("fence failed release: %w", err)
+		}
+		if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+			return domain.TreehouseLease{}, ErrLeaseConflict
+		}
+		lease, err := scanTreehouseLease(tx.QueryRowContext(ctx, leaseSelectByID, in.LeaseID))
+		if err != nil {
+			return domain.TreehouseLease{}, err
+		}
+		var missionID domain.MissionID
+		if err := tx.QueryRowContext(ctx, "SELECT mission_id FROM tasks WHERE id = ?", in.TaskID).Scan(&missionID); err != nil {
+			return domain.TreehouseLease{}, fmt.Errorf("load lease mission: %w", err)
+		}
+		if err := appendEvent(ctx, tx, eventInput{MissionID: &missionID, TaskID: &in.TaskID, Actor: in.Actor, Type: "treehouse.lease_release_failed", CommandID: &commandID,
+			Payload: map[string]any{"attempt": in.Attempt, "lease_id": in.LeaseID, "lease_holder": in.LeaseHolder, "reason": reason}}); err != nil {
+			return domain.TreehouseLease{}, err
+		}
+		return lease, nil
+	})
+}
+
 type ReconcileTreehouseLeaseInput struct {
 	TaskID      domain.TaskID              `json:"task_id"`
 	Attempt     int                        `json:"attempt"`

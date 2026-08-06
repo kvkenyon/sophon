@@ -191,6 +191,49 @@ func TestRetryCreatesNewAttemptAndFencesOldAttempt(t *testing.T) {
 	}
 }
 
+func TestRetryFromEveryWedgeFencesOldCompletion(t *testing.T) {
+	states := []domain.TaskState{domain.TaskProvisioning, domain.TaskStarting, domain.TaskRunning, domain.TaskBlocked}
+	for _, target := range states {
+		t.Run(string(target), func(t *testing.T) {
+			ctx := context.Background()
+			store := openTestStore(t, filepath.Join(t.TempDir(), "state.db"))
+			defer store.Close()
+			current := createTestTask(t, store, domain.TaskImplementation, domain.DeliveryGate, 3)
+			for _, state := range []domain.TaskState{domain.TaskProvisioning, domain.TaskStarting, domain.TaskRunning, domain.TaskBlocked} {
+				var err error
+				current, err = store.TransitionTask(ctx, domain.CommandID("cmd_wedge_"+string(target)+"_"+string(state)), TransitionTaskInput{TaskID: current.ID, Attempt: 1, ExpectedState: current.State, ExpectedVersion: current.Version, To: state, Actor: "test"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if state == target {
+					break
+				}
+			}
+			retried, err := store.RetryTask(ctx, domain.CommandID("cmd_retry_"+string(target)), RetryTaskInput{TaskID: current.ID, ExpectedVersion: current.Version, Actor: "operator"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if retried.State != domain.TaskQueued || retried.CurrentAttempt != 2 {
+				t.Fatalf("retry=%+v", retried)
+			}
+			if _, err := store.CompleteWorkerTask(ctx, domain.CommandID("cmd_stale_complete_"+string(target)), CompleteWorkerTaskInput{TaskID: current.ID, Attempt: 1, ExpectedVersion: current.Version, LeaseID: "old", LeaseHolder: "old", HeadSHA: "head", ResultPath: "result", ResultSHA256: "sum", Actor: "worker"}); !errors.Is(err, ErrStaleAttempt) {
+				t.Fatalf("stale completion error=%v", err)
+			}
+			events, err := store.TaskEvents(ctx, current.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if events[len(events)-2].Type != "attempt.fenced" || events[len(events)-1].Type != "task.retry" {
+				t.Fatalf("retry events=%+v", events[len(events)-2:])
+			}
+			started, err := store.TransitionTask(ctx, domain.CommandID("cmd_restart_"+string(target)), TransitionTaskInput{TaskID: current.ID, Attempt: 2, ExpectedState: domain.TaskQueued, ExpectedVersion: retried.Version, To: domain.TaskProvisioning, Actor: "scheduler"})
+			if err != nil || started.State != domain.TaskProvisioning {
+				t.Fatalf("restart=%+v err=%v", started, err)
+			}
+		})
+	}
+}
+
 func TestEventsAreEmittedAndAppendOnly(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t, filepath.Join(t.TempDir(), "state.db"))

@@ -590,6 +590,12 @@ any nonterminal
   → cancelled
 ```
 
+Cancellation is terminal even when cleanup is imperfect. The control plane
+first records `cancelling` then `cancelled`; it conditionally returns the
+attempt's Treehouse lease by lease ID and holder, and fences/audits an
+ambiguous return. A live task-owned Herdr tab is then closed and its worker
+session recorded stopped; a missing or already-dead session is tolerated.
+
 ```text
 any nonterminal
   → failed

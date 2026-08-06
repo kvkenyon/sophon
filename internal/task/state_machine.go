@@ -101,10 +101,5 @@ func IsTerminal(state domain.TaskState) bool {
 }
 
 func IsRetryable(state domain.TaskState) bool {
-	switch state {
-	case domain.TaskFailed, domain.TaskCancelled, domain.TaskNeedsAttention:
-		return true
-	default:
-		return false
-	}
+	return !IsTerminal(state) || state == domain.TaskFailed || state == domain.TaskCancelled || state == domain.TaskNeedsAttention
 }

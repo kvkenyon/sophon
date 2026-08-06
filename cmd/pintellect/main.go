@@ -143,13 +143,75 @@ func task(ctx context.Context, args []string) error {
 	if len(args) >= 2 && args[0] == "start" {
 		return taskStart(ctx, domain.TaskID(args[1]), args[2:])
 	}
+	if len(args) >= 2 && args[0] == "retry" {
+		return taskRetry(ctx, domain.TaskID(args[1]), args[2:])
+	}
+	if len(args) >= 2 && args[0] == "cancel" {
+		return taskCancel(ctx, domain.TaskID(args[1]), args[2:])
+	}
 	if len(args) >= 2 && args[0] == "validate" {
 		return taskValidate(ctx, domain.TaskID(args[1]), args[2:])
 	}
 	if len(args) >= 2 && args[0] == "timeline" {
 		return timeline(ctx, "task", args[1], args[2:])
 	}
-	return errors.New("expected: pintellect task create MISSION|start TASK|validate TASK|timeline TASK")
+	return errors.New("expected: pintellect task create MISSION|start TASK|retry TASK|cancel TASK|validate TASK|timeline TASK")
+}
+
+func taskRetry(ctx context.Context, taskID domain.TaskID, args []string) error {
+	flags := flag.NewFlagSet("task retry", flag.ContinueOnError)
+	dbPath := flags.String("db", "", "SQLite database path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	store, err := openStore(ctx, *dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	current, err := store.Task(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	command, err := commandID()
+	if err != nil {
+		return err
+	}
+	retried, err := store.RetryTask(ctx, command, db.RetryTaskInput{TaskID: taskID, ExpectedVersion: current.Version, Actor: "operator"})
+	if err != nil {
+		return err
+	}
+	return encode(retried)
+}
+
+func taskCancel(ctx context.Context, taskID domain.TaskID, args []string) error {
+	flags := flag.NewFlagSet("task cancel", flag.ContinueOnError)
+	dbPath := flags.String("db", "", "SQLite database path")
+	treehouseBinary := flags.String("treehouse", "treehouse", "Treehouse CLI binary")
+	herdrBinary := flags.String("herdr", "herdr", "Herdr CLI binary")
+	herdrSession := flags.String("herdr-session", "default", "explicit Herdr session name")
+	herdrWorkspace := flags.String("herdr-workspace-label", "Parallel Intellect", "Herdr workspace presentation label")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*herdrSession) == "" {
+		return errors.New("task cancel requires an explicit --herdr-session")
+	}
+	store, err := openStore(ctx, *dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	command, err := commandID()
+	if err != nil {
+		return err
+	}
+	canceller := worker.Canceller{Store: store, Treehouse: treehouse.NewService(store, treehouse.NewCommandClient(*treehouseBinary), gitcontrol.NewClient()), Herdr: herdr.NewCommandAdapter(*herdrBinary, *herdrSession, *herdrWorkspace)}
+	cancelled, err := canceller.Cancel(ctx, taskID, command)
+	if err != nil {
+		return err
+	}
+	return encode(cancelled)
 }
 
 func taskCreate(ctx context.Context, missionID domain.MissionID, args []string) error {
@@ -421,6 +483,8 @@ func usage() {
   pintellect mission create --project PATH --title TITLE --objective OBJECTIVE [--acceptance TEXT]
   pintellect task create MISSION --title TITLE --objective OBJECTIVE [--acceptance TEXT]
   pintellect task start TASK [--herdr-session NAME] [--db PATH]
+	  pintellect task retry TASK [--db PATH]
+	  pintellect task cancel TASK [--herdr-session NAME] [--db PATH]
   pintellect task validate TASK --unit-test COMMAND [--typecheck COMMAND] [--lint COMMAND] [--project-validation COMMAND]
   pintellect worker complete TASK --attempt N --head-sha SHA --result FILE [--db PATH]
   pintellect task|mission timeline ID [--db PATH] [--json]

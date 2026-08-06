@@ -8,6 +8,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - The installed Treehouse lease JSON supplies path and lease identity but not Git metadata; `internal/treehouse` derives branch/base SHA through `internal/git` and all returns must retain both conditional lease guards.
 - The one-Codex slice is owned by `internal/worker`; Herdr commands stay behind `internal/herdr.Adapter`, pane ID is the current runtime placement, and completion accepts only the attempt-scoped `~/.parallel-intellect/tasks/<task>/<attempt>/result.json` after live lease and Git verification.
 - Worker-session lifecycle policy is separate from task lifecycle in `internal/workersession`; idle never means done. Herdr liveness comes from agent registration, restart husks are replaced create-before-close by resuming the persisted Codex session in a new pane, and structurally missing panes reconcile to `lost` plus task `needs_attention`.
+- Task recovery is implemented by `internal/db` and `internal/worker/cancel.go`: retry fences the old attempt before creating the next queued attempt; cancellation is terminal before best-effort conditional lease return and worker-tab cleanup.
 - Add schema changes as numbered, forward-only files in `migrations/`; run `go test ./...` and `go build ./...` before delivery.
 
 ## Maintaining this file

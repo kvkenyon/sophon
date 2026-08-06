@@ -334,6 +334,13 @@ func (s *Store) RetryTask(ctx context.Context, commandID domain.CommandID, in Re
 			WHERE task_id = ? AND attempt = ?`, formatTime(now), in.TaskID, current.CurrentAttempt); err != nil {
 			return domain.Task{}, fmt.Errorf("close previous attempt: %w", err)
 		}
+		// A retry is an attempt fence, not merely a state reset.  A completion
+		// holding the old lease can never satisfy the new current_attempt.
+		if _, err := tx.ExecContext(ctx, `UPDATE treehouse_leases SET state = ?
+			WHERE task_id = ? AND attempt = ? AND state = ?`, domain.TreehouseLeaseFenced,
+			in.TaskID, current.CurrentAttempt, domain.TreehouseLeaseActive); err != nil {
+			return domain.Task{}, fmt.Errorf("fence previous attempt lease: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO task_attempts(task_id, attempt, base_sha, branch, created_at) VALUES (?, ?, ?, ?, ?)`,
 			in.TaskID, nextAttempt, nullableString(in.BaseSHA), nullableString(in.Branch), formatTime(now)); err != nil {
@@ -345,9 +352,74 @@ func (s *Store) RetryTask(ctx context.Context, commandID domain.CommandID, in Re
 		}
 		if err := appendEvent(ctx, tx, eventInput{
 			MissionID: &updated.MissionID, TaskID: &updated.ID, Actor: in.Actor,
-			Type: "task.retried", CommandID: &commandID,
+			Type: "attempt.fenced", CommandID: &commandID,
+			Payload: map[string]any{"attempt": current.CurrentAttempt, "reason": "retry"},
+		}); err != nil {
+			return domain.Task{}, err
+		}
+		if err := appendEvent(ctx, tx, eventInput{
+			MissionID: &updated.MissionID, TaskID: &updated.ID, Actor: in.Actor,
+			Type: "task.retry", CommandID: &commandID,
 			Payload: map[string]any{"from_attempt": current.CurrentAttempt, "attempt": nextAttempt, "state": updated.State, "version": updated.Version},
 		}); err != nil {
+			return domain.Task{}, err
+		}
+		return updated, nil
+	})
+}
+
+// CancelTask records both required cancellation transitions atomically. Cleanup
+// (the external lease return and Herdr session stop) is deliberately outside
+// this transaction so an unavailable runtime can never wedge task recovery.
+func (s *Store) CancelTask(ctx context.Context, commandID domain.CommandID, taskID domain.TaskID, expectedVersion int64, actor string) (domain.Task, error) {
+	if taskID == "" || expectedVersion < 1 || actor == "" {
+		return domain.Task{}, errors.New("task, expected version, and actor are required")
+	}
+	request := struct {
+		TaskID          domain.TaskID `json:"task_id"`
+		ExpectedVersion int64         `json:"expected_version"`
+		Actor           string        `json:"actor"`
+	}{taskID, expectedVersion, actor}
+	return runCommand(ctx, s, commandID, "task.cancel", request, func(tx *sql.Tx) (domain.Task, error) {
+		current, err := getTaskTx(ctx, tx, taskID)
+		if err != nil {
+			return domain.Task{}, err
+		}
+		if taskpolicy.IsTerminal(current.State) || current.Version != expectedVersion {
+			return domain.Task{}, &ConflictError{Current: current}
+		}
+		now := time.Now().UTC()
+		result, err := tx.ExecContext(ctx, `UPDATE tasks SET state = ?, version = version + 1, updated_at = ?
+			WHERE id = ? AND state = ? AND version = ? AND current_attempt = ?`, domain.TaskCancelling,
+			formatTime(now), taskID, current.State, current.Version, current.CurrentAttempt)
+		if err != nil {
+			return domain.Task{}, fmt.Errorf("begin cancellation: %w", err)
+		}
+		if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+			return domain.Task{}, &ConflictError{Current: current}
+		}
+		if err := appendEvent(ctx, tx, eventInput{MissionID: &current.MissionID, TaskID: &current.ID, Actor: actor,
+			Type: "task.cancelling", CommandID: &commandID, Payload: map[string]any{"from": current.State, "to": domain.TaskCancelling, "attempt": current.CurrentAttempt}}); err != nil {
+			return domain.Task{}, err
+		}
+		result, err = tx.ExecContext(ctx, `UPDATE tasks SET state = ?, version = version + 1, updated_at = ?, completed_at = ?
+			WHERE id = ? AND state = ? AND version = ? AND current_attempt = ?`, domain.TaskCancelled,
+			formatTime(now), formatTime(now), taskID, domain.TaskCancelling, current.Version+1, current.CurrentAttempt)
+		if err != nil {
+			return domain.Task{}, fmt.Errorf("finish cancellation: %w", err)
+		}
+		if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+			return domain.Task{}, &ConflictError{Current: current}
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE task_attempts SET completed_at = COALESCE(completed_at, ?) WHERE task_id = ? AND attempt = ?`, formatTime(now), taskID, current.CurrentAttempt); err != nil {
+			return domain.Task{}, fmt.Errorf("close cancelled attempt: %w", err)
+		}
+		updated, err := getTaskTx(ctx, tx, taskID)
+		if err != nil {
+			return domain.Task{}, err
+		}
+		if err := appendEvent(ctx, tx, eventInput{MissionID: &updated.MissionID, TaskID: &updated.ID, Actor: actor,
+			Type: "task.cancelled", CommandID: &commandID, Payload: map[string]any{"from": domain.TaskCancelling, "to": domain.TaskCancelled, "attempt": current.CurrentAttempt}}); err != nil {
 			return domain.Task{}, err
 		}
 		return updated, nil

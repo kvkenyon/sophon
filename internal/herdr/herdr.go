@@ -55,6 +55,21 @@ type Adapter interface {
 	Wake(context.Context, Session, string) (Session, error)
 }
 
+// Stop closes the task-owned tab, which also stops its sole Codex session.
+// A task worker always owns its own workspace/tab from StartCodex.
+func (a *CommandAdapter) Stop(ctx context.Context, session Session) error {
+	if a == nil || a.runner == nil || strings.TrimSpace(a.SessionName) == "" || session.TabID == "" {
+		return errors.New("Herdr stop requires an explicit session and tab")
+	}
+	if session.SessionName != "" && session.SessionName != a.SessionName {
+		return errors.New("Herdr stop session identity mismatch")
+	}
+	if _, stderr, err := a.run(ctx, "tab", "close", session.TabID); err != nil {
+		return commandError("stop Codex task tab", err, stderr)
+	}
+	return nil
+}
+
 // Wake prompts a live idle agent in place. A restored agent-less pane is a
 // dead husk: Wake creates a replacement tab in the same workspace, resumes
 // the persisted Codex session there, verifies the prompt is accepted, and
