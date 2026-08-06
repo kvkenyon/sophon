@@ -17,6 +17,7 @@ import (
 	"parallel-intellect/internal/herdr"
 	"parallel-intellect/internal/id"
 	"parallel-intellect/internal/treehouse"
+	validationcore "parallel-intellect/internal/validation"
 	"parallel-intellect/internal/worker"
 )
 
@@ -142,10 +143,13 @@ func task(ctx context.Context, args []string) error {
 	if len(args) >= 2 && args[0] == "start" {
 		return taskStart(ctx, domain.TaskID(args[1]), args[2:])
 	}
+	if len(args) >= 2 && args[0] == "validate" {
+		return taskValidate(ctx, domain.TaskID(args[1]), args[2:])
+	}
 	if len(args) >= 2 && args[0] == "timeline" {
 		return timeline(ctx, "task", args[1], args[2:])
 	}
-	return errors.New("expected: pintellect task create MISSION|start TASK|timeline TASK")
+	return errors.New("expected: pintellect task create MISSION|start TASK|validate TASK|timeline TASK")
 }
 
 func taskCreate(ctx context.Context, missionID domain.MissionID, args []string) error {
@@ -219,6 +223,76 @@ func taskStart(ctx context.Context, taskID domain.TaskID, args []string) error {
 		return err
 	}
 	return encode(started)
+}
+
+func taskValidate(ctx context.Context, taskID domain.TaskID, args []string) error {
+	flags := flag.NewFlagSet("task validate", flag.ContinueOnError)
+	dbPath := flags.String("db", "parallel-intellect.db", "SQLite database path")
+	gitBinary := flags.String("git", "git", "Git binary")
+	validatorVersion := flags.String("validator-version", "command-v1", "version of the command validator")
+	var unitTests, typechecks, lints, projectValidations stringList
+	flags.Var(&unitTests, "unit-test", "unit-test command (repeatable)")
+	flags.Var(&typechecks, "typecheck", "typecheck command (repeatable)")
+	flags.Var(&lints, "lint", "lint command (repeatable)")
+	flags.Var(&projectValidations, "project-validation", "project validation command (repeatable)")
+	flags.Var(&projectValidations, "validate", "project validation command (repeatable)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	type validatorConfig struct {
+		Kind     validationcore.Kind `json:"kind"`
+		Commands []string            `json:"commands"`
+	}
+	configured := []validatorConfig{
+		{validationcore.UnitTests, unitTests},
+		{validationcore.Typecheck, typechecks},
+		{validationcore.Lint, lints},
+		{validationcore.ProjectValidation, projectValidations},
+	}
+	validators := make([]validationcore.Validator, 0,
+		len(unitTests)+len(typechecks)+len(lints)+len(projectValidations))
+	for _, group := range configured {
+		for _, command := range group.Commands {
+			if strings.TrimSpace(command) == "" {
+				return fmt.Errorf("%s validator command cannot be empty", group.Kind)
+			}
+			validators = append(validators, validationcore.ShellValidator(group.Kind, *validatorVersion, command))
+		}
+	}
+	if len(validators) == 0 {
+		return errors.New("task validate requires at least one validation command")
+	}
+	config, err := json.Marshal(configured)
+	if err != nil {
+		return fmt.Errorf("encode validation config: %w", err)
+	}
+	store, err := openStore(ctx, *dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	command, err := commandID()
+	if err != nil {
+		return err
+	}
+	pipeline := validationcore.Pipeline{
+		Store:       store,
+		Workspace:   validationcore.GitFingerprinter{Binary: *gitBinary},
+		Environment: validationcore.ProcessEnvironment{},
+	}
+	report, err := pipeline.ValidateTask(ctx, validationcore.Request{
+		TaskID: taskID, CommandID: command, Validators: validators, Config: config, Actor: "commander",
+	})
+	if err != nil {
+		return err
+	}
+	if err := encode(report); err != nil {
+		return err
+	}
+	if !report.Passed {
+		return errors.New("validation failed")
+	}
+	return nil
 }
 
 func workerCommand(ctx context.Context, args []string) error {
@@ -347,6 +421,7 @@ func usage() {
   pintellect mission create --project PATH --title TITLE --objective OBJECTIVE [--acceptance TEXT]
   pintellect task create MISSION --title TITLE --objective OBJECTIVE [--acceptance TEXT]
   pintellect task start TASK [--herdr-session NAME] [--db PATH]
+  pintellect task validate TASK --unit-test COMMAND [--typecheck COMMAND] [--lint COMMAND] [--project-validation COMMAND]
   pintellect worker complete TASK --attempt N --head-sha SHA --result FILE [--db PATH]
   pintellect task|mission timeline ID [--db PATH] [--json]
   pintellect signal list [--mission ID] [--status STATUS] [--db PATH] [--json]

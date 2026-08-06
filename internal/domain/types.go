@@ -7,11 +7,12 @@ import (
 )
 
 type (
-	ProjectID string
-	MissionID string
-	TaskID    string
-	SessionID string
-	CommandID string
+	ProjectID  string
+	MissionID  string
+	TaskID     string
+	SessionID  string
+	CommandID  string
+	ArtifactID string
 )
 
 type TreehouseLeaseState string
