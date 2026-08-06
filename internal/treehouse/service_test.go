@@ -54,7 +54,8 @@ type fakeGit struct {
 	err      error
 }
 
-func (f fakeGit) Snapshot(context.Context, string) (gitcontrol.Snapshot, error) {
+func (f fakeGit) CreateTaskBranch(_ context.Context, _ string, branch string) (gitcontrol.Snapshot, error) {
+	f.snapshot.Branch = branch
 	return f.snapshot, f.err
 }
 
@@ -70,7 +71,7 @@ func TestAcquirePersistsAndReacquireReusesOneLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if first.LeaseHolder != LeaseHolder(task.ID, 1) || first.BaseSHA != testSHA ||
-		first.Branch != "task-one" || first.Project != "project" || first.State != domain.TreehouseLeaseActive {
+		first.Branch != TaskBranch(task.ID) || first.Project != "project" || first.State != domain.TreehouseLeaseActive {
 		t.Fatalf("acquired lease = %+v", first)
 	}
 	attempt, err := store.Attempt(ctx, task.ID, 1)
@@ -78,7 +79,7 @@ func TestAcquirePersistsAndReacquireReusesOneLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if attempt.TreehouseLeaseID != first.LeaseID || attempt.TreehouseLeaseHolder != first.LeaseHolder ||
-		attempt.WorktreePath != first.WorktreePath || attempt.BaseSHA != testSHA || attempt.Branch != "task-one" {
+		attempt.WorktreePath != first.WorktreePath || attempt.BaseSHA != testSHA || attempt.Branch != TaskBranch(task.ID) {
 		t.Fatalf("persisted attempt = %+v", attempt)
 	}
 
@@ -105,6 +106,62 @@ func TestAcquirePersistsAndReacquireReusesOneLease(t *testing.T) {
 	}
 	if len(leases) != 1 {
 		t.Fatalf("active leases = %+v, want exactly one", leases)
+	}
+}
+
+func TestTaskBranchUsesProductPrefix(t *testing.T) {
+	if got := TaskBranch("tsk_123"); got != "pintellect/tsk_123" {
+		t.Fatalf("task branch = %q", got)
+	}
+}
+
+func TestRetryAcquiresNewAttemptLeaseAndFencesOldAttempt(t *testing.T) {
+	ctx := context.Background()
+	store, task := provisioningTask(t)
+	defer store.Close()
+	cli := &fakeCLI{allocation: Allocation{WorktreePath: "/worktrees/one", LeaseID: "lease-one"}}
+	service := NewService(store, cli, fakeGit{snapshot: gitcontrol.Snapshot{Head: testSHA, Clean: true}})
+	first, err := service.Acquire(ctx, "cmd_acquire_attempt_one", task.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := store.TransitionTask(ctx, "cmd_fail_attempt_one", db.TransitionTaskInput{
+		TaskID: task.ID, Attempt: 1, ExpectedState: current.State, ExpectedVersion: current.Version,
+		To: domain.TaskFailed, Actor: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retried, err := store.RetryTask(ctx, "cmd_retry_attempt_two", db.RetryTaskInput{
+		TaskID: task.ID, ExpectedVersion: failed.Version, Actor: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.TransitionTask(ctx, "cmd_provision_attempt_two", db.TransitionTaskInput{
+		TaskID: task.ID, Attempt: retried.CurrentAttempt, ExpectedState: retried.State, ExpectedVersion: retried.Version,
+		To: domain.TaskProvisioning, Actor: "test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cli.allocation = Allocation{WorktreePath: "/worktrees/two", LeaseID: "lease-two"}
+	second, err := service.Acquire(ctx, "cmd_acquire_attempt_two", task.ID, retried.CurrentAttempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Attempt != 2 || second.LeaseID == first.LeaseID || second.LeaseHolder == first.LeaseHolder ||
+		second.Branch != TaskBranch(task.ID) || second.BaseSHA != testSHA {
+		t.Fatalf("retry lease = %+v; first = %+v", second, first)
+	}
+	if _, err := service.Release(ctx, "cmd_stale_release", task.ID, 1); !errors.Is(err, db.ErrStaleAttempt) {
+		t.Fatalf("stale release error = %v, want ErrStaleAttempt", err)
+	}
+	if len(cli.releases) != 0 {
+		t.Fatalf("stale release invoked Treehouse: %+v", cli.releases)
 	}
 }
 

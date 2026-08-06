@@ -13,7 +13,7 @@ import (
 )
 
 type GitInspector interface {
-	Snapshot(context.Context, string) (gitcontrol.Snapshot, error)
+	CreateTaskBranch(context.Context, string, string) (gitcontrol.Snapshot, error)
 }
 
 type Service struct {
@@ -21,6 +21,8 @@ type Service struct {
 	cli   CLI
 	git   GitInspector
 }
+
+const TaskBranchPrefix = "pintellect/"
 
 func NewService(store *db.Store, cli CLI, git GitInspector) *Service {
 	return &Service{store: store, cli: cli, git: git}
@@ -73,12 +75,16 @@ func (s *Service) Acquire(ctx context.Context, commandID domain.CommandID, taskI
 		}
 		return cause
 	}
-	snapshot, err := s.git.Snapshot(ctx, allocation.WorktreePath)
+	branch := TaskBranch(taskID)
+	snapshot, err := s.git.CreateTaskBranch(ctx, allocation.WorktreePath, branch)
 	if err != nil {
 		return domain.TreehouseLease{}, compensate(fmt.Errorf("inspect acquired worktree: %w", err))
 	}
 	if !snapshot.Clean {
 		return domain.TreehouseLease{}, compensate(errors.New("acquired Treehouse worktree is not clean"))
+	}
+	if snapshot.Branch != branch {
+		return domain.TreehouseLease{}, compensate(fmt.Errorf("created task branch %q, got %q", branch, snapshot.Branch))
 	}
 	lease := domain.TreehouseLease{
 		LeaseID: allocation.LeaseID, TaskID: taskID, Attempt: attempt,
@@ -95,6 +101,12 @@ func (s *Service) Acquire(ctx context.Context, commandID domain.CommandID, taskI
 	}
 	lease.ProjectPath = target.ProjectPath
 	return lease, nil
+}
+
+// TaskBranch applies the product-wide task-branch convention. Attempt fencing
+// remains in the lease and holder identities, not the branch name.
+func TaskBranch(taskID domain.TaskID) string {
+	return TaskBranchPrefix + string(taskID)
 }
 
 // Release refuses stale attempts before invoking Treehouse. The external call

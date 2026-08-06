@@ -38,9 +38,37 @@ type Client struct {
 
 func NewClient() *Client { return &Client{Binary: "git"} }
 
+// CreateTaskBranch records the detached pool worktree's base commit, verifies
+// it is clean, then attaches HEAD to branch. Treehouse pool worktrees are
+// intentionally detached, so branch resolution must happen only after this
+// operation.
+func (c *Client) CreateTaskBranch(ctx context.Context, worktreePath, branch string) (Snapshot, error) {
+	head, err := c.output(ctx, worktreePath, "rev-parse", "HEAD")
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("resolve worktree HEAD: %w", err)
+	}
+	if !fullSHA.MatchString(head) {
+		return Snapshot{}, fmt.Errorf("%w: %q", ErrInvalidSHA, head)
+	}
+	status, err := c.output(ctx, worktreePath, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("inspect worktree cleanliness: %w", err)
+	}
+	if status != "" {
+		return Snapshot{Head: head, Clean: false}, nil
+	}
+	if branch == "" {
+		return Snapshot{}, errors.New("task branch is required")
+	}
+	if _, err := c.output(ctx, worktreePath, "switch", "-c", branch, head); err != nil {
+		return Snapshot{}, fmt.Errorf("create task branch %q: %w", branch, err)
+	}
+	return c.Snapshot(ctx, worktreePath)
+}
+
 // Snapshot records the full commit identity and branch at acquisition time.
 func (c *Client) Snapshot(ctx context.Context, worktreePath string) (Snapshot, error) {
-	head, err := c.output(ctx, worktreePath, "rev-parse", "--verify", "HEAD^{commit}")
+	head, err := c.output(ctx, worktreePath, "rev-parse", "HEAD")
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("resolve worktree HEAD: %w", err)
 	}
