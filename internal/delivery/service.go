@@ -76,7 +76,8 @@ func (s *Service) Deliver(ctx context.Context, in Request) (Result, error) {
 		current, err = s.Store.PrepareDelivery(ctx, childCommand(in.CommandID, "prepare"), PrepareInput{
 			TaskID: target.Task.ID, Attempt: target.Attempt.Attempt, ExpectedVersion: target.Task.Version,
 			Mode: target.Task.DeliveryMode, Repository: repository, Branch: target.Attempt.Branch,
-			HeadSHA: strings.ToLower(target.Attempt.HeadSHA), RequestCommandID: in.CommandID, Actor: in.Actor,
+			HeadSHA: strings.ToLower(target.Attempt.HeadSHA), RequestCommandID: in.CommandID,
+			RequestBase: reservation.Base, Actor: in.Actor,
 		})
 		if err != nil {
 			return Result{}, err
@@ -145,6 +146,38 @@ func (s *Service) Deliver(ctx context.Context, in Request) (Result, error) {
 	})
 }
 
+// Reconcile resumes an interrupted delivery through the original M10 command
+// and its persisted request inputs. Push and PR lookup remain externally
+// idempotent, including the crash window after PR creation but before SQLite.
+func (s *Service) Reconcile(ctx context.Context, taskID domain.TaskID, attempt int) (Result, error) {
+	if s == nil || s.Store == nil {
+		return Result{}, errors.New("delivery reconciler is not fully configured")
+	}
+	record, err := s.Store.Delivery(ctx, taskID, attempt)
+	if err != nil {
+		return Result{}, err
+	}
+	if record == nil {
+		return Result{}, errors.New("interrupted delivery has no durable intent")
+	}
+	if record.State == StateDelivered || record.State == StateDeliveredBranch {
+		target, err := s.Store.DeliveryTarget(ctx, taskID, attempt)
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{Task: target.Task, Delivery: *record}, nil
+	}
+	if record.Mode == domain.DeliveryGate && record.GateState == GatePending {
+		target, err := s.Store.DeliveryTarget(ctx, taskID, attempt)
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{Task: target.Task, Delivery: *record}, ErrGateRecoveryRequired
+	}
+	return s.Deliver(ctx, Request{TaskID: taskID, CommandID: record.CommandID,
+		Base: record.RequestBase, Actor: record.RequestActor})
+}
+
 func (s *Service) Release(ctx context.Context, taskID domain.TaskID, commandID domain.CommandID, actor string) (domain.TreehouseLease, error) {
 	if s == nil || s.Store == nil || s.Leases == nil {
 		return domain.TreehouseLease{}, errors.New("delivery release is not fully configured")
@@ -170,13 +203,37 @@ func (s *Service) Release(ctx context.Context, taskID domain.TaskID, commandID d
 	if err != nil {
 		return domain.TreehouseLease{}, err
 	}
-	if lease.State == domain.TreehouseLeaseReleased {
+	record, err := s.Store.Delivery(ctx, taskID, reservation.Attempt)
+	if err != nil || record == nil {
+		return domain.TreehouseLease{}, errors.New("branch delivery record is missing")
+	}
+	if lease.State == domain.TreehouseLeaseReleased && record.ReleaseState == "completed" {
 		return lease, nil
 	}
-	if lease.State != domain.TreehouseLeaseActive {
+	intent := ReleaseIntentInput{TaskID: taskID, Attempt: reservation.Attempt, LeaseID: lease.LeaseID,
+		LeaseHolder: lease.LeaseHolder, RequestCommandID: commandID, Actor: actor}
+	if record.ReleaseState == "pending" {
+		intent.RequestCommandID = record.ReleaseCommandID
+		intent.Actor = record.ReleaseActor
+	}
+	if lease.State != domain.TreehouseLeaseActive && lease.State != domain.TreehouseLeaseReleased {
 		return domain.TreehouseLease{}, errors.New("retained task lease is not active")
 	}
-	return s.Leases.Release(ctx, childCommand(commandID, "lease"), taskID, reservation.Attempt)
+	if record.ReleaseState != "pending" {
+		if err := s.Store.PrepareDeliveryRelease(ctx, childCommand(intent.RequestCommandID, "release-prepare"), intent); err != nil {
+			return domain.TreehouseLease{}, err
+		}
+	}
+	if lease.State == domain.TreehouseLeaseActive {
+		lease, err = s.Leases.Release(ctx, childCommand(intent.RequestCommandID, "lease"), taskID, reservation.Attempt)
+		if err != nil {
+			return domain.TreehouseLease{}, err
+		}
+	}
+	if err := s.Store.CompleteDeliveryRelease(ctx, childCommand(intent.RequestCommandID, "release-complete"), intent); err != nil {
+		return domain.TreehouseLease{}, err
+	}
+	return lease, nil
 }
 
 func childCommand(parent domain.CommandID, phase string) domain.CommandID {

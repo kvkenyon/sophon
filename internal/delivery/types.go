@@ -28,27 +28,33 @@ const (
 )
 
 var (
-	ErrHeadMismatch   = errors.New("delivery head does not match the verified attempt head")
-	ErrBranchMismatch = errors.New("delivery branch does not match the task attempt branch")
-	ErrGateFailed     = errors.New("no-mistakes delivery gate failed")
+	ErrHeadMismatch         = errors.New("delivery head does not match the verified attempt head")
+	ErrBranchMismatch       = errors.New("delivery branch does not match the task attempt branch")
+	ErrGateFailed           = errors.New("no-mistakes delivery gate failed")
+	ErrGateRecoveryRequired = errors.New("interrupted no-mistakes gate requires an explicit retry")
 )
 
 type Record struct {
-	TaskID      domain.TaskID       `json:"task_id"`
-	Attempt     int                 `json:"attempt"`
-	Mode        domain.DeliveryMode `json:"mode"`
-	Repository  string              `json:"repository,omitempty"`
-	Branch      string              `json:"branch"`
-	HeadSHA     string              `json:"head_sha"`
-	PRURL       string              `json:"pr_url,omitempty"`
-	PRNumber    int                 `json:"pr_number,omitempty"`
-	State       State               `json:"state"`
-	GateState   GateState           `json:"gate_state"`
-	GateOutput  string              `json:"gate_output,omitempty"`
-	CommandID   domain.CommandID    `json:"command_id"`
-	CreatedAt   time.Time           `json:"created_at"`
-	UpdatedAt   time.Time           `json:"updated_at"`
-	DeliveredAt *time.Time          `json:"delivered_at,omitempty"`
+	TaskID           domain.TaskID       `json:"task_id"`
+	Attempt          int                 `json:"attempt"`
+	Mode             domain.DeliveryMode `json:"mode"`
+	Repository       string              `json:"repository,omitempty"`
+	Branch           string              `json:"branch"`
+	HeadSHA          string              `json:"head_sha"`
+	PRURL            string              `json:"pr_url,omitempty"`
+	PRNumber         int                 `json:"pr_number,omitempty"`
+	State            State               `json:"state"`
+	GateState        GateState           `json:"gate_state"`
+	GateOutput       string              `json:"gate_output,omitempty"`
+	CommandID        domain.CommandID    `json:"command_id"`
+	RequestBase      string              `json:"request_base,omitempty"`
+	RequestActor     string              `json:"request_actor"`
+	ReleaseCommandID domain.CommandID    `json:"release_command_id,omitempty"`
+	ReleaseState     string              `json:"release_state,omitempty"`
+	ReleaseActor     string              `json:"release_actor,omitempty"`
+	CreatedAt        time.Time           `json:"created_at"`
+	UpdatedAt        time.Time           `json:"updated_at"`
+	DeliveredAt      *time.Time          `json:"delivered_at,omitempty"`
 }
 
 type Result struct {
@@ -84,6 +90,7 @@ type PrepareInput struct {
 	Branch           string              `json:"branch"`
 	HeadSHA          string              `json:"head_sha"`
 	RequestCommandID domain.CommandID    `json:"request_command_id"`
+	RequestBase      string              `json:"request_base,omitempty"`
 	Actor            string              `json:"actor"`
 }
 
@@ -107,6 +114,15 @@ type CompleteInput struct {
 	Actor      string        `json:"actor"`
 }
 
+type ReleaseIntentInput struct {
+	TaskID           domain.TaskID    `json:"task_id"`
+	Attempt          int              `json:"attempt"`
+	LeaseID          string           `json:"lease_id"`
+	LeaseHolder      string           `json:"lease_holder"`
+	RequestCommandID domain.CommandID `json:"request_command_id"`
+	Actor            string           `json:"actor"`
+}
+
 type Store interface {
 	ReserveDelivery(context.Context, domain.CommandID, ReserveInput) (Reservation, error)
 	DeliveryTarget(context.Context, domain.TaskID, int) (Target, error)
@@ -114,6 +130,8 @@ type Store interface {
 	PrepareDelivery(context.Context, domain.CommandID, PrepareInput) (Result, error)
 	RecordDeliveryGate(context.Context, domain.CommandID, GateInput) (Result, error)
 	CompleteDelivery(context.Context, domain.CommandID, CompleteInput) (Result, error)
+	PrepareDeliveryRelease(context.Context, domain.CommandID, ReleaseIntentInput) error
+	CompleteDeliveryRelease(context.Context, domain.CommandID, ReleaseIntentInput) error
 	TreehouseLease(context.Context, domain.TaskID, int) (domain.TreehouseLease, error)
 }
 

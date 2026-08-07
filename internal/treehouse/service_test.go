@@ -66,6 +66,10 @@ func (f fakeGit) CreateTaskBranch(_ context.Context, _ string, branch string) (g
 	return f.snapshot, f.err
 }
 
+func (f fakeGit) Snapshot(context.Context, string) (gitcontrol.Snapshot, error) {
+	return f.snapshot, f.err
+}
+
 func TestAcquirePersistsAndReacquireReusesOneLease(t *testing.T) {
 	ctx := context.Background()
 	store, task := provisioningTask(t)
@@ -261,6 +265,53 @@ func TestReconcileKeepsMatchingLeaseValid(t *testing.T) {
 	}
 }
 
+func TestReconcileAdoptsLeaseAcquiredBeforeDatabaseRecord(t *testing.T) {
+	ctx := context.Background()
+	store, task := provisioningTask(t)
+	defer store.Close()
+	leasedAt := time.Unix(42, 0).UTC()
+	branch := TaskBranch(task.ID, 1)
+	cli := &fakeCLI{statuses: []WorktreeStatus{{WorktreePath: "/worktrees/unrecorded",
+		Status: "leased", LeaseID: "lease-unrecorded", LeaseHolder: LeaseHolder(task.ID, 1),
+		LeasedAt: &leasedAt}}}
+	service := NewService(store, cli, fakeGit{snapshot: gitcontrol.Snapshot{
+		Head: testSHA, Branch: branch, Clean: true,
+	}})
+
+	result, err := service.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Adopted != 1 || result.Awaiting != 0 || cli.acquireCalls != 0 || len(cli.releases) != 0 {
+		t.Fatalf("reconcile result=%+v acquire=%d releases=%+v", result, cli.acquireCalls, cli.releases)
+	}
+	lease, err := store.TreehouseLease(ctx, task.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != "lease-unrecorded" || lease.LeaseHolder != LeaseHolder(task.ID, 1) ||
+		lease.Branch != branch || lease.BaseSHA != testSHA || !lease.AcquiredAt.Equal(leasedAt) {
+		t.Fatalf("adopted lease = %+v", lease)
+	}
+	attempt, err := store.Attempt(ctx, task.ID, 1)
+	if err != nil || attempt.TreehouseLeaseID != lease.LeaseID || attempt.WorktreePath != lease.WorktreePath {
+		t.Fatalf("adopted attempt=%+v err=%v", attempt, err)
+	}
+}
+
+func TestReconcileReportsProvisioningTaskStillAwaitingLease(t *testing.T) {
+	store, _ := provisioningTask(t)
+	defer store.Close()
+	service := NewService(store, &fakeCLI{}, fakeGit{})
+	result, err := service.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Awaiting != 1 || result.Adopted != 0 {
+		t.Fatalf("reconcile result = %+v", result)
+	}
+}
+
 func TestLeaseMismatchFencesAttemptWithoutTouchingNewHolder(t *testing.T) {
 	ctx := context.Background()
 	store, task := provisioningTask(t)
@@ -356,6 +407,27 @@ func TestCommandClientAcquireUsesDurableLeaseContract(t *testing.T) {
 	}
 	if lease.WorktreePath != "/worktrees/one" || lease.LeaseID != "lease-id" || lease.LeaseHolder != "holder-id" {
 		t.Fatalf("lease = %+v", lease)
+	}
+}
+
+func TestReleaseReconcilesCrashAfterExternalConditionalReturn(t *testing.T) {
+	ctx := context.Background()
+	store, task := provisioningTask(t)
+	defer store.Close()
+	cli := &fakeCLI{allocation: Allocation{WorktreePath: "/worktrees/released", LeaseID: "lease-release-crash"}}
+	service := NewService(store, cli, fakeGit{snapshot: gitcontrol.Snapshot{Head: testSHA, Clean: true}})
+	lease, err := service.Acquire(ctx, "cmd_acquire_release_crash", task.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli.releaseErr = errors.New("conditional return reports lease already gone")
+	cli.statuses = []WorktreeStatus{{WorktreePath: lease.WorktreePath, Status: "available"}}
+	released, err := service.Release(ctx, "cmd_release_after_crash", task.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released.State != domain.TreehouseLeaseReleased || len(cli.releases) != 1 || cli.statusCalls != 1 {
+		t.Fatalf("released=%+v releases=%+v statusCalls=%d", released, cli.releases, cli.statusCalls)
 	}
 }
 

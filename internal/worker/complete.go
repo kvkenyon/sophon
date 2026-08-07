@@ -40,6 +40,54 @@ type Completer struct {
 	TaskFiles BriefGenerator
 }
 
+type GitSnapshotter interface {
+	Snapshot(context.Context, string) (gitcontrol.Snapshot, error)
+}
+
+// CompletionResumer closes the crash window between a structured completion
+// callback/result file and the atomic worker.complete transaction. It derives
+// HEAD from the still-leased worktree and reuses the same deterministic
+// command identity as the CLI callback path.
+type CompletionResumer struct {
+	Store     *db.Store
+	Completer *Completer
+	Git       GitSnapshotter
+}
+
+func (r *CompletionResumer) Resume(ctx context.Context, taskID domain.TaskID) (domain.Task, error) {
+	if r == nil || r.Store == nil || r.Completer == nil || r.Git == nil {
+		return domain.Task{}, errors.New("completion resumer is not fully configured")
+	}
+	task, err := r.Store.Task(ctx, taskID)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	attempt, err := r.Store.Attempt(ctx, task.ID, task.CurrentAttempt)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	snapshot, err := r.Git.Snapshot(ctx, attempt.WorktreePath)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("snapshot completion recovery worktree: %w", err)
+	}
+	dir, err := r.Completer.TaskFiles.AttemptDir(task.ID, task.CurrentAttempt)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	resultPath := filepath.Join(dir, "result.json")
+	return r.Completer.Complete(ctx, CompleteRequest{TaskID: task.ID, Attempt: task.CurrentAttempt,
+		HeadSHA: snapshot.Head, ResultPath: resultPath,
+		CommandID: CompletionCommandID(task.ID, task.CurrentAttempt, snapshot.Head, resultPath)})
+}
+
+// CompletionCommandID makes repeated callbacks and restart recovery converge
+// on one command result without requiring a caller-owned nonce.
+func CompletionCommandID(taskID domain.TaskID, attempt int, headSHA, resultPath string) domain.CommandID {
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%s", taskID, attempt,
+		strings.ToLower(headSHA), resultPath)))
+	return domain.CommandID(fmt.Sprintf("cmd_worker_complete_%x", digest[:16]))
+}
+
 type CompleteRequest struct {
 	TaskID     domain.TaskID
 	Attempt    int

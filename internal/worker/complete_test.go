@@ -82,6 +82,35 @@ func TestCompleterAcceptsVerifiedOutcomeAndAtomicallyReachesReady(t *testing.T) 
 	}
 }
 
+func TestCompletionResumerVerifiesExternalStateAndConvergesOnOneCommand(t *testing.T) {
+	fixture := newCompletionFixture(t, true)
+	resumer := CompletionResumer{Store: fixture.store, Completer: fixture.completer(), Git: gitcontrol.NewClient()}
+	first, err := resumer.Resume(context.Background(), fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := resumer.Resume(context.Background(), fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.State != domain.TaskReady || second.State != domain.TaskReady || first.Version != second.Version {
+		t.Fatalf("completion recovery did not converge: first=%+v second=%+v", first, second)
+	}
+	events, err := fixture.store.TaskEvents(context.Background(), fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyEvents := 0
+	for _, event := range events {
+		if event.Type == "task.ready" {
+			readyEvents++
+		}
+	}
+	if readyEvents != 1 {
+		t.Fatalf("completion recovery emitted %d ready events", readyEvents)
+	}
+}
+
 func TestCompleterFencesWrongAttempt(t *testing.T) {
 	fixture := newCompletionFixture(t, true)
 	_, err := fixture.completer().Complete(context.Background(), CompleteRequest{

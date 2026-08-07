@@ -12,15 +12,23 @@ import (
 
 	commandercontrol "parallel-intellect/internal/commander"
 	"parallel-intellect/internal/db"
+	"parallel-intellect/internal/delivery"
 	"parallel-intellect/internal/domain"
 	gitcontrol "parallel-intellect/internal/git"
 	"parallel-intellect/internal/herdr"
+	startup "parallel-intellect/internal/recovery"
 	"parallel-intellect/internal/treehouse"
+	"parallel-intellect/internal/worker"
 )
 
 func main() {
 	path := flag.String("db", "", "SQLite database path")
 	herdrBinary := flag.String("herdr", "herdr", "Herdr CLI binary")
+	treehouseBinary := flag.String("treehouse", "treehouse", "Treehouse CLI binary")
+	gitBinary := flag.String("git", "git", "Git binary")
+	ghBinary := flag.String("gh-axi", "gh-axi", "gh-axi binary")
+	gateBinary := flag.String("no-mistakes", "no-mistakes", "no-mistakes CLI binary")
+	taskFiles := flag.String("task-files", "", "task artifact base directory")
 	commanderPoll := flag.Duration("commander-poll", time.Second, "commander reconciliation and event wake interval")
 	flag.Parse()
 
@@ -32,13 +40,46 @@ func main() {
 	}
 	defer store.Close()
 
-	leaseService := treehouse.NewService(store, treehouse.NewCommandClient("treehouse"), gitcontrol.NewClient())
-	reconciled, err := leaseService.Reconcile(ctx)
-	if err != nil {
-		log.Fatal(fmt.Errorf("reconcile Treehouse leases: %w", err))
+	gitClient := &gitcontrol.Client{Binary: *gitBinary}
+	treehouseClient := treehouse.NewCommandClient(*treehouseBinary)
+	leaseService := treehouse.NewService(store, treehouseClient, gitClient)
+	briefs := worker.BriefGenerator{BaseDir: *taskFiles}
+	completer := &worker.Completer{Store: store, Git: gitClient, Leases: treehouseClient, TaskFiles: briefs}
+	deliveryService := &delivery.Service{Store: store, Git: delivery.CommandGit{Binary: *gitBinary},
+		Remote: delivery.CommandRemote{GitBinary: *gitBinary, GHBinary: *ghBinary},
+		Gate:   delivery.CommandGate{Binary: *gateBinary}, Leases: leaseService}
+	reconciler := &startup.Service{Store: store, Leases: leaseService,
+		Worker: func(session domain.WorkerSession) startup.WorkerReconciler {
+			terminal := herdr.NewCommandAdapter(*herdrBinary, session.HerdrSessionName, "")
+			return &worker.Reconciler{Store: store, Herdr: terminal,
+				Outcomes: worker.ResultFileInspector{TaskFiles: briefs}}
+		},
+		Completion: &worker.CompletionResumer{Store: store, Completer: completer, Git: gitClient},
+		Delivery:   deliveryService,
 	}
-	log.Printf("pintellectd initialized database %s; Treehouse leases valid=%d fenced=%d missing=%d",
-		*path, reconciled.Valid, reconciled.Fenced, reconciled.Missing)
+	reconcileTasks := func(detailed bool) {
+		report, err := reconciler.Reconcile(ctx)
+		if err != nil {
+			log.Printf("startup reconciliation failed: %v", err)
+			return
+		}
+		log.Printf("reconciled leases valid=%d adopted=%d awaiting=%d released=%d fenced=%d missing=%d tasks=%d",
+			report.Leases.Valid, report.Leases.Adopted, report.Leases.Awaiting,
+			report.Leases.Released, report.Leases.Fenced, report.Leases.Missing, len(report.Tasks))
+		for _, task := range report.Tasks {
+			if task.Error != "" || (detailed && task.Outcome == startup.OutcomeRecoverable) {
+				detail := task.Error
+				if detail == "" {
+					detail = "durable state requires scheduler or operator continuation"
+				}
+				log.Printf("reconcile task=%s attempt=%d state=%s status=%s outcome=%s: %s",
+					task.TaskID, task.Attempt, task.State, task.Status, task.Outcome, detail)
+			}
+		}
+	}
+	reconcileTasks(true)
+	log.Printf("pintellectd initialized database %s", *path)
+
 	enforceBudgets := func() {
 		missions, err := store.Missions(ctx)
 		if err != nil {
@@ -133,6 +174,7 @@ func main() {
 			log.Print("pintellectd stopped")
 			return
 		case <-ticker.C:
+			reconcileTasks(false)
 			enforceBudgets()
 			reconcileCommanders()
 		}

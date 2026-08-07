@@ -14,7 +14,8 @@ import (
 )
 
 const deliverySelect = `SELECT task_id, attempt, mode, repository, branch, head_sha,
-	pr_url, pr_number, state, gate_state, gate_output, command_id, created_at, updated_at, delivered_at
+	pr_url, pr_number, state, gate_state, gate_output, command_id, request_base, request_actor,
+	release_command_id, release_state, release_actor, created_at, updated_at, delivered_at
 	FROM deliveries WHERE task_id = ? AND attempt = ?`
 
 func (s *Store) ReserveDelivery(ctx context.Context, commandID domain.CommandID, in delivery.ReserveInput) (delivery.Reservation, error) {
@@ -28,6 +29,102 @@ func (s *Store) ReserveDelivery(ctx context.Context, commandID domain.CommandID,
 		}
 		return delivery.Reservation{TaskID: current.ID, Attempt: current.CurrentAttempt, Base: in.Base}, nil
 	})
+}
+
+func (s *Store) PrepareDeliveryRelease(ctx context.Context, commandID domain.CommandID, in delivery.ReleaseIntentInput) error {
+	_, err := runCommand(ctx, s, commandID, "delivery.release.prepare", in, func(tx *sql.Tx) (struct{}, error) {
+		current, err := getTaskTx(ctx, tx, in.TaskID)
+		if err != nil {
+			return struct{}{}, err
+		}
+		if current.CurrentAttempt != in.Attempt || current.State != domain.TaskDeliveredBranch {
+			return struct{}{}, errors.New("release intent no longer targets a delivered branch attempt")
+		}
+		var leaseID, holder string
+		var leaseState domain.TreehouseLeaseState
+		if err := tx.QueryRowContext(ctx, `SELECT lease_id, lease_holder, state FROM treehouse_leases
+			WHERE task_id = ? AND attempt = ?`, in.TaskID, in.Attempt).Scan(&leaseID, &holder, &leaseState); err != nil {
+			return struct{}{}, err
+		}
+		if leaseID != in.LeaseID || holder != in.LeaseHolder ||
+			(leaseState != domain.TreehouseLeaseActive && leaseState != domain.TreehouseLeaseReleased) {
+			return struct{}{}, ErrLeaseConflict
+		}
+		now := time.Now().UTC()
+		result, err := tx.ExecContext(ctx, `UPDATE deliveries SET release_command_id = ?, release_state = 'pending', release_actor = ?,
+			updated_at = ? WHERE task_id = ? AND attempt = ? AND state = ? AND release_state IN ('', 'pending')`,
+			in.RequestCommandID, in.Actor, formatTime(now), in.TaskID, in.Attempt, delivery.StateDeliveredBranch)
+		if err != nil {
+			return struct{}{}, fmt.Errorf("prepare delivery release: %w", err)
+		}
+		if rows, rowErr := result.RowsAffected(); rowErr != nil || rows != 1 {
+			return struct{}{}, errors.New("delivery release intent conflicts with existing state")
+		}
+		if err := appendEvent(ctx, tx, eventInput{MissionID: &current.MissionID, TaskID: &current.ID,
+			Actor: in.Actor, Type: "delivery.release_started", CommandID: &commandID,
+			Payload: map[string]any{"attempt": in.Attempt, "lease_id": in.LeaseID,
+				"lease_holder": in.LeaseHolder}}); err != nil {
+			return struct{}{}, err
+		}
+		return struct{}{}, nil
+	})
+	return err
+}
+
+func (s *Store) CompleteDeliveryRelease(ctx context.Context, commandID domain.CommandID, in delivery.ReleaseIntentInput) error {
+	_, err := runCommand(ctx, s, commandID, "delivery.release.complete", in, func(tx *sql.Tx) (struct{}, error) {
+		current, err := getTaskTx(ctx, tx, in.TaskID)
+		if err != nil {
+			return struct{}{}, err
+		}
+		var leaseState domain.TreehouseLeaseState
+		if err := tx.QueryRowContext(ctx, `SELECT state FROM treehouse_leases WHERE task_id = ? AND attempt = ?
+			AND lease_id = ? AND lease_holder = ?`, in.TaskID, in.Attempt, in.LeaseID, in.LeaseHolder).Scan(&leaseState); err != nil {
+			return struct{}{}, err
+		}
+		if leaseState != domain.TreehouseLeaseReleased {
+			return struct{}{}, ErrLeaseConflict
+		}
+		now := time.Now().UTC()
+		result, err := tx.ExecContext(ctx, `UPDATE deliveries SET release_state = 'completed', updated_at = ?
+			WHERE task_id = ? AND attempt = ? AND release_command_id = ? AND release_state = 'pending'`,
+			formatTime(now), in.TaskID, in.Attempt, in.RequestCommandID)
+		if err != nil {
+			return struct{}{}, fmt.Errorf("complete delivery release: %w", err)
+		}
+		if rows, rowErr := result.RowsAffected(); rowErr != nil || rows != 1 {
+			return struct{}{}, errors.New("delivery release completion conflicts with existing state")
+		}
+		if err := appendEvent(ctx, tx, eventInput{MissionID: &current.MissionID, TaskID: &current.ID,
+			Actor: in.Actor, Type: "delivery.release_completed", CommandID: &commandID,
+			Payload: map[string]any{"attempt": in.Attempt, "lease_id": in.LeaseID,
+				"lease_holder": in.LeaseHolder}}); err != nil {
+			return struct{}{}, err
+		}
+		return struct{}{}, nil
+	})
+	return err
+}
+
+// PendingDeliveryRelease is used by Treehouse startup reconciliation before it
+// classifies a missing external lease as an unexpected mismatch.
+func (s *Store) PendingDeliveryRelease(ctx context.Context, taskID domain.TaskID, attempt int,
+	leaseID, leaseHolder string) (*delivery.ReleaseIntentInput, error) {
+	var commandID domain.CommandID
+	var actor string
+	err := s.db.QueryRowContext(ctx, `SELECT d.release_command_id, d.release_actor FROM deliveries d
+		JOIN treehouse_leases l ON l.task_id = d.task_id AND l.attempt = d.attempt
+		WHERE d.task_id = ? AND d.attempt = ? AND d.release_state = 'pending'
+		AND l.lease_id = ? AND l.lease_holder = ? AND l.state = 'active'`,
+		taskID, attempt, leaseID, leaseHolder).Scan(&commandID, &actor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect pending delivery release: %w", err)
+	}
+	return &delivery.ReleaseIntentInput{TaskID: taskID, Attempt: attempt, LeaseID: leaseID,
+		LeaseHolder: leaseHolder, RequestCommandID: commandID, Actor: actor}, nil
 }
 
 func (s *Store) DeliveryTarget(ctx context.Context, taskID domain.TaskID, attempt int) (delivery.Target, error) {
@@ -177,10 +274,11 @@ func (s *Store) PrepareDelivery(ctx context.Context, commandID domain.CommandID,
 			return delivery.Result{}, &ConflictError{Current: current}
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO deliveries(task_id, attempt, mode, repository,
-			branch, head_sha, state, gate_state, command_id, created_at, updated_at, delivered_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, in.TaskID, in.Attempt, in.Mode, in.Repository,
+			branch, head_sha, state, gate_state, command_id, request_base, request_actor,
+			created_at, updated_at, delivered_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, in.TaskID, in.Attempt, in.Mode, in.Repository,
 			in.Branch, strings.ToLower(in.HeadSHA), state, gateState, in.RequestCommandID,
-			formatTime(now), formatTime(now), deliveredAt); err != nil {
+			in.RequestBase, in.Actor, formatTime(now), formatTime(now), deliveredAt); err != nil {
 			return delivery.Result{}, fmt.Errorf("insert delivery: %w", err)
 		}
 		updated, err := getTaskTx(ctx, tx, in.TaskID)
@@ -370,11 +468,13 @@ func (s *Store) CompleteDelivery(ctx context.Context, commandID domain.CommandID
 
 func scanDelivery(row rowScanner) (delivery.Record, error) {
 	var record delivery.Record
-	var prURL, gateOutput, created, updated, deliveredAt sql.NullString
+	var prURL, gateOutput, releaseCommand, created, updated, deliveredAt sql.NullString
 	var prNumber sql.NullInt64
 	if err := row.Scan(&record.TaskID, &record.Attempt, &record.Mode, &record.Repository,
 		&record.Branch, &record.HeadSHA, &prURL, &prNumber, &record.State, &record.GateState,
-		&gateOutput, &record.CommandID, &created, &updated, &deliveredAt); err != nil {
+		&gateOutput, &record.CommandID, &record.RequestBase, &record.RequestActor,
+		&releaseCommand, &record.ReleaseState, &record.ReleaseActor,
+		&created, &updated, &deliveredAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return delivery.Record{}, sql.ErrNoRows
 		}
@@ -383,6 +483,7 @@ func scanDelivery(row rowScanner) (delivery.Record, error) {
 	record.PRURL = prURL.String
 	record.PRNumber = int(prNumber.Int64)
 	record.GateOutput = gateOutput.String
+	record.ReleaseCommandID = domain.CommandID(releaseCommand.String)
 	var err error
 	record.CreatedAt, err = parseTime(created.String)
 	if err == nil {

@@ -34,3 +34,24 @@ pintellect worker complete TSK_ID --attempt 1 --head-sha SHA --result ~/.paralle
 ```
 
 `task start` acquires a Treehouse lease, writes the generated brief, and launches Codex through Herdr. Completion reaches `ready` only after current-attempt, live-lease, Git ancestry/head/cleanliness, and strict result-schema verification.
+
+## Reliability testing
+
+The default test suite remains hermetic:
+
+```bash
+go test ./...
+go build ./...
+```
+
+Milestone 11's process-kill matrix is opt-in and reports an exactly-once result or explicit recoverable state for every crash boundary:
+
+```bash
+PI_RUN_CRASH_INJECTION=1 ./test/crash-injection.sh
+```
+
+To include the real Herdr stop/re-provision/husk-resume proof, use the guarded named lab path:
+
+```bash
+PI_RUN_CRASH_INJECTION=1 PI_CRASH_HERDR_LAB=1 ./test/crash-injection.sh
+```

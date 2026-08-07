@@ -14,6 +14,7 @@ import (
 
 type GitInspector interface {
 	CreateTaskBranch(context.Context, string, string) (gitcontrol.Snapshot, error)
+	Snapshot(context.Context, string) (gitcontrol.Snapshot, error)
 }
 
 type Service struct {
@@ -137,7 +138,21 @@ func (s *Service) Release(ctx context.Context, commandID domain.CommandID, taskI
 	}
 	allocation := Allocation{WorktreePath: lease.WorktreePath, LeaseID: lease.LeaseID, LeaseHolder: lease.LeaseHolder}
 	if err := s.cli.Release(ctx, lease.ProjectPath, allocation); err != nil {
-		return domain.TreehouseLease{}, err
+		// The process may have died after Treehouse accepted a conditional
+		// return but before SQLite recorded it. Re-observe the exact identity:
+		// if it is no longer live, finish only our old durable lease record and
+		// never issue an operation against a replacement holder.
+		statuses, observeErr := s.cli.Status(ctx, lease.ProjectPath)
+		if observeErr != nil {
+			return domain.TreehouseLease{}, errors.Join(err,
+				fmt.Errorf("reconcile conditional Treehouse return: %w", observeErr))
+		}
+		for _, status := range statuses {
+			if status.WorktreePath == lease.WorktreePath && status.Status == "leased" &&
+				status.LeaseID == lease.LeaseID && status.LeaseHolder == lease.LeaseHolder {
+				return domain.TreehouseLease{}, err
+			}
+		}
 	}
 	persistCtx, cancel := cleanupContext(ctx)
 	defer cancel()
@@ -152,24 +167,38 @@ func (s *Service) Release(ctx context.Context, commandID domain.CommandID, taskI
 }
 
 type ReconcileResult struct {
-	Valid   int
-	Fenced  int
-	Missing int
+	Valid    int
+	Adopted  int
+	Awaiting int
+	Released int
+	Fenced   int
+	Missing  int
 }
 
 // Reconcile compares durable active leases with Treehouse status. A mismatch
 // is fenced in SQLite and never passed to Release, so a new holder is untouched.
 func (s *Service) Reconcile(ctx context.Context) (ReconcileResult, error) {
-	if s.store == nil || s.cli == nil {
+	if s.store == nil || s.cli == nil || s.git == nil {
 		return ReconcileResult{}, errors.New("Treehouse service is not fully configured")
 	}
 	leases, err := s.store.ActiveTreehouseLeases(ctx)
 	if err != nil {
 		return ReconcileResult{}, err
 	}
+	targets, err := s.store.UnleasedProvisioningTargets(ctx)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
 	byProject := make(map[string][]domain.TreehouseLease)
 	for _, lease := range leases {
 		byProject[lease.ProjectPath] = append(byProject[lease.ProjectPath], lease)
+	}
+	targetsByProject := make(map[string][]db.LeaseAcquisitionTarget)
+	for _, target := range targets {
+		targetsByProject[target.ProjectPath] = append(targetsByProject[target.ProjectPath], target)
+		if _, exists := byProject[target.ProjectPath]; !exists {
+			byProject[target.ProjectPath] = nil
+		}
 	}
 	var result ReconcileResult
 	for projectPath, projectLeases := range byProject {
@@ -183,8 +212,38 @@ func (s *Service) Reconcile(ctx context.Context) (ReconcileResult, error) {
 		}
 		for _, lease := range projectLeases {
 			observed, exists := byPath[lease.WorktreePath]
-			if exists && observed.Status == "leased" && observed.LeaseID == lease.LeaseID &&
-				observed.LeaseHolder == lease.LeaseHolder {
+			matching := exists && observed.Status == "leased" && observed.LeaseID == lease.LeaseID &&
+				observed.LeaseHolder == lease.LeaseHolder
+			pendingRelease, err := s.store.PendingDeliveryRelease(ctx, lease.TaskID, lease.Attempt,
+				lease.LeaseID, lease.LeaseHolder)
+			if err != nil {
+				return result, err
+			}
+			if pendingRelease != nil {
+				if matching {
+					if err := s.cli.Release(ctx, lease.ProjectPath, Allocation{WorktreePath: lease.WorktreePath,
+						LeaseID: lease.LeaseID, LeaseHolder: lease.LeaseHolder}); err != nil {
+						return result, fmt.Errorf("resume interrupted Treehouse release for %s: %w", lease.LeaseID, err)
+					}
+				}
+				commandID, err := newCommandID()
+				if err != nil {
+					return result, err
+				}
+				if _, err := s.store.MarkTreehouseLeaseReleased(ctx, commandID, db.ReleaseTreehouseLeaseInput{
+					TaskID: lease.TaskID, Attempt: lease.Attempt, LeaseID: lease.LeaseID,
+					LeaseHolder: lease.LeaseHolder, Actor: "recovery",
+				}); err != nil {
+					return result, fmt.Errorf("finish interrupted Treehouse release for %s: %w", lease.LeaseID, err)
+				}
+				completeCommand := domain.CommandID(string(pendingRelease.RequestCommandID) + ":delivery:release-complete")
+				if err := s.store.CompleteDeliveryRelease(ctx, completeCommand, *pendingRelease); err != nil {
+					return result, fmt.Errorf("complete interrupted delivery release for %s: %w", lease.LeaseID, err)
+				}
+				result.Released++
+				continue
+			}
+			if matching {
 				result.Valid++
 				continue
 			}
@@ -207,6 +266,51 @@ func (s *Service) Reconcile(ctx context.Context) (ReconcileResult, error) {
 			} else {
 				result.Fenced++
 			}
+		}
+		for _, target := range targetsByProject[projectPath] {
+			holder := LeaseHolder(target.TaskID, target.Attempt)
+			var observed *WorktreeStatus
+			for index := range statuses {
+				status := &statuses[index]
+				if status.Status == "leased" && status.LeaseHolder == holder {
+					if observed != nil {
+						return result, fmt.Errorf("multiple Treehouse leases found for %s", holder)
+					}
+					observed = status
+				}
+			}
+			if observed == nil {
+				result.Awaiting++
+				continue
+			}
+			if observed.LeaseID == "" || observed.WorktreePath == "" {
+				return result, fmt.Errorf("Treehouse recovery found incomplete lease for %s", holder)
+			}
+			snapshot, err := s.git.Snapshot(ctx, observed.WorktreePath)
+			if err != nil {
+				return result, fmt.Errorf("inspect unrecorded Treehouse lease %s: %w", observed.LeaseID, err)
+			}
+			branch := TaskBranch(target.TaskID, target.Attempt)
+			if !snapshot.Clean || snapshot.Branch != branch {
+				return result, fmt.Errorf("unrecorded Treehouse lease %s has unexpected branch or dirty worktree", observed.LeaseID)
+			}
+			acquiredAt := time.Now().UTC()
+			if observed.LeasedAt != nil {
+				acquiredAt = observed.LeasedAt.UTC()
+			}
+			commandID, err := newCommandID()
+			if err != nil {
+				return result, err
+			}
+			if _, err := s.store.RecordTreehouseLease(ctx, commandID, db.RecordTreehouseLeaseInput{
+				TaskID: target.TaskID, Attempt: target.Attempt, ExpectedVersion: target.ExpectedVersion,
+				Lease: domain.TreehouseLease{LeaseID: observed.LeaseID, LeaseHolder: holder,
+					WorktreePath: observed.WorktreePath, Project: target.Project, Branch: branch,
+					BaseSHA: snapshot.Head, AcquiredAt: acquiredAt}, Actor: "recovery",
+			}); err != nil {
+				return result, fmt.Errorf("adopt unrecorded Treehouse lease %s: %w", observed.LeaseID, err)
+			}
+			result.Adopted++
 		}
 	}
 	return result, nil

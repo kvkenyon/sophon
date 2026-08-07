@@ -20,6 +20,36 @@ type LeaseAcquisitionTarget struct {
 	Existing        *domain.TreehouseLease
 }
 
+// UnleasedProvisioningTargets identifies attempts that may have crashed after
+// Treehouse allocation but before the lease transaction committed. The
+// external reconciler may adopt only an exact deterministic holder match.
+func (s *Store) UnleasedProvisioningTargets(ctx context.Context) ([]LeaseAcquisitionTarget, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT t.id, t.current_attempt, t.version, p.name, p.path
+		FROM tasks t
+		JOIN missions m ON m.id = t.mission_id
+		JOIN projects p ON p.id = m.project_id
+		LEFT JOIN treehouse_leases l ON l.task_id = t.id AND l.attempt = t.current_attempt
+		WHERE t.state = ? AND l.lease_id IS NULL
+		ORDER BY t.created_at, t.id`, domain.TaskProvisioning)
+	if err != nil {
+		return nil, fmt.Errorf("list unleased provisioning tasks: %w", err)
+	}
+	defer rows.Close()
+	var targets []LeaseAcquisitionTarget
+	for rows.Next() {
+		var target LeaseAcquisitionTarget
+		if err := rows.Scan(&target.TaskID, &target.Attempt, &target.ExpectedVersion,
+			&target.Project, &target.ProjectPath); err != nil {
+			return nil, fmt.Errorf("scan unleased provisioning task: %w", err)
+		}
+		targets = append(targets, target)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate unleased provisioning tasks: %w", err)
+	}
+	return targets, nil
+}
+
 // LeaseTarget verifies that attempt is still authoritative and returns the
 // registered project used as the working directory for Treehouse.
 func (s *Store) LeaseTarget(ctx context.Context, taskID domain.TaskID, attempt int) (LeaseAcquisitionTarget, error) {

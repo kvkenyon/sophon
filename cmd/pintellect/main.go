@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -616,7 +615,7 @@ func workerComplete(ctx context.Context, taskID domain.TaskID, args []string) er
 	if err != nil {
 		return err
 	}
-	command := completionCommandID(taskID, *attempt, *headSHA, absoluteResult)
+	command := worker.CompletionCommandID(taskID, *attempt, *headSHA, absoluteResult)
 	completer := worker.Completer{Store: store, Git: gitcontrol.NewClient(),
 		Leases: treehouse.NewCommandClient(*treehouseBinary), TaskFiles: worker.BriefGenerator{BaseDir: *taskFiles}}
 	completed, err := completer.Complete(ctx, worker.CompleteRequest{
@@ -677,11 +676,6 @@ func suppliedCommandID(value string) (domain.CommandID, error) {
 		return domain.CommandID(value), nil
 	}
 	return commandID()
-}
-
-func completionCommandID(taskID domain.TaskID, attempt int, headSHA, resultPath string) domain.CommandID {
-	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%s", taskID, attempt, strings.ToLower(headSHA), resultPath)))
-	return domain.CommandID(fmt.Sprintf("cmd_worker_complete_%x", digest[:16]))
 }
 
 func encode(value any) error {

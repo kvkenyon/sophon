@@ -90,11 +90,12 @@ func (f *fakeRemote) HeadSHA(context.Context, string, string, string) (string, e
 type fakeGate struct {
 	result delivery.GateResult
 	calls  int
+	err    error
 }
 
 func (f *fakeGate) Run(context.Context, string, string) (delivery.GateResult, error) {
 	f.calls++
-	return f.result, nil
+	return f.result, f.err
 }
 
 func TestDeliveryIdempotencySameCommandReturnsSamePR(t *testing.T) {
@@ -145,6 +146,31 @@ func TestCrashAfterPRCreationReconcilesWithoutDuplicate(t *testing.T) {
 	if remote.creates != 1 || remote.finds != 2 || result.Delivery.PRNumber != 17 ||
 		result.Delivery.State != delivery.StateDelivered {
 		t.Fatalf("reconciled result=%+v creates=%d finds=%d", result, remote.creates, remote.finds)
+	}
+}
+
+func TestStartupReconcileReplaysPersistedDeliveryInputs(t *testing.T) {
+	store, task, branch := readyTask(t, domain.DeliveryPR)
+	defer store.Close()
+	local := &fakeLocalGit{head: testHeadSHA, branch: branch, repository: "git@example.invalid/repo.git"}
+	remote := &fakeRemote{crashAfterCreate: true}
+	service := delivery.Service{Store: store, Git: local, Remote: remote}
+	request := delivery.Request{TaskID: task.ID, CommandID: "cmd_delivery_restart",
+		Base: "release/v1", Actor: "commander"}
+	if _, err := service.Deliver(context.Background(), request); err == nil {
+		t.Fatal("injected post-create crash unexpectedly succeeded")
+	}
+	record, err := store.Delivery(context.Background(), task.ID, 1)
+	if err != nil || record == nil || record.RequestBase != request.Base || record.RequestActor != request.Actor {
+		t.Fatalf("persisted recovery request=%+v err=%v", record, err)
+	}
+	remote.crashAfterCreate = false
+	result, err := service.Reconcile(context.Background(), task.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.creates != 1 || result.Task.State != domain.TaskDelivered || result.Delivery.PRNumber != 17 {
+		t.Fatalf("reconciled result=%+v creates=%d", result, remote.creates)
 	}
 }
 
@@ -239,8 +265,29 @@ func TestFailedGateIsIdempotentAndNewCommandCanRetry(t *testing.T) {
 	}
 }
 
+func TestStartupDoesNotSilentlyRepeatInterruptedNoMistakesGate(t *testing.T) {
+	store, task, branch := readyTask(t, domain.DeliveryGate)
+	defer store.Close()
+	local := &fakeLocalGit{head: testHeadSHA, branch: branch, repository: "git@example.invalid/repo.git"}
+	remote := &fakeRemote{}
+	gate := &fakeGate{err: errors.New("injected crash during no-mistakes")}
+	service := delivery.Service{Store: store, Git: local, Remote: remote, Gate: gate}
+	if _, err := service.Deliver(context.Background(), delivery.Request{
+		TaskID: task.ID, CommandID: "cmd_gate_crash", Actor: "test",
+	}); err == nil {
+		t.Fatal("injected gate crash unexpectedly succeeded")
+	}
+	result, err := service.Reconcile(context.Background(), task.ID, 1)
+	if !errors.Is(err, delivery.ErrGateRecoveryRequired) || gate.calls != 1 ||
+		result.Delivery.GateState != delivery.GatePending || result.Task.State != domain.TaskValidating {
+		t.Fatalf("reconcile result=%+v err=%v gateCalls=%d", result, err, gate.calls)
+	}
+}
+
 type releaseCLI struct {
-	releases []treehouse.Allocation
+	releases   []treehouse.Allocation
+	statuses   []treehouse.WorktreeStatus
+	releaseErr error
 }
 
 func (*releaseCLI) Acquire(context.Context, string, string) (treehouse.Allocation, error) {
@@ -249,17 +296,21 @@ func (*releaseCLI) Acquire(context.Context, string, string) (treehouse.Allocatio
 
 func (f *releaseCLI) Release(_ context.Context, _ string, allocation treehouse.Allocation) error {
 	f.releases = append(f.releases, allocation)
-	return nil
+	return f.releaseErr
 }
 
-func (*releaseCLI) Status(context.Context, string) ([]treehouse.WorktreeStatus, error) {
-	return nil, errors.New("unexpected status")
+func (f *releaseCLI) Status(context.Context, string) ([]treehouse.WorktreeStatus, error) {
+	return f.statuses, nil
 }
 
 type unusedGitInspector struct{}
 
 func (unusedGitInspector) CreateTaskBranch(context.Context, string, string) (gitcontrol.Snapshot, error) {
 	return gitcontrol.Snapshot{}, errors.New("unexpected task branch creation")
+}
+
+func (unusedGitInspector) Snapshot(context.Context, string) (gitcontrol.Snapshot, error) {
+	return gitcontrol.Snapshot{}, errors.New("unexpected task snapshot")
 }
 
 func TestReleaseUsesConditionalM2LeasePath(t *testing.T) {
@@ -281,6 +332,106 @@ func TestReleaseUsesConditionalM2LeasePath(t *testing.T) {
 		cli.releases[0].LeaseID != "lease-delivery" || cli.releases[0].LeaseHolder != "holder-delivery" ||
 		cli.releases[0].WorktreePath == "" {
 		t.Fatalf("released=%+v external conditional releases=%+v", released, cli.releases)
+	}
+	if _, err := service.Release(context.Background(), task.ID, "cmd_delivery_release_retry", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if len(cli.releases) != 1 {
+		t.Fatalf("idempotent release repeated external return: %+v", cli.releases)
+	}
+}
+
+func TestStartupFinishesReleaseThatCompletedBeforeDatabaseRecord(t *testing.T) {
+	ctx := context.Background()
+	store, task, branch := readyTask(t, domain.DeliveryBranch)
+	defer store.Close()
+	service := delivery.Service{Store: store, Git: &fakeLocalGit{head: testHeadSHA, branch: branch}}
+	if _, err := service.Deliver(ctx, delivery.Request{TaskID: task.ID,
+		CommandID: "cmd_delivery_before_release_crash", Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	releaseCommand := domain.CommandID("cmd_release_crash")
+	reservation, err := store.ReserveDelivery(ctx, releaseCommand, delivery.ReserveInput{
+		TaskID: task.ID, Operation: "release", Actor: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := store.TreehouseLease(ctx, task.ID, reservation.Attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := delivery.ReleaseIntentInput{TaskID: task.ID, Attempt: reservation.Attempt,
+		LeaseID: lease.LeaseID, LeaseHolder: lease.LeaseHolder,
+		RequestCommandID: releaseCommand, Actor: "test"}
+	if err := store.PrepareDeliveryRelease(ctx, "cmd_release_crash:delivery:release-prepare", intent); err != nil {
+		t.Fatal(err)
+	}
+
+	// Model a process death after Treehouse accepted the guarded return: the
+	// worktree is visible but no longer carries our lease identity.
+	cli := &releaseCLI{statuses: []treehouse.WorktreeStatus{{WorktreePath: lease.WorktreePath, Status: "available"}}}
+	leaseService := treehouse.NewService(store, cli, unusedGitInspector{})
+	reconciled, err := leaseService.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconciled.Released != 1 || len(cli.releases) != 0 {
+		t.Fatalf("reconciled=%+v external releases=%+v", reconciled, cli.releases)
+	}
+	record, err := store.Delivery(ctx, task.ID, reservation.Attempt)
+	if err != nil || record == nil || record.ReleaseState != "completed" {
+		t.Fatalf("startup did not complete release record=%+v err=%v", record, err)
+	}
+
+	service = delivery.Service{Store: store, Leases: leaseService}
+	released, err := service.Release(ctx, task.ID, "cmd_release_after_restart", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Delivery(ctx, task.ID, reservation.Attempt)
+	if err != nil || record == nil || record.ReleaseState != "completed" ||
+		released.State != domain.TreehouseLeaseReleased || len(cli.releases) != 0 {
+		t.Fatalf("record=%+v released=%+v external=%+v err=%v", record, released, cli.releases, err)
+	}
+}
+
+func TestStartupResumesReleaseIntentBeforeExternalReturn(t *testing.T) {
+	ctx := context.Background()
+	store, task, branch := readyTask(t, domain.DeliveryBranch)
+	defer store.Close()
+	service := delivery.Service{Store: store, Git: &fakeLocalGit{head: testHeadSHA, branch: branch}}
+	if _, err := service.Deliver(ctx, delivery.Request{TaskID: task.ID,
+		CommandID: "cmd_delivery_before_pending_release", Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	commandID := domain.CommandID("cmd_pending_release")
+	reservation, err := store.ReserveDelivery(ctx, commandID, delivery.ReserveInput{
+		TaskID: task.ID, Operation: "release", Actor: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := store.TreehouseLease(ctx, task.ID, reservation.Attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := delivery.ReleaseIntentInput{TaskID: task.ID, Attempt: reservation.Attempt,
+		LeaseID: lease.LeaseID, LeaseHolder: lease.LeaseHolder, RequestCommandID: commandID, Actor: "test"}
+	if err := store.PrepareDeliveryRelease(ctx, "cmd_pending_release:delivery:release-prepare", intent); err != nil {
+		t.Fatal(err)
+	}
+	cli := &releaseCLI{statuses: []treehouse.WorktreeStatus{{WorktreePath: lease.WorktreePath,
+		Status: "leased", LeaseID: lease.LeaseID, LeaseHolder: lease.LeaseHolder}}}
+	leaseService := treehouse.NewService(store, cli, unusedGitInspector{})
+	reconciled, err := leaseService.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Delivery(ctx, task.ID, reservation.Attempt)
+	if err != nil || reconciled.Released != 1 || len(cli.releases) != 1 ||
+		record == nil || record.ReleaseState != "completed" {
+		t.Fatalf("reconciled=%+v record=%+v external=%+v err=%v", reconciled, record, cli.releases, err)
 	}
 }
 

@@ -101,6 +101,31 @@ func (s *Store) Tasks(ctx context.Context, missionID domain.MissionID) ([]domain
 	return items, nil
 }
 
+// NonterminalTasks returns every task that startup reconciliation may need to
+// observe. The explicit state list keeps recovery aligned with task policy
+// without treating needs_attention as terminal or inferring from timestamps.
+func (s *Store) NonterminalTasks(ctx context.Context) ([]domain.Task, error) {
+	rows, err := s.db.QueryContext(ctx, taskSelectMany+` WHERE state NOT IN (
+		'delivered', 'delivered_branch', 'report_ready', 'cancelled', 'failed'
+	) ORDER BY created_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("list nonterminal tasks: %w", err)
+	}
+	defer rows.Close()
+	items := make([]domain.Task, 0)
+	for rows.Next() {
+		item, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate nonterminal tasks: %w", err)
+	}
+	return items, nil
+}
+
 // WorkerSessions returns all durable worker placements for a mission.
 func (s *Store) WorkerSessions(ctx context.Context, missionID domain.MissionID) ([]domain.WorkerSession, error) {
 	rows, err := s.db.QueryContext(ctx, workerSessionSelect+` WHERE task_id IN (SELECT id FROM tasks WHERE mission_id = ?) ORDER BY task_id, attempt`, missionID)
