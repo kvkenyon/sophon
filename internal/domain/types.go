@@ -61,6 +61,7 @@ type MissionState string
 const (
 	MissionActive     MissionState = "active"
 	MissionCompleting MissionState = "completing"
+	MissionCancelling MissionState = "cancelling"
 	MissionCompleted  MissionState = "completed"
 	MissionCancelled  MissionState = "cancelled"
 )

@@ -44,7 +44,7 @@ func (s *Store) Missions(ctx context.Context) ([]domain.Mission, error) {
 // ActiveProjectMissions returns the resumable missions for one registered
 // project. Home uses this only when no persistent project commander exists.
 func (s *Store) ActiveProjectMissions(ctx context.Context, projectID domain.ProjectID) ([]domain.Mission, error) {
-	rows, err := s.db.QueryContext(ctx, missionSelect+" WHERE project_id = ? AND state IN ('active', 'completing') ORDER BY created_at, id", projectID)
+	rows, err := s.db.QueryContext(ctx, missionSelect+" WHERE project_id = ? AND state IN ('active', 'completing', 'cancelling') ORDER BY created_at, id", projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list active project missions: %w", err)
 	}

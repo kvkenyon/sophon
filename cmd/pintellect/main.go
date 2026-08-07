@@ -112,7 +112,49 @@ func mission(ctx context.Context, args []string) error {
 	if len(args) >= 2 && args[0] == "digest" {
 		return missionDigest(ctx, domain.MissionID(args[1]), args[2:])
 	}
-	return errors.New("expected: pintellect mission create|timeline|digest")
+	if len(args) >= 2 && args[0] == "cancel" {
+		return missionCancel(ctx, domain.MissionID(args[1]), args[2:])
+	}
+	return errors.New("expected: pintellect mission create|timeline|digest|cancel")
+}
+
+func missionCancel(ctx context.Context, missionID domain.MissionID, args []string) error {
+	flags := flag.NewFlagSet("mission cancel", flag.ContinueOnError)
+	dbPath := flags.String("db", "", "SQLite database path")
+	jsonOutput := flags.Bool("json", false, "emit JSON")
+	treehouseBinary := flags.String("treehouse", "treehouse", "Treehouse CLI binary")
+	herdrBinary := flags.String("herdr", "herdr", "Herdr CLI binary")
+	herdrSession := flags.String("herdr-session", "default", "explicit Herdr session name")
+	herdrWorkspace := flags.String("herdr-workspace-label", "pintellect", "Herdr workspace presentation label")
+	commandValue := flags.String("command-id", "", "idempotency command ID")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("mission cancel does not accept positional arguments")
+	}
+	if strings.TrimSpace(*herdrSession) == "" {
+		return errors.New("mission cancel requires an explicit --herdr-session")
+	}
+	store, err := openStore(ctx, *dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	command, err := suppliedCommandID(*commandValue)
+	if err != nil {
+		return err
+	}
+	canceller := worker.Canceller{Store: store, Treehouse: treehouse.NewService(store, treehouse.NewCommandClient(*treehouseBinary), gitcontrol.NewClient()), Herdr: herdr.NewCommandAdapter(*herdrBinary, *herdrSession, *herdrWorkspace)}
+	cancelled, err := (&worker.MissionCanceller{Store: store, Tasks: &canceller}).Cancel(ctx, missionID, command)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return encode(cancelled)
+	}
+	fmt.Printf("Mission %s cancelled\n", cancelled.ID)
+	return nil
 }
 
 func missionDigest(ctx context.Context, missionID domain.MissionID, args []string) error {
@@ -735,6 +777,7 @@ func usage() {
   pintellect project list [--db PATH] [--json]
   pintellect project inspect NAME [--db PATH] [--json]
   pintellect mission create --project PATH --title TITLE --objective OBJECTIVE [--acceptance TEXT]
+  pintellect mission cancel ID [--db PATH] [--json]
   pintellect task create MISSION --title TITLE --objective OBJECTIVE [--acceptance TEXT]
   pintellect task start TASK [--herdr-session NAME] [--db PATH]
   pintellect task retry TASK [--db PATH]

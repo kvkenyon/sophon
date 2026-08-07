@@ -34,6 +34,9 @@ func (c *Canceller) Cancel(ctx context.Context, taskID domain.TaskID, commandID 
 	if err != nil {
 		return domain.Task{}, err
 	}
+	if isTerminal(before.State) {
+		return before, nil
+	}
 	cancelled, err := c.Store.CancelTask(ctx, commandID, taskID, before.Version, "operator")
 	if err != nil {
 		return domain.Task{}, err
@@ -56,4 +59,13 @@ func (c *Canceller) Cancel(ctx context.Context, taskID domain.TaskID, commandID 
 		}
 	}
 	return cancelled, nil
+}
+
+func isTerminal(state domain.TaskState) bool {
+	switch state {
+	case domain.TaskDelivered, domain.TaskDeliveredBranch, domain.TaskReportReady, domain.TaskCancelled, domain.TaskFailed:
+		return true
+	default:
+		return false
+	}
 }

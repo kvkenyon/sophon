@@ -191,6 +191,13 @@ func (s *Store) CreateTask(ctx context.Context, commandID domain.CommandID, in C
 		return domain.Task{}, err
 	}
 	return runCommand(ctx, s, commandID, "task.create", in, func(tx *sql.Tx) (domain.Task, error) {
+		var missionState domain.MissionState
+		if err := tx.QueryRowContext(ctx, "SELECT state FROM missions WHERE id = ?", in.MissionID).Scan(&missionState); err != nil {
+			return domain.Task{}, mapNotFound("load task mission", err)
+		}
+		if missionState != domain.MissionActive && missionState != domain.MissionCompleting {
+			return domain.Task{}, fmt.Errorf("cannot create task for mission in state %q", missionState)
+		}
 		rawID, err := id.New("tsk")
 		if err != nil {
 			return domain.Task{}, err

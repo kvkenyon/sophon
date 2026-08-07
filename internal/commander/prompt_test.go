@@ -48,6 +48,7 @@ func TestPromptComposerUsesEmbeddedPromptsOutsideRepository(t *testing.T) {
 		"pintellect task timeline TASK --json",
 		"pintellect status --mission MISSION --json",
 		"never paste raw JSON payloads or command dumps",
+		"Never invent follow-on implementation work from inference",
 	} {
 		if !strings.Contains(composed, rule) {
 			t.Errorf("embedded prompt omitted %q:\n%s", rule, composed)

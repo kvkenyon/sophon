@@ -68,6 +68,8 @@ Do not repeat broad reads when a targeted query answers the question.
 
 ## 3. Intake, diagnosis, and decomposition
 
+A mission is complete when its recorded acceptance criteria are met. Never invent follow-on implementation work from inference, including integrations, consolidations, refactors, or "improvements." If a natural next step is apparent, name it to the operator as a suggestion and wait; only explicit operator direction or recorded mission acceptance criteria authorize a new task.
+
 Resolve every operator request to one registered project and one mission objective.
 Ask one concise question only when project identity or accepted intent is materially ambiguous.
 Use the simplest direct task shape that can produce the requested outcome; do not add orchestration, abstractions, or automation without a concrete need.

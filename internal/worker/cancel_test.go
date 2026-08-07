@@ -71,3 +71,27 @@ func TestCancelWithDeadSessionStillCancels(t *testing.T) {
 		t.Fatalf("cancel events=%+v", events[len(events)-2:])
 	}
 }
+
+func TestMissionCancelCancelsRunningTaskAndReleasesLease(t *testing.T) {
+	store, task, _ := setupRunningWorker(t)
+	leases := &cancelLeases{}
+	runtime := &cancelHerdr{state: herdr.StateRunning}
+	cancelled, err := (&MissionCanceller{Store: store, Tasks: &Canceller{Store: store, Treehouse: leases, Herdr: runtime}}).Cancel(context.Background(), task.MissionID, "cmd_mission_cancel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.State != domain.MissionCancelled || leases.calls != 1 || runtime.stops != 1 {
+		t.Fatalf("mission=%+v releases=%d stops=%d", cancelled, leases.calls, runtime.stops)
+	}
+	updated, err := store.Task(context.Background(), task.ID)
+	if err != nil || updated.State != domain.TaskCancelled {
+		t.Fatalf("task=%+v err=%v", updated, err)
+	}
+	// A repeated top-level command returns its durable result without cleanup.
+	if _, err := (&MissionCanceller{Store: store, Tasks: &Canceller{Store: store, Treehouse: leases, Herdr: runtime}}).Cancel(context.Background(), task.MissionID, "cmd_mission_cancel"); err != nil {
+		t.Fatal(err)
+	}
+	if leases.calls != 1 {
+		t.Fatalf("repeat release calls=%d", leases.calls)
+	}
+}

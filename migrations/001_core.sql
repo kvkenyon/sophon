@@ -21,7 +21,7 @@ CREATE TABLE missions (
     title                       TEXT NOT NULL,
     objective                   TEXT NOT NULL,
     acceptance_criteria_json    TEXT NOT NULL DEFAULT '[]',
-    state                       TEXT NOT NULL CHECK (state IN ('active', 'completing', 'completed', 'cancelled')),
+    state                       TEXT NOT NULL CHECK (state IN ('active', 'completing', 'cancelling', 'completed', 'cancelled')),
     version                     INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     max_wall_clock_ns           INTEGER NOT NULL DEFAULT 0,
     max_concurrent_tasks        INTEGER NOT NULL DEFAULT 0,
