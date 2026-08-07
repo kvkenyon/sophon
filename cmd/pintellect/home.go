@@ -31,6 +31,13 @@ func homeCommand(ctx context.Context, args []string) error {
 	if flags.NArg() != 0 {
 		return errors.New("home does not accept positional arguments")
 	}
+	paths, err := currentDaemonPaths()
+	if err != nil {
+		return err
+	}
+	if _, running := daemonPID(paths); !running {
+		fmt.Println("Warning: pintellectd is not running; wake routing is unavailable. Start it with: pintellect daemon start")
+	}
 
 	operatorSession, err := detectHerdrSession(ctx, *herdrBinary, strings.TrimSpace(*herdrSession), os.Getenv)
 	if err != nil {

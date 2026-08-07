@@ -45,6 +45,8 @@ func run(ctx context.Context, args []string) error {
 		return initialize(ctx, args[1:])
 	case "mission":
 		return mission(ctx, args[1:])
+	case "daemon":
+		return daemonCommand(ctx, args[1:])
 	case "project":
 		return project(ctx, args[1:])
 	case "status":
@@ -103,6 +105,9 @@ func initialize(ctx context.Context, args []string) error {
 }
 
 func mission(ctx context.Context, args []string) error {
+	if len(args) >= 1 && args[0] == "list" {
+		return missionList(ctx, args[1:])
+	}
 	if len(args) >= 1 && args[0] == "create" {
 		return missionCreate(ctx, args[1:])
 	}
@@ -115,7 +120,78 @@ func mission(ctx context.Context, args []string) error {
 	if len(args) >= 2 && args[0] == "cancel" {
 		return missionCancel(ctx, domain.MissionID(args[1]), args[2:])
 	}
-	return errors.New("expected: pintellect mission create|timeline|digest|cancel")
+	return errors.New("expected: pintellect mission list|create|timeline|digest|cancel")
+}
+
+type missionListItem struct {
+	ID          domain.MissionID    `json:"id"`
+	Title       string              `json:"title"`
+	State       domain.MissionState `json:"state"`
+	TaskCounts  taskBucketCounts    `json:"task_counts"`
+	OpenSignals int                 `json:"open_signals"`
+	CreatedAt   time.Time           `json:"created_at"`
+}
+
+type taskBucketCounts struct {
+	Active    int `json:"active"`
+	Done      int `json:"done"`
+	Attention int `json:"attention"`
+}
+
+func missionList(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("mission list", flag.ContinueOnError)
+	dbPath := flags.String("db", "", "SQLite database path")
+	jsonOutput := flags.Bool("json", false, "emit JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("mission list does not accept positional arguments")
+	}
+	store, err := openStore(ctx, *dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	missions, err := store.Missions(ctx)
+	if err != nil {
+		return err
+	}
+	items := make([]missionListItem, 0, len(missions))
+	for _, item := range missions {
+		tasks, err := store.Tasks(ctx, item.ID)
+		if err != nil {
+			return err
+		}
+		open, err := store.Signals(ctx, db.ListSignalsFilter{MissionID: item.ID, Status: "open"})
+		if err != nil {
+			return err
+		}
+		view := missionListItem{ID: item.ID, Title: item.Title, State: item.State, OpenSignals: len(open), CreatedAt: item.CreatedAt}
+		for _, task := range tasks {
+			addTaskBucket(&view.TaskCounts, task.State)
+		}
+		items = append(items, view)
+	}
+	if *jsonOutput {
+		return encode(items)
+	}
+	fmt.Println("ID\tTITLE\tSTATE\tACTIVE\tDONE\tATTENTION\tOPEN SIGNALS\tCREATED")
+	for _, item := range items {
+		fmt.Printf("%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\n", item.ID, item.Title, item.State, item.TaskCounts.Active, item.TaskCounts.Done, item.TaskCounts.Attention, item.OpenSignals, item.CreatedAt.Format("2006-01-02"))
+	}
+	return nil
+}
+
+func addTaskBucket(counts *taskBucketCounts, state domain.TaskState) {
+	switch state {
+	case domain.TaskBlocked, domain.TaskNeedsAttention, domain.TaskFailed, domain.TaskDeliveryBlocked:
+		counts.Attention++
+	case domain.TaskReady, domain.TaskReportReady, domain.TaskDelivered, domain.TaskDeliveredBranch, domain.TaskCancelled:
+		counts.Done++
+	default:
+		counts.Active++
+	}
 }
 
 func missionCancel(ctx context.Context, missionID domain.MissionID, args []string) error {
@@ -777,6 +853,7 @@ func usage() {
   pintellect project list [--db PATH] [--json]
   pintellect project inspect NAME [--db PATH] [--json]
   pintellect mission create --project PATH --title TITLE --objective OBJECTIVE [--acceptance TEXT]
+  pintellect mission list [--db PATH] [--json]
   pintellect mission cancel ID [--db PATH] [--json]
   pintellect task create MISSION --title TITLE --objective OBJECTIVE [--acceptance TEXT]
   pintellect task start TASK [--herdr-session NAME] [--db PATH]
@@ -795,6 +872,7 @@ func usage() {
   pintellect commander start --agent pi|claude|codex --mission ID [--herdr-session NAME]
   pintellect commander prompt|steer|follow-up MESSAGE [--mission ID]
   pintellect commander attach|status [--mission ID]
+  pintellect daemon status|start|stop|restart [--db PATH]
   pintellect knowledge list [--status candidate|active] [--db PATH] [--json]
   pintellect knowledge promote|reject ID [--db PATH]
   pintellect knowledge supersede ID --by REPLACEMENT [--db PATH]

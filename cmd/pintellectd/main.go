@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -21,8 +23,18 @@ import (
 	"parallel-intellect/internal/worker"
 )
 
+const version = "0.3.0-m3"
+
+type daemonHealth struct {
+	Version          string    `json:"version"`
+	StartedAt        time.Time `json:"started_at"`
+	LastReconciledAt time.Time `json:"last_reconciled_at"`
+	DatabasePath     string    `json:"database_path"`
+}
+
 func main() {
 	path := flag.String("db", "", "SQLite database path")
+	statusFile := flag.String("status-file", "", "daemon health status file")
 	herdrBinary := flag.String("herdr", "herdr", "Herdr CLI binary")
 	treehouseBinary := flag.String("treehouse", "treehouse", "Treehouse CLI binary")
 	gitBinary := flag.String("git", "git", "Git binary")
@@ -31,6 +43,30 @@ func main() {
 	taskFiles := flag.String("task-files", "", "task artifact base directory")
 	commanderPoll := flag.Duration("commander-poll", time.Second, "commander reconciliation and event wake interval")
 	flag.Parse()
+	startedAt := time.Now().UTC()
+	writeHealth := func(last time.Time) {
+		if *statusFile == "" {
+			return
+		}
+		health := daemonHealth{Version: version, StartedAt: startedAt, LastReconciledAt: last, DatabasePath: *path}
+		encoded, err := json.Marshal(health)
+		if err != nil {
+			log.Printf("encode daemon health: %v", err)
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(*statusFile), 0o700); err != nil {
+			log.Printf("create daemon health directory: %v", err)
+			return
+		}
+		temporary := *statusFile + ".tmp"
+		if err := os.WriteFile(temporary, encoded, 0o600); err != nil {
+			log.Printf("write daemon health: %v", err)
+			return
+		}
+		if err := os.Rename(temporary, *statusFile); err != nil {
+			log.Printf("replace daemon health: %v", err)
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -63,6 +99,7 @@ func main() {
 			log.Printf("startup reconciliation failed: %v", err)
 			return
 		}
+		writeHealth(time.Now().UTC())
 		log.Printf("reconciled leases valid=%d adopted=%d awaiting=%d released=%d fenced=%d missing=%d tasks=%d",
 			report.Leases.Valid, report.Leases.Adopted, report.Leases.Awaiting,
 			report.Leases.Released, report.Leases.Fenced, report.Leases.Missing, len(report.Tasks))

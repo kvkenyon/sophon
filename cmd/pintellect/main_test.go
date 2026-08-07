@@ -107,6 +107,84 @@ func TestCLIStatusSnapshotSectionsAndJSON(t *testing.T) {
 	}
 }
 
+func TestCLIMissionListBucketsAndJSON(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.CreateProject(ctx, "mission_list_project", db.CreateProjectInput{Name: "mission-list", Path: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mission, err := store.CreateMission(ctx, "mission_list_one", db.CreateMissionInput{ProjectID: project, Title: "First mission", Objective: "list it"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := store.CreateMission(ctx, "mission_list_two", db.CreateMissionInput{ProjectID: project, Title: "Second mission", Objective: "also list it"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeTask := func(command string, state domain.TaskState) {
+		task, err := store.CreateTask(ctx, domain.CommandID(command), db.CreateTaskInput{MissionID: mission.ID, Kind: domain.TaskImplementation, Title: command, Objective: command, DeliveryMode: domain.DeliveryBranch})
+		if err != nil {
+			t.Fatal(err)
+		}
+		steps := []domain.TaskState{domain.TaskProvisioning, domain.TaskStarting, domain.TaskRunning}
+		if state == domain.TaskReady {
+			steps = append(steps, domain.TaskCollecting)
+		}
+		steps = append(steps, state)
+		for _, next := range steps {
+			if task.State == next {
+				continue
+			}
+			task, err = store.TransitionTask(ctx, domain.CommandID(command+"_"+string(next)), db.TransitionTaskInput{TaskID: task.ID, Attempt: task.CurrentAttempt, ExpectedState: task.State, ExpectedVersion: task.Version, To: next, Actor: "test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	makeTask("active", domain.TaskRunning)
+	makeTask("attention", domain.TaskBlocked)
+	makeTask("done", domain.TaskReady)
+	if _, err := store.CreateSignal(ctx, "mission_list_signal", db.CreateSignalInput{MissionID: mission.ID, Kind: signals.SignalDecision, Question: "Need answer", Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	jsonOutput := runCLI(t, "mission", "list", "--db", dbPath, "--json")
+	var items []missionListItem
+	if err := json.Unmarshal(jsonOutput, &items); err != nil {
+		t.Fatal(err)
+	}
+	var shape []map[string]json.RawMessage
+	if err := json.Unmarshal(jsonOutput, &shape); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"id", "title", "state", "task_counts", "open_signals", "created_at"} {
+		if _, ok := shape[0][key]; !ok {
+			t.Errorf("mission list JSON lacks %q: %s", key, jsonOutput)
+		}
+	}
+	if len(items) != 2 {
+		t.Fatalf("missions = %+v", items)
+	}
+	if items[0].ID != mission.ID || items[0].TaskCounts != (taskBucketCounts{Active: 1, Done: 1, Attention: 1}) || items[0].OpenSignals != 1 || items[0].CreatedAt.IsZero() {
+		t.Fatalf("first mission = %+v", items[0])
+	}
+	if items[1].ID != other.ID || items[1].TaskCounts != (taskBucketCounts{}) {
+		t.Fatalf("second mission = %+v", items[1])
+	}
+	human := string(runCLI(t, "mission", "list", "--db", dbPath))
+	if !strings.Contains(human, "ATTENTION") || !strings.Contains(human, "First mission") {
+		t.Fatalf("human list = %s", human)
+	}
+}
+
 func TestWaitReturnsWhenNewMissionEventLands(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "state.db")

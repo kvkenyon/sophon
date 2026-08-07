@@ -81,6 +81,7 @@ func TestProjectRootFromCWDRejectsNonRepositoryPlainly(t *testing.T) {
 
 func TestCLIHomeFromRepositoryStartsIntakeAndReattachesIdempotently(t *testing.T) {
 	root := t.TempDir()
+	t.Setenv("HOME", root)
 	projectPath := filepath.Join(root, "project")
 	if err := os.MkdirAll(projectPath, 0o700); err != nil {
 		t.Fatal(err)
@@ -124,7 +125,7 @@ esac
 	t.Setenv("HERDR_CLIENT_SOCKET_PATH", "")
 
 	output := string(runCLI(t, "home", "--db", dbPath, "--herdr", herdrBinary))
-	if !strings.Contains(output, "intake mode") || !strings.Contains(output, "attached home commander") {
+	if !strings.Contains(output, "Warning: pintellectd is not running; wake routing is unavailable. Start it with: pintellect daemon start") || !strings.Contains(output, "intake mode") || !strings.Contains(output, "attached home commander") {
 		t.Fatalf("first home output:\n%s", output)
 	}
 	output = string(runCLI(t, "home", "--db", dbPath, "--herdr", herdrBinary))
