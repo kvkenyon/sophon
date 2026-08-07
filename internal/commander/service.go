@@ -175,6 +175,17 @@ func (c *Controller) Send(ctx context.Context, missionID domain.MissionID, kind 
 	if persisted.State == domain.CommanderSessionNeedsAttention {
 		return persisted, db.ErrBudgetExhausted
 	}
+	messageCommand, err := newCommandID()
+	if err != nil {
+		return domain.CommanderSession{}, err
+	}
+	// Persist before Herdr delivery. A failed or killed pane must not be able
+	// to erase an operator instruction that was already accepted by the CLI.
+	if _, err := c.Store.RecordCommanderMessage(ctx, messageCommand, db.RecordCommanderMessageInput{
+		SessionID: persisted.ID, MissionID: missionID, Kind: string(kind), Message: message, Actor: "operator",
+	}); err != nil {
+		return domain.CommanderSession{}, err
+	}
 	snapshot, err := c.Store.CommanderLaunchContext(ctx, missionID)
 	if err != nil {
 		return domain.CommanderSession{}, err
@@ -207,13 +218,7 @@ func (c *Controller) Send(ctx context.Context, missionID domain.MissionID, kind 
 	if err != nil {
 		return domain.CommanderSession{}, err
 	}
-	messageCommand, err := newCommandID()
-	if err != nil {
-		return domain.CommanderSession{}, err
-	}
-	return c.Store.RecordCommanderMessage(ctx, messageCommand, db.RecordCommanderMessageInput{
-		SessionID: updated.ID, MissionID: missionID, Kind: string(kind), Message: message, Actor: "operator",
-	})
+	return updated, nil
 }
 
 func (c *Controller) Abort(ctx context.Context, missionID domain.MissionID) (domain.CommanderSession, error) {

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"sync"
@@ -9,6 +10,60 @@ import (
 
 	"parallel-intellect/internal/domain"
 )
+
+func TestCreateMissionPersistsVerbatimIntakeOperatorMessage(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t, ":memory:")
+	defer store.Close()
+	projectID, err := store.CreateProject(ctx, "cmd_intake_project", CreateProjectInput{Name: "intake", Path: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := store.RecordCommanderSession(ctx, "cmd_intake_session", RecordCommanderSessionInput{
+		ProjectID: projectID, Actor: "operator", Session: domain.CommanderSession{
+			ID: "csn_intake", Runtime: "codex", HerdrSessionName: "intake-session",
+			HerdrWorkspaceID: "workspace", HerdrTabID: "tab", HerdrPaneID: "pane",
+			HerdrAgentName: "commander", AgentSessionID: "native",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	words := "Refactor the design, but do not change the public API."
+	mission, err := store.CreateMission(ctx, "cmd_intake_mission", CreateMissionInput{
+		ProjectID: projectID, CommanderSessionID: session.ID, Title: "Refactor", Objective: "Refactor safely",
+		OperatorMessage: words,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.CommanderLaunchContext(ctx, mission.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.OperatorMessages) != 1 || snapshot.OperatorMessages[0].Kind != "intake" || snapshot.OperatorMessages[0].Message != words {
+		t.Fatalf("intake operator messages = %+v", snapshot.OperatorMessages)
+	}
+	events, err := store.MissionEvents(ctx, mission.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Type == "commander.intake" {
+			var payload struct {
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Message != words {
+				t.Fatalf("intake event message = %q", payload.Message)
+			}
+			return
+		}
+	}
+	t.Fatal("missing commander.intake event")
+}
 
 func TestCASContentionAllowsExactlyOneTransition(t *testing.T) {
 	ctx := context.Background()

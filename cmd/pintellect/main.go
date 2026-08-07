@@ -222,6 +222,7 @@ func missionCreate(ctx context.Context, args []string) error {
 	projectName := flags.String("project-name", "", "registered project name")
 	title := flags.String("title", "", "mission title")
 	objective := flags.String("objective", "", "mission objective")
+	operatorMessage := flags.String("operator-message", "", "verbatim operator intake direction")
 	maxAttempts := flags.Int("max-task-attempts", 3, "maximum attempts per task")
 	maxDuration := flags.Duration("max-duration", 4*time.Hour, "maximum mission wall-clock duration")
 	maxConcurrent := flags.Int("max-concurrent-tasks", 8, "maximum concurrently active tasks")
@@ -263,7 +264,7 @@ func missionCreate(ctx context.Context, args []string) error {
 		return err
 	}
 	created, err := store.CreateMission(ctx, missionCommand, db.CreateMissionInput{
-		ProjectID: projectID, Title: *title, Objective: *objective, AcceptanceCriteria: criteriaValues(criteria),
+		ProjectID: projectID, Title: *title, Objective: *objective, OperatorMessage: *operatorMessage, AcceptanceCriteria: criteriaValues(criteria),
 		Budget: domain.MissionBudget{MaxWallClock: *maxDuration, MaxConcurrentTasks: *maxConcurrent,
 			MaxTaskAttempts: *maxAttempts, MaxValidationRuns: *maxValidation},
 	})

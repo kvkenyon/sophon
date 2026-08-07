@@ -56,6 +56,14 @@ Project root: %s
 		}
 		body.WriteByte('\n')
 	}
+	if len(snapshot.OperatorMessages) > 0 {
+		body.WriteString("\n## Recent operator direction\n")
+		body.WriteString("\nThese are durable, chronological operator messages from this mission. Follow their current applicable intent; reconcile any conflict with structured state and ask when it is materially ambiguous.\n")
+		for _, message := range snapshot.OperatorMessages {
+			fmt.Fprintf(&body, "\n- [%s] %s", message.Kind, message.Message)
+		}
+		body.WriteByte('\n')
+	}
 	fmt.Fprintf(&body, "\n## Current mission state snapshot\n\n```json\n%s\n```\n", encoded)
 	return strings.TrimSpace(body.String()) + "\n", nil
 }
@@ -87,12 +95,15 @@ Greet the operator briefly and ask what we are working on. After the operator
 describes the task in natural language, infer a concise title, a concrete
 objective, and sensible acceptance criteria. Then run:
 
-    pintellect mission create --project %q --title <title> --objective <objective> --acceptance <criterion>%s
+    pintellect mission create --project %q --title <title> --objective <objective> --operator-message <verbatim-operator-words> --acceptance <criterion>%s
 
 Use repeated --acceptance arguments when useful. Read the returned mission ID,
 treat it as your bound mission, and proceed to execute it through the existing
 commander APIs. The operator must never be asked to run mission create. Do not
 create a speculative mission before receiving the operator's task description.
+Pass the operator's substantive words verbatim with --operator-message as well
+as preserving them in the mission objective and criteria. This records the
+direction before the intake conversation can be lost.
 `, project.Name, project.ID, project.Path, project.Path, dbArgument)
 	return strings.TrimSpace(body.String()) + "\n", nil
 }

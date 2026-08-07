@@ -225,6 +225,73 @@ func TestControllerPreservesPromptSteerAndFollowUpOperations(t *testing.T) {
 	}
 }
 
+func TestOperatorMessagesPersistBeforeDeliveryAndSurviveFreshRecovery(t *testing.T) {
+	ctx := context.Background()
+	store, missionID, promptDir := commanderTestStore(t)
+	runtime := &fakeCommanderRuntime{state: StateIdle}
+	started, err := (&Starter{Store: store, Runtime: runtime, Prompts: PromptComposer{Dir: promptDir}}).Start(ctx,
+		StartRequest{MissionID: missionID, Runtime: herdr.RuntimeCodex})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := Controller{Store: store, Runtime: runtime}
+	first := "Keep the refactor design narrow and reversible."
+	second := "Do not change the public API."
+	if _, err := controller.Send(ctx, missionID, MessagePrompt, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Send(ctx, missionID, MessageSteer, second); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.CommanderLaunchContext(ctx, missionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.OperatorMessages) != 2 || snapshot.OperatorMessages[0].Message != first || snapshot.OperatorMessages[1].Message != second {
+		t.Fatalf("operator messages = %+v", snapshot.OperatorMessages)
+	}
+	events, err := store.MissionEvents(ctx, missionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Message string `json:"message"`
+	}
+	found := false
+	for _, event := range events {
+		if event.Type == "commander.prompt" {
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			found = true
+			break
+		}
+	}
+	if !found || payload.Message != first {
+		t.Fatalf("prompt event payload = %+v, found=%t", payload, found)
+	}
+
+	runtime.state = StateMissing
+	missing, err := (&Reconciler{Store: store, Runtime: runtime}).Reconcile(ctx, missionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.resumeErr = errors.New("native session unavailable")
+	recovered, err := (&Recovery{Store: store, Runtime: runtime, Prompts: PromptComposer{Dir: promptDir}}).RecoverProject(ctx, started.Session.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.ID == missing.ID || runtime.starts != 2 {
+		t.Fatalf("fresh recovery = %+v missing=%+v starts=%d", recovered, missing, runtime.starts)
+	}
+	prompt := runtime.startConfig.Prompt
+	firstAt, secondAt := strings.Index(prompt, first), strings.Index(prompt, second)
+	if firstAt < 0 || secondAt < 0 || firstAt >= secondAt {
+		t.Fatalf("fresh commander prompt did not preserve ordered operator direction:\n%s", prompt)
+	}
+}
+
 func TestRecoveryReplacesMissingCommanderOrStartsFresh(t *testing.T) {
 	for _, test := range []struct {
 		name       string

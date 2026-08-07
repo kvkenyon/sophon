@@ -17,14 +17,26 @@ import (
 )
 
 type CommanderLaunchContext struct {
-	Mission     domain.Mission        `json:"mission"`
-	ProjectName string                `json:"project_name"`
-	ProjectPath string                `json:"project_path"`
-	Tasks       []domain.Task         `json:"tasks"`
-	Signals     []signalpolicy.Signal `json:"signals"`
-	Events      []domain.Event        `json:"recent_events"`
-	Digest      *digest.Artifact      `json:"mission_digest,omitempty"`
+	Mission          domain.Mission        `json:"mission"`
+	ProjectName      string                `json:"project_name"`
+	ProjectPath      string                `json:"project_path"`
+	Tasks            []domain.Task         `json:"tasks"`
+	Signals          []signalpolicy.Signal `json:"signals"`
+	Events           []domain.Event        `json:"recent_events"`
+	OperatorMessages []OperatorMessage     `json:"recent_operator_messages"`
+	Digest           *digest.Artifact      `json:"mission_digest,omitempty"`
 }
+
+// OperatorMessage is durable operator direction for a mission. It deliberately
+// does not depend on a particular commander session because replacement
+// commanders need the same context as their predecessors.
+type OperatorMessage struct {
+	Kind      string    `json:"kind"`
+	Message   string    `json:"message"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+const commanderPromptHistoryLimit = 12
 
 func (s *Store) CommanderLaunchContext(ctx context.Context, missionID domain.MissionID) (CommanderLaunchContext, error) {
 	mission, err := s.Mission(ctx, missionID)
@@ -49,6 +61,10 @@ func (s *Store) CommanderLaunchContext(ctx context.Context, missionID domain.Mis
 		return CommanderLaunchContext{}, err
 	}
 	result.Events = events
+	result.OperatorMessages, err = s.RecentCommanderOperatorMessages(ctx, missionID, commanderPromptHistoryLimit)
+	if err != nil {
+		return CommanderLaunchContext{}, err
+	}
 	artifact, err := s.LatestMissionDigest(ctx, missionID)
 	if err == nil {
 		result.Digest = &artifact
@@ -56,6 +72,45 @@ func (s *Store) CommanderLaunchContext(ctx context.Context, missionID domain.Mis
 		return CommanderLaunchContext{}, err
 	}
 	return result, nil
+}
+
+// RecentCommanderOperatorMessages returns the bounded chronological tail of
+// operator direction addressed to any commander session for a mission.
+func (s *Store) RecentCommanderOperatorMessages(ctx context.Context, missionID domain.MissionID, limit int) ([]OperatorMessage, error) {
+	if missionID == "" || limit < 1 {
+		return nil, errors.New("mission and positive message limit are required")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT kind, body_json, created_at FROM (
+		SELECT kind, body_json, created_at, id FROM messages
+		WHERE mission_id = ? AND sender_kind = 'operator' AND recipient_kind = 'commander'
+		ORDER BY created_at DESC, id DESC LIMIT ?
+	) ORDER BY created_at, id`, missionID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list recent commander operator messages: %w", err)
+	}
+	defer rows.Close()
+	items := make([]OperatorMessage, 0, limit)
+	for rows.Next() {
+		var item OperatorMessage
+		var body, created string
+		if err := rows.Scan(&item.Kind, &body, &created); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(body), &struct {
+			Message *string `json:"message"`
+		}{Message: &item.Message}); err != nil {
+			return nil, fmt.Errorf("decode commander operator message: %w", err)
+		}
+		if item.Message == "" {
+			return nil, errors.New("commander operator message has no text")
+		}
+		item.CreatedAt, err = parseTime(created)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 type RecordCommanderSessionInput struct {
@@ -474,7 +529,8 @@ type RecordCommanderMessageInput struct {
 }
 
 // RecordCommanderMessage makes operator-to-commander communication part of
-// the family-scoped durable message/event model after Herdr accepts it.
+// the family-scoped durable message/event model before it is delivered to
+// Herdr, so session loss cannot lose operator intent.
 func (s *Store) RecordCommanderMessage(ctx context.Context, commandID domain.CommandID, in RecordCommanderMessageInput) (domain.CommanderSession, error) {
 	if in.SessionID == "" || in.MissionID == "" || strings.TrimSpace(in.Message) == "" || strings.TrimSpace(in.Actor) == "" {
 		return domain.CommanderSession{}, errors.New("session, mission, message, and actor are required")
@@ -510,6 +566,7 @@ func (s *Store) RecordCommanderMessage(ctx context.Context, commandID domain.Com
 		if err := appendEvent(ctx, tx, eventInput{MissionID: &in.MissionID, Actor: in.Actor,
 			Type: "commander." + in.Kind, CommandID: &commandID, Payload: map[string]any{
 				"message_id": rawID, "commander_session_id": in.SessionID,
+				"message": in.Message,
 			}}); err != nil {
 			return domain.CommanderSession{}, err
 		}

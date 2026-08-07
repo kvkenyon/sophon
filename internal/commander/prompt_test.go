@@ -95,6 +95,7 @@ func TestPromptComposerIntakeCreatesMissionConversationally(t *testing.T) {
 		"KNOWLEDGE DIGEST SIGNAL BASELINE", "Mode: intake", "ask what we are working on",
 		"pintellect mission create --project", project.Path, "--db \"/state/pintellect.db\"",
 		"operator must never be asked to run mission create",
+		"--operator-message <verbatim-operator-words>",
 	} {
 		if !strings.Contains(composed, fragment) {
 			t.Errorf("intake prompt omitted %q:\n%s", fragment, composed)
