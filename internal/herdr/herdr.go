@@ -42,8 +42,12 @@ var (
 )
 
 type StartRequest struct {
-	TaskID       domain.TaskID
-	Attempt      int
+	TaskID  domain.TaskID
+	Attempt int
+	// AgentName lets non-worker callers provide a stable presentation identity
+	// while retaining the same runtime launch profiles. Worker callers leave it
+	// empty and receive the attempt-derived name.
+	AgentName    string
 	WorktreePath string
 	Brief        string
 	Runtime      Runtime
@@ -132,6 +136,41 @@ func (a *CommandAdapter) Wake(ctx context.Context, session Session, message stri
 		"--wait", "--until", "working", "--timeout", "30000")
 	if err != nil {
 		return Session{}, commandError("wake "+string(sessionRuntime(session)), err, stderr)
+	}
+	return session, nil
+}
+
+// Submit delivers text to a registered live agent without imposing worker
+// idle-state policy. Commander steering and follow-ups intentionally share
+// Herdr's terminal-driven prompt transport. Restored husks still go through
+// Wake so their persisted native session is resumed create-before-close.
+func (a *CommandAdapter) Submit(ctx context.Context, session Session, message string) (Session, error) {
+	if a == nil || a.runner == nil || strings.TrimSpace(a.SessionName) == "" || session.PaneID == "" {
+		return Session{}, errors.New("Herdr submit requires an explicit session and pane")
+	}
+	if session.SessionName != "" && session.SessionName != a.SessionName {
+		return Session{}, errors.New("Herdr submit session identity mismatch")
+	}
+	if strings.TrimSpace(message) == "" {
+		return Session{}, errors.New("Herdr submit message is required")
+	}
+	state, err := a.Observe(ctx, session)
+	if err != nil {
+		return Session{}, err
+	}
+	switch state {
+	case StateHusk:
+		return a.Wake(ctx, session, message)
+	case StateLost:
+		return Session{}, ErrSessionMissing
+	case StateIdle, StateRunning:
+	default:
+		return Session{}, fmt.Errorf("Herdr submit cannot handle liveness state %q", state)
+	}
+	_, stderr, err := a.run(ctx, "agent", "prompt", session.PaneID, message,
+		"--wait", "--until", "working", "--timeout", "30000")
+	if err != nil {
+		return Session{}, commandError("submit to "+string(sessionRuntime(session)), err, stderr)
 	}
 	return session, nil
 }
@@ -291,8 +330,8 @@ func (a *CommandAdapter) Start(ctx context.Context, in StartRequest) (Session, e
 	if a == nil || a.runner == nil || strings.TrimSpace(a.SessionName) == "" {
 		return Session{}, errors.New("Herdr adapter requires an explicit session and runner")
 	}
-	if in.TaskID == "" || in.Attempt < 1 || strings.TrimSpace(in.WorktreePath) == "" || strings.TrimSpace(in.Brief) == "" {
-		return Session{}, errors.New("task, attempt, worktree, and brief are required")
+	if (in.TaskID == "" && strings.TrimSpace(in.AgentName) == "") || in.Attempt < 1 || strings.TrimSpace(in.WorktreePath) == "" || strings.TrimSpace(in.Brief) == "" {
+		return Session{}, errors.New("agent identity, attempt, worktree, and brief are required")
 	}
 	runtime := in.Runtime
 	if runtime == "" {
@@ -325,8 +364,17 @@ func (a *CommandAdapter) Start(ctx context.Context, in StartRequest) (Session, e
 	if err := json.Unmarshal(stdout, &created); err != nil {
 		return Session{}, fmt.Errorf("decode Herdr workspace response: %w", err)
 	}
+	name := strings.TrimSpace(in.AgentName)
+	if name == "" {
+		name = agentName(in.TaskID, in.Attempt)
+	} else {
+		name = unsafeName.ReplaceAllString(name, "-")
+	}
+	if name == "" {
+		return Session{}, errors.New("Herdr agent name is empty after normalization")
+	}
 	session := Session{
-		Runtime: runtime, AgentName: agentName(in.TaskID, in.Attempt), SessionName: a.SessionName,
+		Runtime: runtime, AgentName: name, SessionName: a.SessionName,
 		WorkspaceID: created.Result.Workspace.ID, TabID: created.Result.Tab.ID, PaneID: created.Result.RootPane.ID,
 		WorktreePath: in.WorktreePath, Model: strings.TrimSpace(in.Model), PiExtensionPath: strings.TrimSpace(in.PiExtensionPath),
 	}

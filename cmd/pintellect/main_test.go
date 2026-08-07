@@ -289,6 +289,83 @@ esac
 	}
 }
 
+func TestCLICommanderStartPromptAttachAndStatus(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "pintellect.db")
+	projectPath := filepath.Join(root, "project")
+	promptDir := filepath.Join(root, "prompts", "commander")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(promptDir, "AGENTS.md"), "COMMANDER CLI BASELINE\n", 0o600)
+
+	store, err := db.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID, err := store.CreateProject(context.Background(), "cmd_cli_commander_project", db.CreateProjectInput{Name: "cli-commander", Path: projectPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mission, err := store.CreateMission(context.Background(), "cmd_cli_commander_mission", db.CreateMissionInput{
+		ProjectID: projectID, Title: "CLI commander", Objective: "receive mission context",
+		AcceptanceCriteria: []domain.Criterion{{Description: "accept operator steer"}},
+		Budget:             domain.MissionBudget{MaxTaskAttempts: 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	herdrBinary := filepath.Join(root, "fake-herdr-commander")
+	herdrScript := `#!/bin/sh
+set -eu
+case "$1 $2" in
+  "workspace create") printf '{"result":{"workspace":{"workspace_id":"cw1"},"tab":{"tab_id":"cw1:t1"},"root_pane":{"pane_id":"cw1:p1"}}}\n' ;;
+  "pane run"|"agent rename") printf '{"result":{"ok":true}}\n' ;;
+  "pane read") printf 'OpenAI Codex\n' ;;
+  "pane get") printf '{"result":{"pane":{"pane_id":"cw1:p1"}}}\n' ;;
+  "agent get") printf '{"result":{"agent":{"agent":"codex","pane_id":"cw1:p1","agent_status":"idle","state_change_seq":1,"agent_session":{"value":"commander-codex-session"}}}}\n' ;;
+  "agent prompt") printf '{"result":{"agent":{"agent":"codex","pane_id":"cw1:p1","agent_session":{"value":"commander-codex-session"}},"ok":true}}\n' ;;
+  *) exit 2 ;;
+esac
+`
+	writeCLIFile(t, herdrBinary, herdrScript, 0o700)
+
+	startedJSON := runCLI(t, "commander", "start", "--agent", "codex", "--mission", string(mission.ID),
+		"--db", dbPath, "--herdr", herdrBinary, "--herdr-session", "fm-lab-cli-commander", "--prompt-dir", promptDir)
+	var started domain.CommanderSession
+	if err := json.Unmarshal(startedJSON, &started); err != nil {
+		t.Fatal(err)
+	}
+	if started.MissionID != mission.ID || started.AgentSessionID != "commander-codex-session" || started.State != domain.CommanderSessionRunning {
+		t.Fatalf("commander start = %+v", started)
+	}
+
+	promptedJSON := runCLI(t, "commander", "prompt", "Please acknowledge the steer", "--mission", string(mission.ID),
+		"--db", dbPath, "--herdr", herdrBinary)
+	var prompted domain.CommanderSession
+	if err := json.Unmarshal(promptedJSON, &prompted); err != nil {
+		t.Fatal(err)
+	}
+	if prompted.ID != started.ID || prompted.Version <= started.Version {
+		t.Fatalf("commander prompt = %+v", prompted)
+	}
+
+	statusJSON := runCLI(t, "commander", "status", "--mission", string(mission.ID), "--db", dbPath)
+	var status domain.CommanderSession
+	if err := json.Unmarshal(statusJSON, &status); err != nil || status.ID != started.ID {
+		t.Fatalf("commander status = %+v, %v", status, err)
+	}
+	attachJSON := runCLI(t, "commander", "attach", "--mission", string(mission.ID), "--db", dbPath, "--herdr", herdrBinary)
+	var attach struct {
+		Attach []string `json:"attach"`
+	}
+	if err := json.Unmarshal(attachJSON, &attach); err != nil || len(attach.Attach) < 6 || attach.Attach[len(attach.Attach)-1] != "fm-lab-cli-commander" {
+		t.Fatalf("commander attach = %+v, %v", attach, err)
+	}
+}
+
 func runCLI(t *testing.T, args ...string) []byte {
 	t.Helper()
 	reader, writer, err := os.Pipe()

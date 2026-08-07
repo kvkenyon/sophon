@@ -584,6 +584,27 @@ func TestCommandAdapterMissingPaneIsNotRelaunched(t *testing.T) {
 	}
 }
 
+func TestCommandAdapterSubmitSteersRunningAgent(t *testing.T) {
+	runner := &fakeRunner{responses: []runnerResponse{
+		{stdout: `{"result":{"pane":{"pane_id":"w1:p1"}}}`},
+		{stdout: `{"result":{"agent":{"agent":"codex","pane_id":"w1:p1","agent_status":"working","state_change_seq":2}}}`},
+		{stdout: `{"result":{"ok":true}}`},
+	}}
+	adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
+	session := Session{Runtime: RuntimeCodex, SessionName: "fm-lab-contract", PaneID: "w1:p1"}
+	updated, err := adapter.Submit(context.Background(), session, "bounded commander steer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated != session {
+		t.Fatalf("running submit changed session: before=%+v after=%+v", session, updated)
+	}
+	want := []string{"agent", "prompt", "w1:p1", "bounded commander steer", "--wait", "--until", "working", "--timeout", "30000", "--session", "fm-lab-contract"}
+	if len(runner.calls) != 3 || !reflect.DeepEqual(runner.calls[2], want) {
+		t.Fatalf("submit calls = %#v", runner.calls)
+	}
+}
+
 type labRunner struct {
 	helper  string
 	session string

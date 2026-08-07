@@ -10,6 +10,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Worker-session lifecycle policy is separate from task lifecycle in `internal/workersession`; idle never means done. Herdr liveness comes from agent registration, restart husks are replaced create-before-close by resuming the persisted Codex session in a new pane, and structurally missing panes reconcile to `lost` plus task `needs_attention`.
 - Task recovery is implemented by `internal/db` and `internal/worker/cancel.go`: retry fences the old attempt before creating the next queued attempt; cancellation is terminal before best-effort conditional lease return and worker-tab cleanup.
 - Delivery policy and external boundaries live in `internal/delivery`; every attempt is pinned to its recorded branch/head SHA, PR recovery matches repository + branch + SHA, and branch-only delivery retains its lease until the explicit M2 release path runs.
+- Commander runtime policy lives in `internal/commander`; sessions reuse the M5 Herdr profiles, persist mission and native resume identity, and advance their durable event-wake cursor only after Herdr accepts the structured mission message.
 - Add schema changes as numbered, forward-only files in `migrations/`; run `go test ./...` and `go build ./...` before delivery.
 
 ## Maintaining this file

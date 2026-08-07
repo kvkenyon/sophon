@@ -56,7 +56,7 @@ func run(ctx context.Context, args []string) error {
 	case "signal":
 		return signalCommand(ctx, args[1:])
 	case "commander":
-		return commander(args[1:])
+		return commanderCommand(ctx, args[1:])
 	default:
 		usage()
 		return fmt.Errorf("unknown command %q", args[0])
@@ -583,13 +583,6 @@ func workerComplete(ctx context.Context, taskID domain.TaskID, args []string) er
 	return encode(completed)
 }
 
-func commander(args []string) error {
-	if len(args) == 0 {
-		return errors.New("expected: pintellect commander start|attach|status")
-	}
-	return fmt.Errorf("commander %s is reserved for a later runtime milestone", args[0])
-}
-
 func timeline(ctx context.Context, kind, rawID string, args []string) error {
 	flags := flag.NewFlagSet("timeline", flag.ContinueOnError)
 	path := flags.String("db", "", "SQLite database path")
@@ -690,6 +683,8 @@ func usage() {
   pintellect signal list [--mission ID] [--status STATUS] [--db PATH] [--json]
   pintellect signal inspect <id> [--db PATH] [--json]
   pintellect signal resolve <id> --answer ANSWER [--command-id ID] [--db PATH] [--json]
-  pintellect commander start|attach|status
+  pintellect commander start --agent pi|claude|codex --mission ID [--herdr-session NAME]
+  pintellect commander prompt|steer|follow-up MESSAGE [--mission ID]
+  pintellect commander attach|status [--mission ID]
   pintellect version`)
 }

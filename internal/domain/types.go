@@ -186,6 +186,44 @@ type WorkerSession struct {
 	FailureReason    string             `json:"failure_reason,omitempty"`
 }
 
+type CommanderSessionState string
+
+const (
+	CommanderSessionStarting       CommanderSessionState = "starting"
+	CommanderSessionRunning        CommanderSessionState = "running"
+	CommanderSessionIdle           CommanderSessionState = "idle"
+	CommanderSessionNeedsAttention CommanderSessionState = "needs_attention"
+	CommanderSessionFailed         CommanderSessionState = "failed"
+	CommanderSessionStopping       CommanderSessionState = "stopping"
+	CommanderSessionStopped        CommanderSessionState = "stopped"
+)
+
+// CommanderSession is the durable binding between one mission and one
+// resumable interactive agent. Herdr pane identity is operational placement;
+// AgentSessionID is the logical runtime identity used after a daemon restart.
+type CommanderSession struct {
+	ID                SessionID             `json:"id"`
+	MissionID         MissionID             `json:"mission_id"`
+	ProjectID         ProjectID             `json:"project_id"`
+	Runtime           string                `json:"runtime"`
+	State             CommanderSessionState `json:"state"`
+	Version           int64                 `json:"version"`
+	HerdrSessionName  string                `json:"herdr_session_name"`
+	HerdrWorkspaceID  string                `json:"herdr_workspace_id"`
+	HerdrTabID        string                `json:"herdr_tab_id"`
+	HerdrPaneID       string                `json:"herdr_pane_id"`
+	HerdrAgentName    string                `json:"herdr_agent_name"`
+	AgentSessionID    string                `json:"agent_session_id"`
+	Model             string                `json:"model,omitempty"`
+	PiExtensionPath   string                `json:"pi_extension_path,omitempty"`
+	LastEventSequence int64                 `json:"last_event_sequence"`
+	CreatedAt         time.Time             `json:"created_at"`
+	UpdatedAt         time.Time             `json:"updated_at"`
+	LastObservedAt    *time.Time            `json:"last_observed_at,omitempty"`
+	StoppedAt         *time.Time            `json:"stopped_at,omitempty"`
+	FailureReason     string                `json:"failure_reason,omitempty"`
+}
+
 type VerificationResult struct {
 	Command  string `json:"command"`
 	ExitCode int    `json:"exit_code"`
