@@ -172,17 +172,17 @@ func (s *Store) RecordCommanderSession(ctx context.Context, commandID domain.Com
 		session.Budget = normalizeCommanderBudget(session.Budget)
 		session.TurnCount = 1
 		session.LastEventSequence = sequence
-		session.CreatedAt, session.UpdatedAt = now, now
+		session.CreatedAt, session.BudgetStartedAt, session.UpdatedAt = now, now, now
 		if _, err := tx.ExecContext(ctx, `INSERT INTO commander_sessions(
 			id, project_id, mission_id, runtime, state, version, herdr_session_name,
 			herdr_workspace_id, herdr_tab_id, herdr_pane_id, herdr_agent_name,
-			agent_session_id, model, pi_extension_path, last_event_sequence, created_at, updated_at,
+			agent_session_id, model, pi_extension_path, last_event_sequence, created_at, budget_started_at, updated_at,
 			max_turns, max_duration_ns, turn_count
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			session.ID, session.ProjectID, nullableString(string(session.MissionID)), session.Runtime, session.State, session.Version,
 			session.HerdrSessionName, session.HerdrWorkspaceID, session.HerdrTabID, session.HerdrPaneID,
 			session.HerdrAgentName, session.AgentSessionID, nullableString(session.Model),
-			nullableString(session.PiExtensionPath), session.LastEventSequence, formatTime(now), formatTime(now),
+			nullableString(session.PiExtensionPath), session.LastEventSequence, formatTime(now), formatTime(now), formatTime(now),
 			session.Budget.MaxTurns, int64(session.Budget.MaxDuration), session.TurnCount); err != nil {
 			return domain.CommanderSession{}, fmt.Errorf("insert commander session: %w", err)
 		}
@@ -237,6 +237,105 @@ func (s *Store) CommanderSession(ctx context.Context, missionID domain.MissionID
 	return session, err
 }
 
+// CommanderSessionByID returns a nonterminal commander session by its durable ID.
+func (s *Store) CommanderSessionByID(ctx context.Context, sessionID domain.SessionID) (domain.CommanderSession, error) {
+	session, err := scanCommanderSession(s.db.QueryRowContext(ctx, commanderSessionSelect+" WHERE id = ? AND state NOT IN ('stopped', 'failed')", sessionID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.CommanderSession{}, ErrNotFound
+	}
+	return session, err
+}
+
+type RenewCommanderBudgetInput struct {
+	SessionID       domain.SessionID       `json:"session_id"`
+	ExpectedVersion int64                  `json:"expected_version"`
+	Budget          domain.CommanderBudget `json:"budget"`
+	Actor           string                 `json:"actor"`
+}
+
+const commanderBudgetQuestion = "commander budget exhausted - renew or replace?"
+
+// EnsureCommanderBudgetSignal makes a budget pause operator-visible. It is
+// keyed by the session in signal context so one open question survives retries.
+func (s *Store) EnsureCommanderBudgetSignal(ctx context.Context, commandID domain.CommandID, sessionID domain.SessionID) (signalpolicy.Signal, error) {
+	if sessionID == "" {
+		return signalpolicy.Signal{}, errors.New("session is required")
+	}
+	return runCommand(ctx, s, commandID, "commander.budget.signal", map[string]string{"session_id": string(sessionID)}, func(tx *sql.Tx) (signalpolicy.Signal, error) {
+		session, err := getCommanderSessionTx(ctx, tx, sessionID)
+		if err != nil {
+			return signalpolicy.Signal{}, err
+		}
+		contextText := "commander session " + string(session.ID)
+		rows, err := tx.QueryContext(ctx, signalSelect+" WHERE mission_id = ? AND status = ? AND question = ? AND context = ? ORDER BY created_at, id LIMIT 1", session.MissionID, signalpolicy.SignalOpen, commanderBudgetQuestion, contextText)
+		if err != nil {
+			return signalpolicy.Signal{}, fmt.Errorf("find commander budget signal: %w", err)
+		}
+		defer rows.Close()
+		if rows.Next() {
+			return scanSignal(rows)
+		}
+		if err := rows.Err(); err != nil {
+			return signalpolicy.Signal{}, err
+		}
+		rawID, err := id.New("sig")
+		if err != nil {
+			return signalpolicy.Signal{}, err
+		}
+		now := time.Now().UTC()
+		signal := signalpolicy.Signal{ID: signalpolicy.SignalID(rawID), MissionID: session.MissionID, Kind: signalpolicy.SignalDecision, Question: commanderBudgetQuestion, Context: contextText, Recommendation: "renew", Options: []signalpolicy.Option{}, Status: signalpolicy.SignalOpen, Version: 1, CreatedAt: now}
+		options, err := json.Marshal(signal.Options)
+		if err != nil {
+			return signalpolicy.Signal{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO signals (id, mission_id, task_id, kind, question, context, options_json, recommendation, status, version, created_at) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`, signal.ID, signal.MissionID, signal.Kind, signal.Question, signal.Context, options, signal.Recommendation, signal.Status, signal.Version, formatTime(now)); err != nil {
+			return signalpolicy.Signal{}, fmt.Errorf("insert commander budget signal: %w", err)
+		}
+		if err := appendEvent(ctx, tx, eventInput{MissionID: &session.MissionID, Actor: "budget-enforcer", Type: "signal.created", CommandID: &commandID, Payload: map[string]any{"signal_id": signal.ID, "kind": signal.Kind, "status": signal.Status, "session_id": session.ID}}); err != nil {
+			return signalpolicy.Signal{}, err
+		}
+		return signal, nil
+	})
+}
+
+// RenewCommanderBudget starts a fresh execution-budget window and returns a
+// budget-paused commander to running. The command record and event are atomic.
+func (s *Store) RenewCommanderBudget(ctx context.Context, commandID domain.CommandID, in RenewCommanderBudgetInput) (domain.CommanderSession, error) {
+	if in.SessionID == "" || in.ExpectedVersion < 1 || strings.TrimSpace(in.Actor) == "" {
+		return domain.CommanderSession{}, errors.New("session, version, and actor are required")
+	}
+	return runCommand(ctx, s, commandID, "commander.budget.renew", in, func(tx *sql.Tx) (domain.CommanderSession, error) {
+		current, err := getCommanderSessionTx(ctx, tx, in.SessionID)
+		if err != nil {
+			return domain.CommanderSession{}, err
+		}
+		if current.Version != in.ExpectedVersion {
+			return domain.CommanderSession{}, errors.New("stale commander budget renewal")
+		}
+		if current.State != domain.CommanderSessionNeedsAttention && current.State != domain.CommanderSessionRunning && current.State != domain.CommanderSessionIdle {
+			return domain.CommanderSession{}, fmt.Errorf("commander session is %s", current.State)
+		}
+		now := time.Now().UTC()
+		state := current.State
+		if state == domain.CommanderSessionNeedsAttention {
+			state = domain.CommanderSessionRunning
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE commander_sessions SET state = ?, max_turns = ?, max_duration_ns = ?, turn_count = 0,
+			budget_started_at = ?, failure_reason = '', version = version + 1, updated_at = ? WHERE id = ? AND version = ?`,
+			state, in.Budget.MaxTurns, int64(in.Budget.MaxDuration), formatTime(now), formatTime(now), current.ID, current.Version)
+		if err != nil {
+			return domain.CommanderSession{}, fmt.Errorf("renew commander budget: %w", err)
+		}
+		if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+			return domain.CommanderSession{}, errors.New("stale commander budget renewal")
+		}
+		if err := appendEvent(ctx, tx, eventInput{MissionID: &current.MissionID, Actor: in.Actor, Type: "commander.budget.renewed", CommandID: &commandID, Payload: map[string]any{"session_id": current.ID, "max_turns": in.Budget.MaxTurns, "max_duration_ns": int64(in.Budget.MaxDuration)}}); err != nil {
+			return domain.CommanderSession{}, err
+		}
+		return getCommanderSessionTx(ctx, tx, current.ID)
+	})
+}
+
 func (s *Store) CommanderSessions(ctx context.Context) ([]domain.CommanderSession, error) {
 	rows, err := s.db.QueryContext(ctx, commanderSessionSelect+" WHERE mission_id IS NOT NULL AND state NOT IN ('stopped', 'failed') ORDER BY created_at, id")
 	if err != nil {
@@ -257,17 +356,17 @@ func (s *Store) CommanderSessions(ctx context.Context) ([]domain.CommanderSessio
 const commanderSessionSelect = `SELECT id, project_id, mission_id, runtime, state, version,
 	herdr_session_name, herdr_workspace_id, herdr_tab_id, herdr_pane_id, herdr_agent_name,
 	agent_session_id, model, pi_extension_path, last_event_sequence, created_at, updated_at,
-	last_observed_at, stopped_at, failure_reason, max_turns, max_duration_ns, turn_count FROM commander_sessions`
+	last_observed_at, stopped_at, failure_reason, max_turns, max_duration_ns, turn_count, COALESCE(budget_started_at, created_at) FROM commander_sessions`
 
 func scanCommanderSession(row rowScanner) (domain.CommanderSession, error) {
 	var session domain.CommanderSession
 	var project, mission, herdrSession, workspace, tab, pane, agentName, agentSession sql.NullString
-	var model, extension, created, updated, observed, stopped, reason sql.NullString
+	var model, extension, created, updated, observed, stopped, reason, budgetStarted sql.NullString
 	var maxDuration int64
 	if err := row.Scan(&session.ID, &project, &mission, &session.Runtime, &session.State, &session.Version,
 		&herdrSession, &workspace, &tab, &pane, &agentName, &agentSession, &model, &extension,
 		&session.LastEventSequence, &created, &updated, &observed, &stopped, &reason,
-		&session.Budget.MaxTurns, &maxDuration, &session.TurnCount); err != nil {
+		&session.Budget.MaxTurns, &maxDuration, &session.TurnCount, &budgetStarted); err != nil {
 		return domain.CommanderSession{}, err
 	}
 	session.ProjectID, session.MissionID = domain.ProjectID(project.String), domain.MissionID(mission.String)
@@ -278,6 +377,9 @@ func scanCommanderSession(row rowScanner) (domain.CommanderSession, error) {
 	session.Budget.MaxDuration = time.Duration(maxDuration)
 	var err error
 	session.CreatedAt, err = parseTime(created.String)
+	if err == nil {
+		session.BudgetStartedAt, err = parseTime(budgetStarted.String)
+	}
 	if err == nil {
 		session.UpdatedAt, err = parseTime(updated.String)
 	}
@@ -295,12 +397,6 @@ func scanCommanderSession(row rowScanner) (domain.CommanderSession, error) {
 }
 
 func normalizeCommanderBudget(value domain.CommanderBudget) domain.CommanderBudget {
-	if value.MaxTurns == 0 {
-		value.MaxTurns = 30
-	}
-	if value.MaxDuration == 0 {
-		value.MaxDuration = 45 * time.Minute
-	}
 	return value
 }
 

@@ -230,6 +230,7 @@ type CommanderSession struct {
 	PiExtensionPath   string                `json:"pi_extension_path,omitempty"`
 	LastEventSequence int64                 `json:"last_event_sequence"`
 	CreatedAt         time.Time             `json:"created_at"`
+	BudgetStartedAt   time.Time             `json:"budget_started_at"`
 	UpdatedAt         time.Time             `json:"updated_at"`
 	LastObservedAt    *time.Time            `json:"last_observed_at,omitempty"`
 	StoppedAt         *time.Time            `json:"stopped_at,omitempty"`

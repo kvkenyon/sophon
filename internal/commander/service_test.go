@@ -182,6 +182,60 @@ func TestCommanderLifecyclePersistsReconcilesHuskAndRoutesEvents(t *testing.T) {
 	}
 }
 
+func TestEventWakeBudgetSignalAndRenewalResumesDelivery(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := db.Open(ctx, filepath.Join(root, "pintellect.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	projectPath := filepath.Join(root, "project")
+	if err := os.Mkdir(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.CreateProject(ctx, "cmd_wake_budget_project", db.CreateProjectInput{Name: "wake-budget", Path: projectPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mission, err := store.CreateMission(ctx, "cmd_wake_budget_mission", db.CreateMissionInput{ProjectID: project, Title: "wake", Objective: "wake", Budget: domain.MissionBudget{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := store.RecordCommanderSession(ctx, "cmd_wake_budget_session", db.RecordCommanderSessionInput{MissionID: mission.ID, Actor: "operator", Session: domain.CommanderSession{ID: "csn_wake_budget", Runtime: "codex", HerdrSessionName: "lab", HerdrWorkspaceID: "workspace", HerdrTabID: "tab", HerdrPaneID: "pane", HerdrAgentName: "prime", AgentSessionID: "native", Budget: domain.CommanderBudget{MaxTurns: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateSignal(ctx, "cmd_wake_budget_event", db.CreateSignalInput{MissionID: mission.ID, Kind: signalpolicy.SignalDecision, Question: "work arrived", Actor: "worker"}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeCommanderRuntime{state: StateIdle}
+	waker := EventWaker{Store: store, Runtime: runtime}
+	paused, err := waker.Wake(ctx, mission.ID)
+	if !errors.Is(err, db.ErrBudgetExhausted) || paused.State != domain.CommanderSessionNeedsAttention {
+		t.Fatalf("paused=%+v err=%v", paused, err)
+	}
+	open, err := store.Signals(ctx, db.ListSignalsFilter{MissionID: mission.ID, Status: signalpolicy.SignalOpen})
+	if err != nil || len(open) != 2 {
+		t.Fatalf("signals=%+v err=%v", open, err)
+	}
+	if _, err := waker.Wake(ctx, mission.ID); err != nil {
+		t.Fatal(err)
+	}
+	openAgain, err := store.Signals(ctx, db.ListSignalsFilter{MissionID: mission.ID, Status: signalpolicy.SignalOpen})
+	if err != nil || len(openAgain) != 2 {
+		t.Fatalf("duplicate signals=%+v err=%v", openAgain, err)
+	}
+	renewed, err := store.RenewCommanderBudget(ctx, "cmd_wake_budget_renew", db.RenewCommanderBudgetInput{SessionID: session.ID, ExpectedVersion: paused.Version, Budget: domain.CommanderBudget{MaxTurns: 2}, Actor: "operator"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	woken, err := waker.Wake(ctx, mission.ID)
+	if err != nil || woken.ID != renewed.ID || len(runtime.followUps) != 1 {
+		t.Fatalf("woken=%+v followups=%v err=%v", woken, runtime.followUps, err)
+	}
+}
+
 func TestControllerPreservesPromptSteerAndFollowUpOperations(t *testing.T) {
 	store, missionID, promptDir := commanderTestStore(t)
 	runtime := &fakeCommanderRuntime{state: StateIdle}

@@ -341,10 +341,10 @@ func missionCreate(ctx context.Context, args []string) error {
 	title := flags.String("title", "", "mission title")
 	objective := flags.String("objective", "", "mission objective")
 	operatorMessage := flags.String("operator-message", "", "verbatim operator intake direction")
-	maxAttempts := flags.Int("max-task-attempts", 3, "maximum attempts per task")
-	maxDuration := flags.Duration("max-duration", 4*time.Hour, "maximum mission wall-clock duration")
-	maxConcurrent := flags.Int("max-concurrent-tasks", 8, "maximum concurrently active tasks")
-	maxValidation := flags.Int("max-validation-rounds", 5, "maximum validation rounds per task")
+	maxAttempts := flags.Int("max-task-attempts", 0, "maximum attempts per task (0 is unlimited)")
+	maxDuration := flags.Duration("max-duration", 0, "maximum mission wall-clock duration (0 is unlimited)")
+	maxConcurrent := flags.Int("max-concurrent-tasks", 0, "maximum concurrently active tasks (0 is unlimited)")
+	maxValidation := flags.Int("max-validation-rounds", 0, "maximum validation rounds per task (0 is unlimited)")
 	var criteria stringList
 	flags.Var(&criteria, "acceptance", "acceptance criterion (repeatable)")
 	if err := flags.Parse(args); err != nil {
@@ -590,9 +590,9 @@ func taskStart(ctx context.Context, taskID domain.TaskID, args []string) error {
 	herdrSession := flags.String("herdr-session", "default", "explicit Herdr session name")
 	herdrWorkspace := flags.String("herdr-workspace-label", "pintellect", "Herdr workspace presentation label")
 	taskFiles := flags.String("task-files", "", "task artifact base directory")
-	maxWorkerRuntime := flags.Duration("max-worker-runtime", 90*time.Minute, "maximum worker runtime")
-	maxWorkerRestarts := flags.Int("max-worker-restarts", 2, "maximum worker restarts")
-	maxFixRounds := flags.Int("max-fix-rounds", 5, "maximum worker fix rounds")
+	maxWorkerRuntime := flags.Duration("max-worker-runtime", 0, "maximum worker runtime (0 is unlimited)")
+	maxWorkerRestarts := flags.Int("max-worker-restarts", 0, "maximum worker restarts (0 is unlimited)")
+	maxFixRounds := flags.Int("max-fix-rounds", 0, "maximum worker fix rounds (0 is unlimited)")
 	var validation stringList
 	flags.Var(&validation, "validate", "required validation command or instruction (repeatable)")
 	if err := flags.Parse(args); err != nil {
@@ -869,7 +869,8 @@ func usage() {
   pintellect signal list [--mission ID] [--status STATUS] [--db PATH] [--json]
   pintellect signal inspect <id> [--db PATH] [--json]
   pintellect signal resolve <id> --answer ANSWER [--command-id ID] [--db PATH] [--json]
-  pintellect commander start --agent pi|claude|codex --mission ID [--herdr-session NAME]
+  pintellect commander start --agent pi|claude|codex --mission ID [--herdr-session NAME] [--max-turns N] [--max-duration DURATION]
+  pintellect commander renew [--session ID] [--mission ID] [--max-turns N] [--max-duration DURATION] [--command-id ID]
   pintellect commander prompt|steer|follow-up MESSAGE [--mission ID]
   pintellect commander attach|status [--mission ID]
   pintellect daemon status|start|stop|restart [--db PATH]

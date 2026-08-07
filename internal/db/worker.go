@@ -206,15 +206,6 @@ func scanWorkerSession(row workerRowScanner) (domain.WorkerSession, error) {
 }
 
 func normalizeWorkerBudget(value domain.WorkerBudget) domain.WorkerBudget {
-	if value.MaxRuntime == 0 {
-		value.MaxRuntime = 90 * time.Minute
-	}
-	if value.MaxRestarts == 0 {
-		value.MaxRestarts = 2
-	}
-	if value.MaxFixRounds == 0 {
-		value.MaxFixRounds = 5
-	}
 	return value
 }
 

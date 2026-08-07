@@ -553,13 +553,27 @@ esac
 	writeCLIFile(t, herdrBinary, herdrScript, 0o700)
 
 	startedJSON := runCLI(t, "commander", "start", "--agent", "codex", "--mission", string(mission.ID),
-		"--db", dbPath, "--herdr", herdrBinary, "--herdr-session", "fm-lab-cli-commander", "--prompt-dir", promptDir)
+		"--db", dbPath, "--herdr", herdrBinary, "--herdr-session", "fm-lab-cli-commander", "--prompt-dir", promptDir, "--max-turns", "1")
 	var started domain.CommanderSession
 	if err := json.Unmarshal(startedJSON, &started); err != nil {
 		t.Fatal(err)
 	}
 	if started.MissionID != mission.ID || started.AgentSessionID != "commander-codex-session" || started.State != domain.CommanderSessionRunning {
 		t.Fatalf("commander start = %+v", started)
+	}
+	store, err = db.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exhausted, err := store.ReserveCommanderTurn(context.Background(), "cmd_cli_commander_exhaust", db.ReserveCommanderTurnInput{MissionID: mission.ID, SessionID: started.ID, ExpectedVersion: started.Version, Actor: "test"})
+	store.Close()
+	if err != nil || exhausted.State != domain.CommanderSessionNeedsAttention {
+		t.Fatalf("exhausted=%+v err=%v", exhausted, err)
+	}
+	renewedJSON := runCLI(t, "commander", "renew", "--mission", string(mission.ID), "--db", dbPath, "--command-id", "cmd_cli_commander_renew")
+	var renewed domain.CommanderSession
+	if err := json.Unmarshal(renewedJSON, &renewed); err != nil || renewed.State != domain.CommanderSessionRunning || renewed.TurnCount != 0 {
+		t.Fatalf("commander renew=%+v err=%v", renewed, err)
 	}
 
 	promptedJSON := runCLI(t, "commander", "prompt", "Please acknowledge the steer", "--mission", string(mission.ID),

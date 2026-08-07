@@ -178,7 +178,7 @@ func (s *Store) ReserveCommanderTurn(ctx context.Context, commandID domain.Comma
 		}
 		dimension := "turns"
 		exhausted := session.Budget.MaxTurns > 0 && session.TurnCount >= session.Budget.MaxTurns
-		if session.Budget.MaxDuration > 0 && in.ObservedAt.Sub(session.CreatedAt) >= session.Budget.MaxDuration {
+		if session.Budget.MaxDuration > 0 && in.ObservedAt.Sub(session.BudgetStartedAt) >= session.Budget.MaxDuration {
 			dimension, exhausted = "duration", true
 		}
 		if exhausted {

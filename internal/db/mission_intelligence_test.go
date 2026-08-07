@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -251,6 +252,54 @@ func TestCommanderBudgetDimensionsExpireToNeedsAttention(t *testing.T) {
 				t.Fatalf("expired=%+v err=%v", expired, err)
 			}
 		})
+	}
+}
+
+func TestCommanderBudgetRenewalClearsPauseAndRestartsWindow(t *testing.T) {
+	store, mission := intelligenceMission(t, domain.MissionBudget{})
+	defer store.Close()
+	session, err := store.RecordCommanderSession(context.Background(), "cmd_commander_renew_record", RecordCommanderSessionInput{MissionID: mission.ID, Actor: "operator", Session: domain.CommanderSession{ID: "csn_renew", Runtime: "codex", HerdrSessionName: "lab", HerdrWorkspaceID: "workspace", HerdrTabID: "tab", HerdrPaneID: "pane", HerdrAgentName: "prime", AgentSessionID: "native", Budget: domain.CommanderBudget{MaxTurns: 1, MaxDuration: time.Minute}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exhausted, err := store.ReserveCommanderTurn(context.Background(), "cmd_commander_renew_exhaust", ReserveCommanderTurnInput{MissionID: mission.ID, SessionID: session.ID, ExpectedVersion: session.Version, Actor: "test"})
+	if err != nil || exhausted.State != domain.CommanderSessionNeedsAttention {
+		t.Fatalf("exhausted=%+v err=%v", exhausted, err)
+	}
+	renewed, err := store.RenewCommanderBudget(context.Background(), "cmd_commander_renew", RenewCommanderBudgetInput{SessionID: exhausted.ID, ExpectedVersion: exhausted.Version, Budget: exhausted.Budget, Actor: "operator"})
+	if err != nil || renewed.State != domain.CommanderSessionRunning || renewed.TurnCount != 0 || renewed.FailureReason != "" {
+		t.Fatalf("renewed=%+v err=%v", renewed, err)
+	}
+	if renewed.BudgetStartedAt.Before(session.BudgetStartedAt) {
+		t.Fatalf("budget window did not restart: %s <= %s", renewed.BudgetStartedAt, session.BudgetStartedAt)
+	}
+	for _, command := range []domain.CommandID{"cmd_commander_budget_signal_one", "cmd_commander_budget_signal_two"} {
+		if _, err := store.EnsureCommanderBudgetSignal(context.Background(), command, exhausted.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := store.Signals(context.Background(), ListSignalsFilter{MissionID: mission.ID, Status: signals.SignalOpen})
+	if err != nil || len(items) != 1 || items[0].Question != commanderBudgetQuestion || items[0].Recommendation != "renew" {
+		t.Fatalf("budget signals=%+v err=%v", items, err)
+	}
+	resumed, err := store.ReserveCommanderTurn(context.Background(), "cmd_commander_renew_resume", ReserveCommanderTurnInput{MissionID: mission.ID, SessionID: renewed.ID, ExpectedVersion: renewed.Version, Actor: "test"})
+	if err != nil || resumed.State != domain.CommanderSessionRunning || resumed.TurnCount != 1 {
+		t.Fatalf("resumed=%+v err=%v", resumed, err)
+	}
+}
+
+func TestUnsetCommanderBudgetNeverBinds(t *testing.T) {
+	store, mission := intelligenceMission(t, domain.MissionBudget{})
+	defer store.Close()
+	session, err := store.RecordCommanderSession(context.Background(), "cmd_commander_unlimited_record", RecordCommanderSessionInput{MissionID: mission.ID, Actor: "operator", Session: domain.CommanderSession{ID: "csn_unlimited", Runtime: "codex", HerdrSessionName: "lab", HerdrWorkspaceID: "workspace", HerdrTabID: "tab", HerdrPaneID: "pane", HerdrAgentName: "prime", AgentSessionID: "native"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for turn := 0; turn < 31; turn++ {
+		session, err = store.ReserveCommanderTurn(context.Background(), domain.CommandID("cmd_commander_unlimited_"+strconv.Itoa(turn)), ReserveCommanderTurnInput{MissionID: mission.ID, SessionID: session.ID, ExpectedVersion: session.Version, ObservedAt: session.BudgetStartedAt.Add(46 * time.Minute), Actor: "test"})
+		if err != nil || session.State != domain.CommanderSessionRunning {
+			t.Fatalf("turn=%d session=%+v err=%v", turn, session, err)
+		}
 	}
 }
 

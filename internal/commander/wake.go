@@ -66,6 +66,13 @@ func (w *EventWaker) Wake(ctx context.Context, missionID domain.MissionID) (doma
 			return domain.CommanderSession{}, err
 		}
 		if persisted.State == domain.CommanderSessionNeedsAttention {
+			signalCommand, signalErr := newCommandID()
+			if signalErr != nil {
+				return domain.CommanderSession{}, signalErr
+			}
+			if _, signalErr = w.Store.EnsureCommanderBudgetSignal(ctx, signalCommand, persisted.ID); signalErr != nil {
+				return domain.CommanderSession{}, signalErr
+			}
 			return persisted, db.ErrBudgetExhausted
 		}
 		body, err := json.Marshal(WakeEnvelope{Kind: "mission_events", MissionID: missionID, Events: relevant})

@@ -165,16 +165,22 @@ func main() {
 		}
 		for _, session := range sessions {
 			if session.State == "needs_attention" || session.State == "failed" || session.State == "stopped" ||
-				session.Budget.MaxDuration <= 0 || now.Sub(session.CreatedAt) < session.Budget.MaxDuration {
+				session.Budget.MaxDuration <= 0 || now.Sub(session.BudgetStartedAt) < session.Budget.MaxDuration {
 				continue
 			}
-			_, err = store.ReserveCommanderTurn(ctx,
-				domain.CommandID("cmd_budget_commander_duration:"+string(session.ID)), db.ReserveCommanderTurnInput{
+			budgetWindowID := domain.CommandID(fmt.Sprintf("cmd_budget_commander_duration:%s:%d", session.ID, session.BudgetStartedAt.UnixNano()))
+			updated, err := store.ReserveCommanderTurn(ctx,
+				budgetWindowID, db.ReserveCommanderTurnInput{
 					MissionID: session.MissionID, SessionID: session.ID, ExpectedVersion: session.Version,
-					ObservedAt: session.CreatedAt.Add(session.Budget.MaxDuration), Actor: "budget-enforcer",
+					ObservedAt: session.BudgetStartedAt.Add(session.Budget.MaxDuration), Actor: "budget-enforcer",
 				})
 			if err != nil {
 				log.Printf("enforce commander budget mission=%s session=%s: %v", session.MissionID, session.ID, err)
+			} else if updated.State == domain.CommanderSessionNeedsAttention {
+				commandID := domain.CommandID(fmt.Sprintf("cmd_budget_commander_signal:%s:%d", session.ID, session.BudgetStartedAt.UnixNano()))
+				if _, signalErr := store.EnsureCommanderBudgetSignal(ctx, commandID, session.ID); signalErr != nil {
+					log.Printf("signal commander budget mission=%s session=%s: %v", session.MissionID, session.ID, signalErr)
+				}
 			}
 		}
 	}

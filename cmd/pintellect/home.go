@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	commandercontrol "parallel-intellect/internal/commander"
 	"parallel-intellect/internal/db"
@@ -272,7 +271,7 @@ func startProjectCommander(ctx context.Context, store *db.Store, project domain.
 	if len(active) == 1 {
 		started, err := starter.Start(ctx, commandercontrol.StartRequest{
 			MissionID: active[0].ID, Runtime: runtime,
-			Budget: domain.CommanderBudget{MaxTurns: 30, MaxDuration: 45 * time.Minute},
+			Budget: domain.CommanderBudget{},
 		})
 		if err != nil {
 			return domain.CommanderSession{}, err
@@ -281,7 +280,7 @@ func startProjectCommander(ctx context.Context, store *db.Store, project domain.
 	}
 	started, err := starter.StartProject(ctx, commandercontrol.ProjectStartRequest{
 		ProjectID: project.ID, Runtime: runtime, DatabasePath: options.DatabasePath,
-		Budget: domain.CommanderBudget{MaxTurns: 30, MaxDuration: 45 * time.Minute},
+		Budget: domain.CommanderBudget{},
 	})
 	if err != nil {
 		return domain.CommanderSession{}, err

@@ -79,12 +79,12 @@ BEGIN
     SELECT RAISE(ABORT, 'agent-originated critical-policy write refused');
 END;
 
-ALTER TABLE worker_sessions ADD COLUMN max_runtime_ns INTEGER NOT NULL DEFAULT 5400000000000 CHECK (max_runtime_ns >= 0);
-ALTER TABLE worker_sessions ADD COLUMN max_restarts INTEGER NOT NULL DEFAULT 2 CHECK (max_restarts >= 0);
-ALTER TABLE worker_sessions ADD COLUMN max_fix_rounds INTEGER NOT NULL DEFAULT 5 CHECK (max_fix_rounds >= 0);
+ALTER TABLE worker_sessions ADD COLUMN max_runtime_ns INTEGER NOT NULL DEFAULT 0 CHECK (max_runtime_ns >= 0);
+ALTER TABLE worker_sessions ADD COLUMN max_restarts INTEGER NOT NULL DEFAULT 0 CHECK (max_restarts >= 0);
+ALTER TABLE worker_sessions ADD COLUMN max_fix_rounds INTEGER NOT NULL DEFAULT 0 CHECK (max_fix_rounds >= 0);
 ALTER TABLE worker_sessions ADD COLUMN restart_count INTEGER NOT NULL DEFAULT 0 CHECK (restart_count >= 0);
 ALTER TABLE worker_sessions ADD COLUMN fix_round_count INTEGER NOT NULL DEFAULT 0 CHECK (fix_round_count >= 0);
 
-ALTER TABLE commander_sessions ADD COLUMN max_turns INTEGER NOT NULL DEFAULT 30 CHECK (max_turns >= 0);
-ALTER TABLE commander_sessions ADD COLUMN max_duration_ns INTEGER NOT NULL DEFAULT 2700000000000 CHECK (max_duration_ns >= 0);
+ALTER TABLE commander_sessions ADD COLUMN max_turns INTEGER NOT NULL DEFAULT 0 CHECK (max_turns >= 0);
+ALTER TABLE commander_sessions ADD COLUMN max_duration_ns INTEGER NOT NULL DEFAULT 0 CHECK (max_duration_ns >= 0);
 ALTER TABLE commander_sessions ADD COLUMN turn_count INTEGER NOT NULL DEFAULT 0 CHECK (turn_count >= 0);

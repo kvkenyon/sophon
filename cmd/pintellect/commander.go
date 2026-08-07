@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	commandercontrol "parallel-intellect/internal/commander"
 	"parallel-intellect/internal/db"
@@ -18,11 +17,13 @@ import (
 
 func commanderCommand(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("expected: pintellect commander start|prompt|steer|follow-up|attach|status")
+		return errors.New("expected: pintellect commander start|renew|prompt|steer|follow-up|attach|status")
 	}
 	switch args[0] {
 	case "start":
 		return commanderStart(ctx, args[1:])
+	case "renew":
+		return commanderRenew(ctx, args[1:])
 	case "prompt", "steer", "follow-up":
 		return commanderSend(ctx, args[0], args[1:])
 	case "attach":
@@ -45,8 +46,8 @@ func commanderStart(ctx context.Context, args []string) error {
 	promptDir := flags.String("prompt-dir", "", "commander prompt directory override")
 	model := flags.String("model", "", "runtime model (required for Pi)")
 	piExtension := flags.String("pi-extension", "", "absolute Pi lifecycle extension path")
-	maxTurns := flags.Int("max-turns", 30, "maximum commander turns")
-	maxDuration := flags.Duration("max-duration", 45*time.Minute, "maximum commander duration")
+	maxTurns := flags.Int("max-turns", 0, "maximum commander turns (0 is unlimited)")
+	maxDuration := flags.Duration("max-duration", 0, "maximum commander duration (0 is unlimited)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -85,6 +86,57 @@ func commanderStart(ctx context.Context, args []string) error {
 		return err
 	}
 	return encode(started.Session)
+}
+
+func commanderRenew(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("commander renew", flag.ContinueOnError)
+	dbPath := flags.String("db", "", "SQLite database path")
+	sessionID := flags.String("session", "", "commander session ID")
+	missionID := flags.String("mission", "", "mission ID")
+	maxTurns := flags.Int("max-turns", 0, "maximum commander turns (0 is unlimited when specified)")
+	maxDuration := flags.Duration("max-duration", 0, "maximum commander duration (0 is unlimited when specified)")
+	providedCommandID := flags.String("command-id", "", "idempotency command ID")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || (*sessionID == "" && *missionID == "") || (*sessionID != "" && *missionID != "") {
+		return errors.New("commander renew requires exactly one of --session or --mission")
+	}
+	store, err := openStore(ctx, *dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	var session domain.CommanderSession
+	if *sessionID != "" {
+		session, err = store.CommanderSessionByID(ctx, domain.SessionID(*sessionID))
+	} else {
+		session, err = store.CommanderSession(ctx, domain.MissionID(*missionID))
+	}
+	if err != nil {
+		return err
+	}
+	budget := session.Budget
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "max-turns" {
+			budget.MaxTurns = *maxTurns
+		}
+		if f.Name == "max-duration" {
+			budget.MaxDuration = *maxDuration
+		}
+	})
+	command := domain.CommandID(*providedCommandID)
+	if command == "" {
+		command, err = commandID()
+		if err != nil {
+			return err
+		}
+	}
+	renewed, err := store.RenewCommanderBudget(ctx, command, db.RenewCommanderBudgetInput{SessionID: session.ID, ExpectedVersion: session.Version, Budget: budget, Actor: "operator"})
+	if err != nil {
+		return err
+	}
+	return encode(renewed)
 }
 
 func binaryInstallDir() (string, error) {
