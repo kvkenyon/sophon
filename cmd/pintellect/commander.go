@@ -38,7 +38,7 @@ func commanderStart(ctx context.Context, args []string) error {
 	mission := flags.String("mission", "", "mission ID")
 	agent := flags.String("agent", "", "commander runtime: pi, claude, or codex")
 	herdrBinary := flags.String("herdr", "herdr", "Herdr CLI binary")
-	herdrSession := flags.String("herdr-session", "default", "explicit Herdr session name")
+	herdrSession := flags.String("herdr-session", "", "Herdr session name (required)")
 	herdrWorkspace := flags.String("herdr-workspace-label", "Parallel Intellect Commander", "Herdr workspace presentation label")
 	promptDir := flags.String("prompt-dir", "prompts/commander", "commander prompt directory")
 	model := flags.String("model", "", "runtime model (required for Pi)")
@@ -47,6 +47,9 @@ func commanderStart(ctx context.Context, args []string) error {
 	maxDuration := flags.Duration("max-duration", 45*time.Minute, "maximum commander duration")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("commander start does not accept positional arguments")
 	}
 	runtime := herdr.Runtime(strings.TrimSpace(*agent))
 	switch runtime {
@@ -127,8 +130,12 @@ func commanderAttach(ctx context.Context, args []string) error {
 	dbPath := flags.String("db", "", "SQLite database path")
 	mission := flags.String("mission", "", "mission ID (optional when exactly one commander exists)")
 	herdrBinary := flags.String("herdr", "herdr", "Herdr CLI binary")
+	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("commander attach does not accept positional arguments")
 	}
 	store, err := openStore(ctx, *dbPath)
 	if err != nil {
@@ -139,9 +146,14 @@ func commanderAttach(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	attachment := []string{*herdrBinary, "agent", "attach", session.HerdrPaneID, "--session", session.HerdrSessionName}
+	if !*jsonOutput {
+		fmt.Println(strings.Join(attachment, " "))
+		return nil
+	}
 	return encode(map[string]any{
 		"commander_session": session,
-		"attach":            []string{*herdrBinary, "agent", "attach", session.HerdrPaneID, "--session", session.HerdrSessionName},
+		"attach":            attachment,
 		"prompt":            "pintellect commander prompt --mission " + string(session.MissionID) + " <message>",
 	})
 }
@@ -150,8 +162,12 @@ func commanderStatus(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("commander status", flag.ContinueOnError)
 	dbPath := flags.String("db", "", "SQLite database path")
 	mission := flags.String("mission", "", "mission ID (optional when exactly one commander exists)")
+	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("commander status does not accept positional arguments")
 	}
 	store, err := openStore(ctx, *dbPath)
 	if err != nil {
@@ -162,7 +178,11 @@ func commanderStatus(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return encode(session)
+	if *jsonOutput {
+		return encode(session)
+	}
+	fmt.Printf("%s\t%s\t%s\t%s\n", session.ID, session.State, session.HerdrSessionName, session.HerdrPaneID)
+	return nil
 }
 
 func resolveCommander(store *db.Store, ctx context.Context, missionID domain.MissionID) (domain.MissionID, domain.CommanderSession, error) {

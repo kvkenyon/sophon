@@ -385,17 +385,39 @@ esac
 		t.Fatalf("commander prompt = %+v", prompted)
 	}
 
-	statusJSON := runCLI(t, "commander", "status", "--mission", string(mission.ID), "--db", dbPath)
+	statusJSON := runCLI(t, "commander", "status", "--mission", string(mission.ID), "--db", dbPath, "--json")
 	var status domain.CommanderSession
 	if err := json.Unmarshal(statusJSON, &status); err != nil || status.ID != started.ID {
 		t.Fatalf("commander status = %+v, %v", status, err)
 	}
-	attachJSON := runCLI(t, "commander", "attach", "--mission", string(mission.ID), "--db", dbPath, "--herdr", herdrBinary)
+	attachJSON := runCLI(t, "commander", "attach", "--mission", string(mission.ID), "--db", dbPath, "--herdr", herdrBinary, "--json")
 	var attach struct {
 		Attach []string `json:"attach"`
 	}
 	if err := json.Unmarshal(attachJSON, &attach); err != nil || len(attach.Attach) < 6 || attach.Attach[len(attach.Attach)-1] != "fm-lab-cli-commander" {
 		t.Fatalf("commander attach = %+v, %v", attach, err)
+	}
+	statusText := string(runCLI(t, "commander", "status", "--mission", string(mission.ID), "--db", dbPath))
+	if !strings.Contains(statusText, string(started.ID)+"\trunning\tfm-lab-cli-commander\tcw1:p1") {
+		t.Fatalf("commander status text = %q", statusText)
+	}
+	attachText := string(runCLI(t, "commander", "attach", "--mission", string(mission.ID), "--db", dbPath, "--herdr", herdrBinary))
+	if !strings.Contains(attachText, herdrBinary+" agent attach cw1:p1 --session fm-lab-cli-commander") {
+		t.Fatalf("commander attach text = %q", attachText)
+	}
+}
+
+func TestCLICommanderValidation(t *testing.T) {
+	for _, args := range [][]string{
+		{"commander", "start", "--agent", "codex", "--mission", "msn_1"},
+		{"commander", "start", "--agent", "unknown", "--mission", "msn_1", "--herdr-session", "lab"},
+		{"commander", "prompt", "--mission", "msn_1"},
+		{"commander", "status", "unexpected"},
+		{"commander", "attach", "unexpected"},
+	} {
+		if err := run(context.Background(), args); err == nil {
+			t.Fatalf("pintellect %s unexpectedly succeeded", strings.Join(args, " "))
+		}
 	}
 }
 
