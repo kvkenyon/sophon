@@ -28,7 +28,7 @@ const version = "0.3.0-m3"
 func main() {
 	if err := run(context.Background(), os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "pintellect:", err)
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
 }
 
@@ -49,6 +49,8 @@ func run(ctx context.Context, args []string) error {
 		return project(ctx, args[1:])
 	case "status":
 		return statusCommand(ctx, args[1:])
+	case "wait":
+		return waitCommand(ctx, args[1:])
 	case "home":
 		return homeCommand(ctx, args[1:])
 	case "knowledge":
@@ -65,6 +67,24 @@ func run(ctx context.Context, args []string) error {
 		usage()
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+// exitError lets commands return a documented non-success status without
+// treating it as an unexpected CLI failure.
+type exitError struct {
+	code int
+	err  error
+}
+
+func (e *exitError) Error() string { return e.err.Error() }
+func (e *exitError) Unwrap() error { return e.err }
+
+func exitCode(err error) int {
+	var status *exitError
+	if errors.As(err, &status) {
+		return status.code
+	}
+	return 1
 }
 
 func initialize(ctx context.Context, args []string) error {
@@ -709,6 +729,7 @@ func usage() {
   pintellect init [--db PATH]
   pintellect home [--agent codex|claude] [--db PATH]
   pintellect status --mission ID [--db PATH] [--json]
+  pintellect wait --mission ID [--timeout DURATION] [--after-seq N] [--db PATH]
   pintellect project add PATH [--name NAME] [--db PATH] [--json]
   pintellect project list [--db PATH] [--json]
   pintellect project inspect NAME [--db PATH] [--json]

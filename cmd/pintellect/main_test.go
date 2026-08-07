@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -102,6 +103,114 @@ func TestCLIStatusSnapshotSectionsAndJSON(t *testing.T) {
 	for _, section := range []string{"Needs Your Attention", "Recently Completed", "Underway", "Up Next"} {
 		if !strings.Contains(human, section) {
 			t.Errorf("human status lacks %q: %s", section, human)
+		}
+	}
+}
+
+func TestWaitReturnsWhenNewMissionEventLands(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	projectID, err := store.CreateProject(ctx, "wait_project", db.CreateProjectInput{Name: "wait", Path: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mission, err := store.CreateMission(ctx, "wait_mission", db.CreateMissionInput{ProjectID: projectID, Title: "Wait", Objective: "wait for event"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := store.MissionEvents(ctx, mission.ID)
+	if err != nil || len(initial) == 0 {
+		t.Fatalf("initial mission events = %v, %v", initial, err)
+	}
+
+	type result struct {
+		events []domain.Event
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		events, err := waitForMissionEvents(ctx, store, mission.ID, initial[len(initial)-1].Sequence, time.Second)
+		done <- result{events: events, err: err}
+	}()
+	time.Sleep(2 * waitPollInterval)
+	if _, err := store.CreateTask(ctx, "wait_task", db.CreateTaskInput{
+		MissionID: mission.ID, Kind: domain.TaskScout, Title: "New event", Objective: "wake waiter", DeliveryMode: domain.DeliveryBranch,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if len(got.events) == 0 || got.events[0].Sequence <= initial[len(initial)-1].Sequence {
+			t.Fatalf("wait returned events = %+v", got.events)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wait did not return after a new mission event")
+	}
+}
+
+func TestWaitTimeoutUsesExitCodeTwo(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := db.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	err = waitCommand(context.Background(), []string{"--mission", "msn_absent", "--timeout", "5ms", "--db", dbPath})
+	if !errors.Is(err, errWaitTimeout) {
+		t.Fatalf("wait error = %v, want timeout", err)
+	}
+	if got := exitCode(err); got != 2 {
+		t.Fatalf("timeout exit code = %d, want 2", got)
+	}
+}
+
+func TestWaitAfterSequenceExcludesOlderEvents(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	projectID, err := store.CreateProject(ctx, "cursor_project", db.CreateProjectInput{Name: "cursor", Path: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mission, err := store.CreateMission(ctx, "cursor_mission", db.CreateMissionInput{ProjectID: projectID, Title: "Cursor", Objective: "test cursor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.MissionEvents(ctx, mission.ID)
+	if err != nil || len(before) == 0 {
+		t.Fatalf("events before cursor = %v, %v", before, err)
+	}
+	if _, err := store.CreateTask(ctx, "cursor_task", db.CreateTaskInput{
+		MissionID: mission.ID, Kind: domain.TaskScout, Title: "Later", Objective: "new event", DeliveryMode: domain.DeliveryBranch,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	output := runCLI(t, "wait", "--mission", string(mission.ID), "--after-seq", fmt.Sprint(before[len(before)-1].Sequence), "--db", dbPath)
+	if strings.Contains(string(output), "\n  ") {
+		t.Fatalf("wait output is not compact JSON: %q", output)
+	}
+	var got []domain.Event
+	if err := json.Unmarshal(output, &got); err != nil {
+		t.Fatalf("decode wait output: %v: %s", err, output)
+	}
+	if len(got) == 0 || got[0].Sequence <= before[len(before)-1].Sequence {
+		t.Fatalf("events after cursor = %+v", got)
+	}
+	for _, event := range got {
+		if event.Sequence <= before[len(before)-1].Sequence {
+			t.Fatalf("returned pre-cursor event %+v", event)
 		}
 	}
 }

@@ -41,6 +41,18 @@ func TestPromptComposerUsesEmbeddedPromptsOutsideRepository(t *testing.T) {
 	if !strings.Contains(composed, "# Parallel Intellect commander") {
 		t.Fatalf("embedded prompt missing:\n%s", composed)
 	}
+	for _, rule := range []string{
+		"pintellect wait --mission <id> --after-seq <sequence>",
+		"Never sleep-poll.",
+		"pintellect worker inspect TASK --attempt N --json",
+		"pintellect task timeline TASK --json",
+		"pintellect status --mission MISSION --json",
+		"never paste raw JSON payloads or command dumps",
+	} {
+		if !strings.Contains(composed, rule) {
+			t.Errorf("embedded prompt omitted %q:\n%s", rule, composed)
+		}
+	}
 	if strings.Contains(composed, "CWD PROMPT") {
 		t.Fatalf("read prompt from current directory:\n%s", composed)
 	}
