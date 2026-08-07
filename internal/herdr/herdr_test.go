@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,24 @@ type runnerResponse struct {
 type fakeRunner struct {
 	responses []runnerResponse
 	calls     [][]string
+}
+
+func piFixture(t *testing.T) (worktree, extension string) {
+	t.Helper()
+	root := t.TempDir()
+	worktree = filepath.Join(root, "worktree")
+	state := filepath.Join(root, "state")
+	if err := os.Mkdir(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	extension = filepath.Join(state, "pi-lifecycle.ts")
+	if err := os.WriteFile(extension, []byte("export default () => {};\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return worktree, extension
 }
 
 func (f *fakeRunner) Run(_ context.Context, args ...string) ([]byte, []byte, error) {
@@ -65,6 +84,84 @@ func TestCommandAdapterStartsCodexAndDeliversBriefAsInitialPrompt(t *testing.T) 
 	}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("Herdr calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
+func TestHerdrRuntimeConformanceStartsClaudeAndPiWithLaunchProfiles(t *testing.T) {
+	piWorktree, piExtension := piFixture(t)
+	tests := []struct {
+		name          string
+		runtime       Runtime
+		request       StartRequest
+		composer      string
+		sessionID     string
+		launchCommand string
+	}{
+		{
+			name: "claude", runtime: RuntimeClaude,
+			request: StartRequest{TaskID: "tsk_claude", Attempt: 1, WorktreePath: "/worktrees/claude",
+				Brief: "complete Claude brief", Model: "claude-opus-5"},
+			composer: "Claude Code\n❯", sessionID: "claude-session-1",
+			launchCommand: "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --model 'claude-opus-5' 'complete Claude brief'",
+		},
+		{
+			name: "pi", runtime: RuntimePi,
+			request: StartRequest{TaskID: "tsk_pi", Attempt: 2, WorktreePath: piWorktree,
+				Brief: "complete Pi brief", Model: "kimi-coding/k3-256k", PiExtensionPath: piExtension},
+			composer: "pi v0.84.0\nescape interrupt", sessionID: "/sessions/pi-session.jsonl",
+			launchCommand: "FM_PI_HARNESS=pi pi --model 'kimi-coding/k3-256k' -e " + shellQuote(piExtension) + " 'complete Pi brief'",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeRunner{responses: []runnerResponse{
+				{stdout: `{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}`},
+				{stdout: `{"result":{"type":"command_started"}}`},
+				{stdout: `{"result":{"pane":{"pane_id":"w1:p1"}}}`},
+				{stdout: `{"result":{"agent":{"agent":"` + string(test.runtime) + `","pane_id":"w1:p1","agent_status":"working","state_change_seq":1}}}`},
+				{stdout: test.composer},
+				{stdout: `{"result":{"agent":{"agent":"` + string(test.runtime) + `","pane_id":"w1:p1","agent_session":{"value":"` + test.sessionID + `"}}}}`},
+			}}
+			adapter := NewCommandAdapterWithRunner("fm-lab-contract", "Parallel Intellect", runner)
+			request := test.request
+			request.Runtime = test.runtime
+			session, err := adapter.Start(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if session.Runtime != test.runtime || session.AgentSessionID != test.sessionID || session.PaneID != "w1:p1" {
+				t.Fatalf("session = %+v", session)
+			}
+			want := [][]string{
+				{"workspace", "create", "--cwd", request.WorktreePath, "--label", "Parallel Intellect", "--no-focus", "--session", "fm-lab-contract"},
+				{"pane", "run", "w1:p1", test.launchCommand, "--session", "fm-lab-contract"},
+				{"pane", "get", "w1:p1", "--session", "fm-lab-contract"},
+				{"agent", "get", "w1:p1", "--session", "fm-lab-contract"},
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+				{"agent", "get", "w1:p1", "--session", "fm-lab-contract"},
+			}
+			if !reflect.DeepEqual(runner.calls, want) {
+				t.Fatalf("Herdr calls = %#v, want %#v", runner.calls, want)
+			}
+		})
+	}
+}
+
+func TestPiLaunchProfileRequiresExternalLifecycleExtension(t *testing.T) {
+	root := t.TempDir()
+	worktree := filepath.Join(root, "worktree")
+	if err := os.Mkdir(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	extension := filepath.Join(worktree, "turn-end.ts")
+	if err := os.WriteFile(extension, []byte("export default () => {};\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", &fakeRunner{})
+	_, err := adapter.StartPi(context.Background(), StartRequest{TaskID: "tsk_pi", Attempt: 1,
+		WorktreePath: worktree, Brief: "brief", Model: "provider/model", PiExtensionPath: extension})
+	if err == nil || !strings.Contains(err.Error(), "outside the task worktree") {
+		t.Fatalf("inside-worktree extension error = %v", err)
 	}
 }
 
@@ -131,6 +228,97 @@ Continue without trusting`
 	}
 }
 
+func TestHerdrRuntimeConformanceHandlesClaudeAndPiFirstLaunchScreensStructurally(t *testing.T) {
+	tests := []struct {
+		name      string
+		runtime   Runtime
+		responses []runnerResponse
+		wantCalls [][]string
+		wantErr   string
+	}{
+		{
+			name: "claude folder trust and bypass warning", runtime: RuntimeClaude,
+			responses: []runnerResponse{
+				{stdout: "Do you trust the files in this folder?\nYes, proceed"},
+				{stdout: `{"result":{"type":"keys_sent"}}`},
+				{stdout: "Bypass Permissions mode\nYes, I accept"},
+				{stdout: `{"result":{"type":"keys_sent"}}`},
+				{stdout: "Claude Code\n❯"},
+			},
+			wantCalls: [][]string{
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+				{"pane", "send-keys", "w1:p1", "enter", "--session", "fm-lab-contract"},
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+				{"pane", "send-keys", "w1:p1", "enter", "--session", "fm-lab-contract"},
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+			},
+		},
+		{
+			name: "pi project trust", runtime: RuntimePi,
+			responses: []runnerResponse{
+				{stdout: "Trust project folder?\n/worktree\nThis allows pi to load .pi settings and resources.\nTrust"},
+				{stdout: `{"result":{"type":"keys_sent"}}`},
+				{stdout: "pi v0.84.0\nescape interrupt"},
+			},
+			wantCalls: [][]string{
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+				{"pane", "send-keys", "w1:p1", "enter", "--session", "fm-lab-contract"},
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+			},
+		},
+		{
+			name: "claude shell echo is a keyless transient", runtime: RuntimeClaude,
+			responses: []runnerResponse{
+				{stdout: "❯ CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --\ndangerously-skip-permissions"},
+				{stdout: "Claude Code\n❯"},
+			},
+			wantCalls: [][]string{
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+			},
+		},
+		{
+			name: "pi shell echo is a keyless transient", runtime: RuntimePi,
+			responses: []runnerResponse{
+				{stdout: "❯ FM_PI_HARNESS=pi pi --model 'provider/model'"},
+				{stdout: "pi v0.84.0\nescape interrupt"},
+			},
+			wantCalls: [][]string{
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+			},
+		},
+		{
+			name: "unknown claude screen is not keyed", runtime: RuntimeClaude,
+			responses: []runnerResponse{{stdout: "A different confirmation screen"}},
+			wantCalls: [][]string{{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"}},
+			wantErr:   "visible pane:\nA different confirmation screen",
+		},
+		{
+			name: "unknown pi screen is not keyed", runtime: RuntimePi,
+			responses: []runnerResponse{{stdout: "A different confirmation screen"}},
+			wantCalls: [][]string{{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"}},
+			wantErr:   "visible pane:\nA different confirmation screen",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeRunner{responses: test.responses}
+			adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
+			err := adapter.waitForComposer(context.Background(), Session{Runtime: test.runtime, PaneID: "w1:p1"})
+			if test.wantErr == "" && err != nil {
+				t.Fatal(err)
+			}
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("wait error = %v, want content %q", err, test.wantErr)
+			}
+			if !reflect.DeepEqual(runner.calls, test.wantCalls) {
+				t.Fatalf("Herdr calls = %#v, want %#v", runner.calls, test.wantCalls)
+			}
+		})
+	}
+}
+
 func TestCommandAdapterObservesRunningIdleAndLost(t *testing.T) {
 	present := `{"result":{"pane":{"pane_id":"w1:p1"}}}`
 	tests := []struct {
@@ -163,6 +351,64 @@ func TestCommandAdapterObservesRunningIdleAndLost(t *testing.T) {
 					t.Fatalf("Herdr session routing = %#v", call)
 				}
 			}
+		})
+	}
+}
+
+func TestHerdrRuntimeConformancePromptIdleCancelAndLost(t *testing.T) {
+	for _, runtime := range []Runtime{RuntimeCodex, RuntimeClaude, RuntimePi} {
+		t.Run(string(runtime), func(t *testing.T) {
+			session := Session{Runtime: runtime, SessionName: "fm-lab-contract", PaneID: "w1:p1"}
+			present := `{"result":{"pane":{"pane_id":"w1:p1"}}}`
+			idle := `{"result":{"agent":{"agent":"` + string(runtime) + `","pane_id":"w1:p1","agent_status":"idle","state_change_seq":2}}}`
+			working := `{"result":{"agent":{"agent":"` + string(runtime) + `","pane_id":"w1:p1","agent_status":"working","state_change_seq":1}}}`
+
+			t.Run("prompt", func(t *testing.T) {
+				runner := &fakeRunner{responses: []runnerResponse{
+					{stdout: present}, {stdout: idle}, {stdout: `{"result":{"type":"prompt_sent"}}`},
+				}}
+				adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
+				if _, err := adapter.Wake(context.Background(), session, "next prompt"); err != nil {
+					t.Fatal(err)
+				}
+				if got := runner.calls[len(runner.calls)-1]; !reflect.DeepEqual(got,
+					[]string{"agent", "prompt", "w1:p1", "next prompt", "--wait", "--until", "working", "--timeout", "30000", "--session", "fm-lab-contract"}) {
+					t.Fatalf("prompt call = %#v", got)
+				}
+			})
+
+			t.Run("idle", func(t *testing.T) {
+				runner := &fakeRunner{responses: []runnerResponse{{stdout: present}, {stdout: idle}}}
+				adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
+				state, err := adapter.Observe(context.Background(), session)
+				if err != nil || state != StateIdle {
+					t.Fatalf("idle observation = %s, %v", state, err)
+				}
+			})
+
+			t.Run("cancel", func(t *testing.T) {
+				runner := &fakeRunner{responses: []runnerResponse{
+					{stdout: present}, {stdout: working}, {stdout: `{"result":{"type":"keys_sent"}}`},
+					{stdout: present}, {stdout: idle},
+				}}
+				adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
+				if err := adapter.Cancel(context.Background(), session); err != nil {
+					t.Fatal(err)
+				}
+				if got := runner.calls[2]; !reflect.DeepEqual(got,
+					[]string{"pane", "send-keys", "w1:p1", "escape", "--session", "fm-lab-contract"}) {
+					t.Fatalf("cancel call = %#v", got)
+				}
+			})
+
+			t.Run("lost process", func(t *testing.T) {
+				runner := &fakeRunner{responses: []runnerResponse{{stdout: `{"error":{"code":"pane_not_found"}}`, err: errors.New("exit 1")}}}
+				adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
+				state, err := adapter.Observe(context.Background(), session)
+				if err != nil || state != StateLost {
+					t.Fatalf("lost observation = %s, %v", state, err)
+				}
+			})
 		})
 	}
 }
@@ -234,6 +480,70 @@ func TestCommandAdapterCreatesReplacementBeforeClosingHusk(t *testing.T) {
 	}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("Herdr calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
+func TestHerdrRuntimeConformanceResumesClaudeAndPiAfterRestart(t *testing.T) {
+	piWorktree, piExtension := piFixture(t)
+	tests := []struct {
+		name          string
+		session       Session
+		composer      string
+		resumeCommand string
+	}{
+		{
+			name: "claude",
+			session: Session{Runtime: RuntimeClaude, SessionName: "fm-lab-contract", WorkspaceID: "w1",
+				TabID: "w1:t1", PaneID: "w1:p1", AgentName: "pi-task-a1", AgentSessionID: "claude-session-1",
+				WorktreePath: "/worktrees/claude", Model: "claude-opus-5"},
+			composer:      "Claude Code\n❯",
+			resumeCommand: "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --model 'claude-opus-5' --resume claude-session-1",
+		},
+		{
+			name: "pi",
+			session: Session{Runtime: RuntimePi, SessionName: "fm-lab-contract", WorkspaceID: "w1",
+				TabID: "w1:t1", PaneID: "w1:p1", AgentName: "pi-task-a1", AgentSessionID: "/sessions/pi-session.jsonl",
+				WorktreePath: piWorktree, Model: "kimi-coding/k3-256k", PiExtensionPath: piExtension},
+			composer: "pi v0.84.0\nescape interrupt",
+			resumeCommand: "FM_PI_HARNESS=pi pi --model 'kimi-coding/k3-256k' -e " + shellQuote(piExtension) +
+				" --session '/sessions/pi-session.jsonl'",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := test.session.Runtime
+			runner := &fakeRunner{responses: []runnerResponse{
+				{stdout: `{"result":{"pane":{"pane_id":"w1:p1"}}}`},
+				{stdout: `{"error":{"code":"agent_not_found"}}`, err: errors.New("exit 1")},
+				{stdout: `{"result":{"tabs":[{"tab_id":"w1:t1","label":"worker"}]}}`},
+				{stdout: `{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}`},
+				{stdout: `{"result":{"type":"command_started"}}`},
+				{stdout: `{"result":{"pane":{"pane_id":"w1:p2"}}}`},
+				{stdout: `{"result":{"agent":{"agent":"` + string(runtime) + `","pane_id":"w1:p2","agent_status":"idle","state_change_seq":1}}}`},
+				{stdout: test.composer},
+				{stdout: `{"result":{"type":"prompt_sent"}}`},
+				{stdout: `{"result":{"type":"tab_closed"}}`},
+				{stdout: `{"result":{"tabs":[{"tab_id":"w1:t2","label":"worker"}]}}`},
+				{stdout: `{"result":{"tabs":[{"tab_id":"w1:t2","label":"worker"}]}}`},
+			}}
+			adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
+			replacement, err := adapter.Wake(context.Background(), test.session, "continue after restart")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if replacement.Runtime != runtime || replacement.TabID != "w1:t2" || replacement.PaneID != "w1:p2" ||
+				replacement.AgentSessionID != test.session.AgentSessionID {
+				t.Fatalf("replacement = %+v", replacement)
+			}
+			if got := runner.calls[4]; !reflect.DeepEqual(got,
+				[]string{"pane", "run", "w1:p2", test.resumeCommand, "--session", "fm-lab-contract"}) {
+				t.Fatalf("resume call = %#v", got)
+			}
+			if got := runner.calls[9]; !reflect.DeepEqual(got,
+				[]string{"tab", "close", "w1:t1", "--session", "fm-lab-contract"}) {
+				t.Fatalf("husk close call = %#v", got)
+			}
+		})
 	}
 }
 
@@ -468,6 +778,149 @@ func TestRealHerdrPersistentWorkerSmoke(t *testing.T) {
 	}
 }
 
+func TestRealHerdrClaudePiConformance(t *testing.T) {
+	if os.Getenv("PARALLEL_INTELLECT_HERDR_SMOKE") != "1" {
+		t.Skip("set PARALLEL_INTELLECT_HERDR_SMOKE=1 to exercise Claude and Pi in an isolated lab session")
+	}
+	helper := os.Getenv("HERDR_LAB_HELPER")
+	if helper == "" {
+		helper = "/Users/kevin/github/kvkenyon/research/firstmate/bin/fm-herdr-lab.sh"
+	}
+	sessionName := strings.TrimSpace(os.Getenv("HERDR_LAB_SESSION"))
+	if sessionName == "" {
+		nameOutput, err := exec.Command(helper, "name", "parallel-intellect-m5-claude-pi-workers").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		sessionName = strings.TrimSpace(string(nameOutput))
+	}
+	if !strings.HasPrefix(sessionName, "fm-lab-") || sessionName == "default" {
+		t.Fatalf("unsafe Herdr lab session %q", sessionName)
+	}
+	if os.Getenv("HERDR_LAB_PROVISIONED") != "1" {
+		provisionAttempted := false
+		t.Cleanup(func() {
+			if !provisionAttempted {
+				return
+			}
+			if output, err := exec.Command(helper, "teardown", sessionName).CombinedOutput(); err != nil {
+				t.Errorf("teardown Herdr lab: %v: %s", err, output)
+			}
+		})
+		provisionAttempted = true
+		if output, err := exec.Command(helper, "provision", sessionName).CombinedOutput(); err != nil {
+			t.Fatalf("provision Herdr lab: %v: %s", err, output)
+		}
+	}
+
+	root, err := os.MkdirTemp(".", ".herdr-m5-smoke-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
+	claudeWorktree := filepath.Join(root, "claude-worktree")
+	piWorktree := filepath.Join(root, "pi-worktree")
+	stateDir := filepath.Join(root, "state")
+	for _, path := range []string{claudeWorktree, piWorktree, stateDir} {
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	piMarker := filepath.Join(stateDir, "pi-turn-end")
+	piExtension := filepath.Join(stateDir, "pi-lifecycle.ts")
+	extension := fmt.Sprintf(`import { execFile } from "node:child_process";
+export default function (pi: any) {
+  pi.on("turn_end", () => execFile("touch", [%q]));
+}
+`, piMarker)
+	if err := os.WriteFile(piExtension, []byte(extension), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := labRunner{helper: helper, session: sessionName}
+	adapter := NewCommandAdapterWithRunner(sessionName, "pi-m5-runtime-conformance", runner)
+	claude, err := adapter.StartClaude(context.Background(), StartRequest{
+		TaskID: "tsk_m5_claude", Attempt: 1, WorktreePath: claudeWorktree,
+		Brief: "Reply exactly CLAUDE_M5_START_OK, then wait for another message.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForHerdrState(t, adapter, claude, StateIdle, 3*time.Minute)
+	waitForPaneText(t, runner, claude.PaneID, "CLAUDE_M5_START_OK", time.Minute)
+
+	piModel := strings.TrimSpace(os.Getenv("PARALLEL_INTELLECT_PI_MODEL"))
+	if piModel == "" {
+		piModel = "kimi-coding/k3-256k"
+	}
+	piSession, err := adapter.StartPi(context.Background(), StartRequest{
+		TaskID: "tsk_m5_pi", Attempt: 1, WorktreePath: piWorktree,
+		Brief: "Reply exactly PI_M5_START_OK, then wait for another message.",
+		Model: piModel, PiExtensionPath: piExtension,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForHerdrState(t, adapter, piSession, StateIdle, 3*time.Minute)
+	waitForPaneText(t, runner, piSession.PaneID, "PI_M5_START_OK", time.Minute)
+	waitForFile(t, piMarker, time.Minute)
+
+	for name, session := range map[string]Session{"claude": claude, "pi": piSession} {
+		t.Run(name+" prompt and cancel", func(t *testing.T) {
+			woken, err := adapter.Wake(context.Background(), session,
+				"Run `sleep 20`, then reply with the word finished.")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if woken != session {
+				t.Fatalf("live prompt changed placement: before=%+v after=%+v", session, woken)
+			}
+			if err := adapter.Cancel(context.Background(), session); err != nil {
+				t.Fatal(err)
+			}
+			if state, err := adapter.Observe(context.Background(), session); err != nil || state != StateIdle {
+				t.Fatalf("post-cancel observation = %s, %v", state, err)
+			}
+		})
+	}
+
+	if output, err := exec.Command(helper, "stop", sessionName).CombinedOutput(); err != nil {
+		t.Fatalf("guarded stop of Herdr lab: %v: %s", err, output)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if output, err := exec.Command(helper, "provision", sessionName).CombinedOutput(); err != nil {
+		t.Fatalf("guarded reprovision of Herdr lab: %v: %s", err, output)
+	}
+
+	for name, original := range map[string]Session{"claude": claude, "pi": piSession} {
+		t.Run(name+" restart resume and lost", func(t *testing.T) {
+			if state, err := adapter.Observe(context.Background(), original); err != nil || state != StateHusk {
+				t.Fatalf("restored liveness = %s, %v; want husk", state, err)
+			}
+			replacement, err := adapter.Wake(context.Background(), original,
+				"After restart, run `sleep 3`, reply RESUME_M5_OK, then wait.")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if replacement.WorkspaceID != original.WorkspaceID || replacement.TabID == original.TabID ||
+				replacement.PaneID == original.PaneID || replacement.AgentSessionID != original.AgentSessionID {
+				t.Fatalf("replacement identity: before=%+v after=%+v", original, replacement)
+			}
+			waitForHerdrState(t, adapter, replacement, StateIdle, 3*time.Minute)
+			if err := adapter.Stop(context.Background(), replacement); err != nil {
+				t.Fatal(err)
+			}
+			if state, err := adapter.Observe(context.Background(), replacement); err != nil || state != StateLost {
+				t.Fatalf("closed process observation = %s, %v; want lost", state, err)
+			}
+		})
+	}
+}
+
 func assertPaneCWD(t *testing.T, runner labRunner, session Session, want string) {
 	t.Helper()
 	stdout, stderr, err := runner.Run(context.Background(), "pane", "get", session.PaneID,
@@ -506,6 +959,37 @@ func capturePane(t *testing.T, runner labRunner, paneID string) string {
 		return "<capture failed: " + err.Error() + ": " + string(stderr) + ">"
 	}
 	return string(stdout)
+}
+
+func waitForPaneText(t *testing.T, runner labRunner, paneID, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		visible := capturePane(t, runner, paneID)
+		if strings.Contains(visible, want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pane did not contain %q before timeout; visible pane:\n%s", want, visible)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("file %s did not appear before timeout", path)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 func waitForHerdrState(t *testing.T, adapter *CommandAdapter, session Session, want State, timeout time.Duration) {
