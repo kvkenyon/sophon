@@ -18,10 +18,22 @@ Every genuine unresolved choice that belongs to the operator must become a durab
 The commander performs the semantic inventory because the control plane must not infer decisions from report prose.
 Give each distinct choice a stable, privacy-safe command identity and use `pintellect signal raise --mission ID --kind decision --question TEXT --command-id ID --json` idempotently so retries reuse the same Signal while different choices remain distinct.
 
+Inventory the whole artifact or review surface, not only the worker's summary or
+first highlighted finding. Distinct choices get distinct identities; alternate
+wordings of the same choice reuse one identity. The stable identity must derive
+from mission/task ownership and decision substance without embedding secrets,
+credentials, or mutable prose.
+
 Do not create a Signal for a resolved finding, a recommendation that needs no operator choice, or prose that merely sounds decision-like.
 Do not close a Signal merely because its report is complete, its review ended, or its worker became inactive.
 The Signal remains open until the answer is durably recorded and its dependent tasks remain correctly controlled.
 Current status reads structured Signal state and must not compensate by scraping historical prose.
+
+The originating activity is not fully handled until the commander has attested
+the complete inventory for that review pass, including an explicit none result
+when there truly are no unresolved operator choices. Completion of a report,
+worker session, validation run, or visual review cannot substitute for that
+semantic inventory.
 
 ## Operating sequence
 
@@ -33,6 +45,13 @@ Current status reads structured Signal state and must not compensate by scraping
 6. Keep dependent tasks blocked or unstarted through structured dependencies while the Signal is open.
 7. After the operator answers, inspect the Signal with `pintellect signal inspect ID --json`, then record the answer with `pintellect signal resolve ID --answer TEXT --command-id ID --json`. Route it to affected workers only through a supported worker API when their current tasks remain valid.
 8. Confirm with `pintellect signal inspect ID --json` that the Signal is resolved and dependent work remains durably represented.
+9. Re-read the affected task projection before steering: if the answer changes
+   accepted scope, create a new substantive task; if it invalidates current
+   work, use the supported cancellation or supersession lifecycle; if it is a
+   bounded detail within the existing task, send one exact resolution naming the
+   decision and required outcome.
 
 Never let chat alone become the decision record.
 Never let the originating worker answer its own Signal.
+Never resolve a Signal merely to unblock completion, and never duplicate a
+Signal because a commander session restarted or an operator answer was repeated.

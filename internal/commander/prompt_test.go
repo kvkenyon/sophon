@@ -42,6 +42,12 @@ func TestPromptComposerUsesEmbeddedPromptsOutsideRepository(t *testing.T) {
 		t.Fatalf("embedded prompt missing:\n%s", composed)
 	}
 	for _, rule := range []string{
+		"A task must be a coherent, substantive unit of work worth a full worker",
+		"Do not create micro-tasks for a single-function tweak, one-line edit",
+		"split it along meaningful architectural or outcome",
+		"Never change a registered project yourself.",
+		"Workers never contact the operator directly.",
+		"no budget binds unless it is",
 		"pintellect wait --mission <id> --after-seq <sequence>",
 		"Never sleep-poll.",
 		"pintellect worker inspect TASK --attempt N --json",
@@ -49,6 +55,10 @@ func TestPromptComposerUsesEmbeddedPromptsOutsideRepository(t *testing.T) {
 		"pintellect status --mission MISSION --json",
 		"never paste raw JSON payloads or command dumps",
 		"Never invent follow-on implementation work from inference",
+		"A completed scout must leave a self-contained report",
+		"The task attempt that owns implementation also owns its validation loop",
+		"Worker success begins completion review; it does not end it.",
+		"Every operator-facing mention of a PR",
 	} {
 		if !strings.Contains(composed, rule) {
 			t.Errorf("embedded prompt omitted %q:\n%s", rule, composed)
