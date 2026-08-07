@@ -10,6 +10,7 @@ import (
 	"parallel-intellect/internal/domain"
 	gitcontrol "parallel-intellect/internal/git"
 	"parallel-intellect/internal/id"
+	"parallel-intellect/internal/naming"
 )
 
 type GitInspector interface {
@@ -76,7 +77,7 @@ func (s *Service) Acquire(ctx context.Context, commandID domain.CommandID, taskI
 		}
 		return cause
 	}
-	branch := TaskBranch(taskID, attempt)
+	branch := TaskBranch(target.TaskTitle, taskID, attempt)
 	snapshot, err := s.git.CreateTaskBranch(ctx, allocation.WorktreePath, branch)
 	if err != nil {
 		return domain.TreehouseLease{}, compensate(fmt.Errorf("inspect acquired worktree: %w", err))
@@ -106,8 +107,8 @@ func (s *Service) Acquire(ctx context.Context, commandID domain.CommandID, taskI
 
 // TaskBranch applies the product-wide task-branch convention. Each attempt
 // gets its own branch because attempts are independently leased and fenced.
-func TaskBranch(taskID domain.TaskID, attempt int) string {
-	return fmt.Sprintf("%s%s/attempt-%d", TaskBranchPrefix, taskID, attempt)
+func TaskBranch(title string, taskID domain.TaskID, attempt int) string {
+	return fmt.Sprintf("%s%s/attempt-%d", TaskBranchPrefix, naming.TaskName(title, string(taskID)), attempt)
 }
 
 // Release refuses stale attempts before invoking Treehouse. The external call
@@ -290,7 +291,7 @@ func (s *Service) Reconcile(ctx context.Context) (ReconcileResult, error) {
 			if err != nil {
 				return result, fmt.Errorf("inspect unrecorded Treehouse lease %s: %w", observed.LeaseID, err)
 			}
-			branch := TaskBranch(target.TaskID, target.Attempt)
+			branch := TaskBranch(target.TaskTitle, target.TaskID, target.Attempt)
 			if !snapshot.Clean || snapshot.Branch != branch {
 				return result, fmt.Errorf("unrecorded Treehouse lease %s has unexpected branch or dirty worktree", observed.LeaseID)
 			}

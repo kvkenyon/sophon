@@ -13,6 +13,7 @@ import (
 
 type LeaseAcquisitionTarget struct {
 	TaskID          domain.TaskID
+	TaskTitle       string
 	Attempt         int
 	ExpectedVersion int64
 	Project         string
@@ -24,7 +25,7 @@ type LeaseAcquisitionTarget struct {
 // Treehouse allocation but before the lease transaction committed. The
 // external reconciler may adopt only an exact deterministic holder match.
 func (s *Store) UnleasedProvisioningTargets(ctx context.Context) ([]LeaseAcquisitionTarget, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT t.id, t.current_attempt, t.version, p.name, p.path
+	rows, err := s.db.QueryContext(ctx, `SELECT t.id, t.title, t.current_attempt, t.version, p.name, p.path
 		FROM tasks t
 		JOIN missions m ON m.id = t.mission_id
 		JOIN projects p ON p.id = m.project_id
@@ -38,7 +39,7 @@ func (s *Store) UnleasedProvisioningTargets(ctx context.Context) ([]LeaseAcquisi
 	var targets []LeaseAcquisitionTarget
 	for rows.Next() {
 		var target LeaseAcquisitionTarget
-		if err := rows.Scan(&target.TaskID, &target.Attempt, &target.ExpectedVersion,
+		if err := rows.Scan(&target.TaskID, &target.TaskTitle, &target.Attempt, &target.ExpectedVersion,
 			&target.Project, &target.ProjectPath); err != nil {
 			return nil, fmt.Errorf("scan unleased provisioning task: %w", err)
 		}
@@ -58,11 +59,11 @@ func (s *Store) LeaseTarget(ctx context.Context, taskID domain.TaskID, attempt i
 	}
 	var target LeaseAcquisitionTarget
 	var state domain.TaskState
-	err := s.db.QueryRowContext(ctx, `SELECT t.id, t.current_attempt, t.version, t.state, p.name, p.path
+	err := s.db.QueryRowContext(ctx, `SELECT t.id, t.title, t.current_attempt, t.version, t.state, p.name, p.path
 		FROM tasks t
 		JOIN missions m ON m.id = t.mission_id
 		JOIN projects p ON p.id = m.project_id
-		WHERE t.id = ?`, taskID).Scan(&target.TaskID, &target.Attempt, &target.ExpectedVersion, &state,
+		WHERE t.id = ?`, taskID).Scan(&target.TaskID, &target.TaskTitle, &target.Attempt, &target.ExpectedVersion, &state,
 		&target.Project, &target.ProjectPath)
 	if errors.Is(err, sql.ErrNoRows) {
 		return LeaseAcquisitionTarget{}, ErrNotFound

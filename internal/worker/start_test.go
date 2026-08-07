@@ -98,7 +98,7 @@ func TestStarterRunsMissionTaskLeaseBriefHerdrSlice(t *testing.T) {
 		result.WorkerSession.HerdrAgentName != "codex-task" || result.WorkerSession.AgentSessionID != "codex-session-start" {
 		t.Fatalf("recorded worker session = %+v", result.WorkerSession)
 	}
-	if herdrAdapter.request.WorktreePath != "/worktrees/start" || !strings.Contains(herdrAdapter.request.Brief, "task criterion") {
+	if herdrAdapter.request.WorktreePath != "/worktrees/start" || herdrAdapter.request.TaskTitle != "task title" || !strings.Contains(herdrAdapter.request.Brief, "task criterion") {
 		t.Fatalf("Herdr launch request = %+v", herdrAdapter.request)
 	}
 	if _, err := os.Stat(result.BriefPath); err != nil {

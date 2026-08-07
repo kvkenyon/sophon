@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"parallel-intellect/internal/domain"
+	"parallel-intellect/internal/naming"
 )
 
 type State string
@@ -42,8 +43,9 @@ var (
 )
 
 type StartRequest struct {
-	TaskID  domain.TaskID
-	Attempt int
+	TaskID    domain.TaskID
+	TaskTitle string
+	Attempt   int
 	// AgentName lets non-worker callers provide a stable presentation identity
 	// while retaining the same runtime launch profiles. Worker callers leave it
 	// empty and receive the attempt-derived name.
@@ -342,7 +344,7 @@ func (a *CommandAdapter) Start(ctx context.Context, in StartRequest) (Session, e
 	}
 	label := strings.TrimSpace(a.WorkspaceLabel)
 	if label == "" {
-		label = "Parallel Intellect"
+		label = "pintellect"
 	}
 	stdout, stderr, err := a.run(ctx, "workspace", "create", "--cwd", in.WorktreePath, "--label", label, "--no-focus")
 	if err != nil {
@@ -366,7 +368,7 @@ func (a *CommandAdapter) Start(ctx context.Context, in StartRequest) (Session, e
 	}
 	name := strings.TrimSpace(in.AgentName)
 	if name == "" {
-		name = agentName(in.TaskID, in.Attempt)
+		name = agentName(in.TaskTitle, in.TaskID, in.Attempt)
 	} else {
 		name = unsafeName.ReplaceAllString(name, "-")
 	}
@@ -380,6 +382,9 @@ func (a *CommandAdapter) Start(ctx context.Context, in StartRequest) (Session, e
 	}
 	if session.WorkspaceID == "" || session.TabID == "" || session.PaneID == "" {
 		return Session{}, errors.New("Herdr workspace response omitted stable identifiers")
+	}
+	if _, stderr, err := a.run(ctx, "tab", "rename", session.TabID, session.AgentName); err != nil {
+		return session, commandError("label task tab", err, stderr)
 	}
 
 	command, positionalPrompt, err := initialCommand(runtime, in)
@@ -922,9 +927,8 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
-func agentName(taskID domain.TaskID, attempt int) string {
-	name := unsafeName.ReplaceAllString(string(taskID), "-")
-	return fmt.Sprintf("pi-%s-a%d", name, attempt)
+func agentName(title string, taskID domain.TaskID, attempt int) string {
+	return fmt.Sprintf("pi-%s-a%d", naming.TaskName(title, string(taskID)), attempt)
 }
 
 func commandError(operation string, err error, stderr []byte) error {

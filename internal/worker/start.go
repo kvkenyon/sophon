@@ -88,7 +88,7 @@ func (s *Starter) Start(ctx context.Context, taskID domain.TaskID) (StartResult,
 		return StartResult{}, fmt.Errorf("read generated task brief: %w", err)
 	}
 	runtimeSession, err := s.Herdr.StartCodex(ctx, herdr.StartRequest{
-		TaskID: taskID, Attempt: attempt, WorktreePath: lease.WorktreePath, Brief: string(brief),
+		TaskID: taskID, TaskTitle: launch.Task.Title, Attempt: attempt, WorktreePath: lease.WorktreePath, Brief: string(brief),
 	})
 	if err != nil {
 		return StartResult{}, err

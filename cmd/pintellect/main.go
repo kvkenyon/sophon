@@ -380,7 +380,7 @@ func taskCancel(ctx context.Context, taskID domain.TaskID, args []string) error 
 	treehouseBinary := flags.String("treehouse", "treehouse", "Treehouse CLI binary")
 	herdrBinary := flags.String("herdr", "herdr", "Herdr CLI binary")
 	herdrSession := flags.String("herdr-session", "default", "explicit Herdr session name")
-	herdrWorkspace := flags.String("herdr-workspace-label", "Parallel Intellect", "Herdr workspace presentation label")
+	herdrWorkspace := flags.String("herdr-workspace-label", "pintellect", "Herdr workspace presentation label")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -449,7 +449,7 @@ func taskStart(ctx context.Context, taskID domain.TaskID, args []string) error {
 	treehouseBinary := flags.String("treehouse", "treehouse", "Treehouse CLI binary")
 	herdrBinary := flags.String("herdr", "herdr", "Herdr CLI binary")
 	herdrSession := flags.String("herdr-session", "default", "explicit Herdr session name")
-	herdrWorkspace := flags.String("herdr-workspace-label", "Parallel Intellect", "Herdr workspace presentation label")
+	herdrWorkspace := flags.String("herdr-workspace-label", "pintellect", "Herdr workspace presentation label")
 	taskFiles := flags.String("task-files", "", "task artifact base directory")
 	maxWorkerRuntime := flags.Duration("max-worker-runtime", 90*time.Minute, "maximum worker runtime")
 	maxWorkerRestarts := flags.Int("max-worker-restarts", 2, "maximum worker restarts")

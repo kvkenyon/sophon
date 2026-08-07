@@ -56,26 +56,28 @@ func (f *fakeRunner) Run(_ context.Context, args ...string) ([]byte, []byte, err
 func TestCommandAdapterStartsCodexAndDeliversBriefAsInitialPrompt(t *testing.T) {
 	runner := &fakeRunner{responses: []runnerResponse{
 		{stdout: `{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}`},
+		{stdout: `{"result":{"tab":{"tab_id":"w1:t1"}}}`},
 		{stdout: `{"result":{"type":"command_started"}}`},
 		{stdout: `{"result":{"pane":{"pane_id":"w1:p1"}}}`},
 		{stdout: `{"result":{"agent":{"pane_id":"w1:p1","agent_status":"idle","state_change_seq":1}}}`},
 		{stdout: `OpenAI Codex`},
 		{stdout: `{"result":{"agent":{"pane_id":"w1:p1","agent_session":{"value":"codex-session-2"}},"type":"prompt_sent"}}`},
 	}}
-	adapter := NewCommandAdapterWithRunner("fm-lab-contract", "Parallel Intellect", runner)
+	adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
 	session, err := adapter.StartCodex(context.Background(), StartRequest{
-		TaskID: "tsk_contract", Attempt: 2, WorktreePath: "/worktrees/task", Brief: "complete generated brief",
+		TaskID: "tsk_contract", TaskTitle: "Fix contract launch", Attempt: 2, WorktreePath: "/worktrees/task", Brief: "complete generated brief",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if session.SessionName != "fm-lab-contract" || session.WorkspaceID != "w1" ||
 		session.TabID != "w1:t1" || session.PaneID != "w1:p1" ||
-		session.AgentName != "pi-tsk_contract-a2" || session.AgentSessionID != "codex-session-2" {
+		session.AgentName != "pi-fix-contract-launch-tskcontr-a2" || session.AgentSessionID != "codex-session-2" {
 		t.Fatalf("session = %+v", session)
 	}
 	want := [][]string{
-		{"workspace", "create", "--cwd", "/worktrees/task", "--label", "Parallel Intellect", "--no-focus", "--session", "fm-lab-contract"},
+		{"workspace", "create", "--cwd", "/worktrees/task", "--label", "pintellect", "--no-focus", "--session", "fm-lab-contract"},
+		{"tab", "rename", "w1:t1", "pi-fix-contract-launch-tskcontr-a2", "--session", "fm-lab-contract"},
 		{"pane", "run", "w1:p1", "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust", "--session", "fm-lab-contract"},
 		{"pane", "get", "w1:p1", "--session", "fm-lab-contract"},
 		{"agent", "get", "w1:p1", "--session", "fm-lab-contract"},
@@ -116,13 +118,14 @@ func TestHerdrRuntimeConformanceStartsClaudeAndPiWithLaunchProfiles(t *testing.T
 		t.Run(test.name, func(t *testing.T) {
 			runner := &fakeRunner{responses: []runnerResponse{
 				{stdout: `{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}`},
+				{stdout: `{"result":{"tab":{"tab_id":"w1:t1"}}}`},
 				{stdout: `{"result":{"type":"command_started"}}`},
 				{stdout: `{"result":{"pane":{"pane_id":"w1:p1"}}}`},
 				{stdout: `{"result":{"agent":{"agent":"` + string(test.runtime) + `","pane_id":"w1:p1","agent_status":"working","state_change_seq":1}}}`},
 				{stdout: test.composer},
 				{stdout: `{"result":{"agent":{"agent":"` + string(test.runtime) + `","pane_id":"w1:p1","agent_session":{"value":"` + test.sessionID + `"}}}}`},
 			}}
-			adapter := NewCommandAdapterWithRunner("fm-lab-contract", "Parallel Intellect", runner)
+			adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
 			request := test.request
 			request.Runtime = test.runtime
 			session, err := adapter.Start(context.Background(), request)
@@ -133,7 +136,8 @@ func TestHerdrRuntimeConformanceStartsClaudeAndPiWithLaunchProfiles(t *testing.T
 				t.Fatalf("session = %+v", session)
 			}
 			want := [][]string{
-				{"workspace", "create", "--cwd", request.WorktreePath, "--label", "Parallel Intellect", "--no-focus", "--session", "fm-lab-contract"},
+				{"workspace", "create", "--cwd", request.WorktreePath, "--label", "pintellect", "--no-focus", "--session", "fm-lab-contract"},
+				{"tab", "rename", "w1:t1", session.AgentName, "--session", "fm-lab-contract"},
 				{"pane", "run", "w1:p1", test.launchCommand, "--session", "fm-lab-contract"},
 				{"pane", "get", "w1:p1", "--session", "fm-lab-contract"},
 				{"agent", "get", "w1:p1", "--session", "fm-lab-contract"},

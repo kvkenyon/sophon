@@ -97,7 +97,7 @@ printf '%%s\n' "$*" >> %q
 case "$1 $2" in
 	"session list") printf '{"sessions":[{"name":"fm-lab-home","running":true,"socket_path":"/tmp/lab.sock"}]}\n' ;;
   "workspace create") printf '{"result":{"workspace":{"workspace_id":"hw1"},"tab":{"tab_id":"hw1:t1"},"root_pane":{"pane_id":"hw1:p1"}}}\n' ;;
-  "pane run"|"agent rename") printf '{"result":{"ok":true}}\n' ;;
+  "pane run"|"tab rename"|"agent rename") printf '{"result":{"ok":true}}\n' ;;
   "pane read") printf 'OpenAI Codex\n' ;;
   "pane get") printf '{"result":{"pane":{"pane_id":"hw1:p1"}}}\n' ;;
   "agent get") printf '{"result":{"agent":{"agent":"codex","pane_id":"hw1:p1","agent_status":"idle","state_change_seq":1,"agent_session":{"value":"home-codex-session"}}}}\n' ;;

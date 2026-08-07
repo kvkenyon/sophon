@@ -261,7 +261,7 @@ esac
 set -eu
 case "$1 $2" in
   "workspace create") printf '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}\n' ;;
-  "pane run"|"agent rename") printf '{"result":{"ok":true}}\n' ;;
+  "pane run"|"tab rename"|"agent rename") printf '{"result":{"ok":true}}\n' ;;
   "pane read") printf 'OpenAI Codex\n' ;;
   "pane get") printf '{"result":{"pane":{"pane_id":"w1:p1"}}}\n' ;;
   "agent get") printf '{"result":{"agent":{"pane_id":"w1:p1","agent_status":"idle","state_change_seq":1}}}\n' ;;
@@ -355,7 +355,7 @@ func TestCLICommanderStartPromptAttachAndStatus(t *testing.T) {
 set -eu
 case "$1 $2" in
   "workspace create") printf '{"result":{"workspace":{"workspace_id":"cw1"},"tab":{"tab_id":"cw1:t1"},"root_pane":{"pane_id":"cw1:p1"}}}\n' ;;
-  "pane run"|"agent rename") printf '{"result":{"ok":true}}\n' ;;
+  "pane run"|"tab rename"|"agent rename") printf '{"result":{"ok":true}}\n' ;;
   "pane read") printf 'OpenAI Codex\n' ;;
   "pane get") printf '{"result":{"pane":{"pane_id":"cw1:p1"}}}\n' ;;
   "agent get") printf '{"result":{"agent":{"agent":"codex","pane_id":"cw1:p1","agent_status":"idle","state_change_seq":1,"agent_session":{"value":"commander-codex-session"}}}}\n' ;;

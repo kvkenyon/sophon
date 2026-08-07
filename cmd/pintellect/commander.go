@@ -41,7 +41,7 @@ func commanderStart(ctx context.Context, args []string) error {
 	agent := flags.String("agent", "", "commander runtime: pi, claude, or codex")
 	herdrBinary := flags.String("herdr", "herdr", "Herdr CLI binary")
 	herdrSession := flags.String("herdr-session", "", "Herdr session name (required)")
-	herdrWorkspace := flags.String("herdr-workspace-label", "Parallel Intellect Commander", "Herdr workspace presentation label")
+	herdrWorkspace := flags.String("herdr-workspace-label", "pintellect", "Herdr workspace presentation label")
 	promptDir := flags.String("prompt-dir", "", "commander prompt directory override")
 	model := flags.String("model", "", "runtime model (required for Pi)")
 	piExtension := flags.String("pi-extension", "", "absolute Pi lifecycle extension path")

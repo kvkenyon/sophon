@@ -82,7 +82,7 @@ func TestAcquirePersistsAndReacquireReusesOneLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if first.LeaseHolder != LeaseHolder(task.ID, 1) || first.BaseSHA != testSHA ||
-		first.Branch != TaskBranch(task.ID, 1) || first.Project != "project" || first.State != domain.TreehouseLeaseActive {
+		first.Branch != TaskBranch(task.Title, task.ID, 1) || first.Project != "project" || first.State != domain.TreehouseLeaseActive {
 		t.Fatalf("acquired lease = %+v", first)
 	}
 	attempt, err := store.Attempt(ctx, task.ID, 1)
@@ -90,7 +90,7 @@ func TestAcquirePersistsAndReacquireReusesOneLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if attempt.TreehouseLeaseID != first.LeaseID || attempt.TreehouseLeaseHolder != first.LeaseHolder ||
-		attempt.WorktreePath != first.WorktreePath || attempt.BaseSHA != testSHA || attempt.Branch != TaskBranch(task.ID, 1) {
+		attempt.WorktreePath != first.WorktreePath || attempt.BaseSHA != testSHA || attempt.Branch != TaskBranch(task.Title, task.ID, 1) {
 		t.Fatalf("persisted attempt = %+v", attempt)
 	}
 
@@ -120,8 +120,8 @@ func TestAcquirePersistsAndReacquireReusesOneLease(t *testing.T) {
 	}
 }
 
-func TestTaskBranchUsesProductPrefix(t *testing.T) {
-	if got := TaskBranch("tsk_123", 2); got != "pintellect/tsk_123/attempt-2" {
+func TestTaskBranchUsesReadableTaskName(t *testing.T) {
+	if got := TaskBranch("Fix concurrent invitation acceptance", "a2e2b9", 1); got != "pintellect/fix-concurrent-invitation-acceptance-a2e2b9/attempt-1" {
 		t.Fatalf("task branch = %q", got)
 	}
 }
@@ -165,7 +165,7 @@ func TestRetryAcquiresNewAttemptLeaseAndFencesOldAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	if second.Attempt != 2 || second.LeaseID == first.LeaseID || second.LeaseHolder == first.LeaseHolder ||
-		second.Branch != TaskBranch(task.ID, 2) || second.BaseSHA != testSHA {
+		second.Branch != TaskBranch(task.Title, task.ID, 2) || second.BaseSHA != testSHA {
 		t.Fatalf("retry lease = %+v; first = %+v", second, first)
 	}
 	if _, err := service.Release(ctx, "cmd_stale_release", task.ID, 1); !errors.Is(err, db.ErrStaleAttempt) {
@@ -270,7 +270,7 @@ func TestReconcileAdoptsLeaseAcquiredBeforeDatabaseRecord(t *testing.T) {
 	store, task := provisioningTask(t)
 	defer store.Close()
 	leasedAt := time.Unix(42, 0).UTC()
-	branch := TaskBranch(task.ID, 1)
+	branch := TaskBranch(task.Title, task.ID, 1)
 	cli := &fakeCLI{statuses: []WorktreeStatus{{WorktreePath: "/worktrees/unrecorded",
 		Status: "leased", LeaseID: "lease-unrecorded", LeaseHolder: LeaseHolder(task.ID, 1),
 		LeasedAt: &leasedAt}}}
