@@ -1,81 +1,54 @@
 # Sophon
 
-Sophon is a local control plane for autonomous software engineering.
-
-Sophon was formerly named Parallel Intellect.
-
-A human interacts with one persistent commander agent; Sophon sits underneath and makes multi-agent work reliable by owning missions, tasks, dependencies, worker identity and lifecycle, Treehouse leases, task attempts, state transitions, blockers and decisions, completion evidence, validation results, delivery records, crash recovery, and durable history.
+Sophon is a local control plane for coordinating autonomous coding agents. A human operator talks to one persistent commander agent; the commander decomposes work and dispatches specialist workers running Pi, Claude Code, or Codex. Sophon owns the durable execution graph underneath.
 
 > Reasoning may be probabilistic. Execution state may not be.
 
-The full product and engineering specification lives at [docs/sophon-v1-spec.md](docs/sophon-v1-spec.md).
+## The cast
 
-## Stack
+- **Operator** — the human who sets objectives and retains final authority.
+- **Commander** — the persistent agent the operator talks to.
+- **Worker** — a specialist agent assigned to one task.
+- **Mission** — the objective being pursued.
+- **Task** — one schedulable unit of work within a mission.
+- **Signal** — a durable decision that needs the operator.
+- **Lease** — Treehouse worktree ownership for a task attempt.
 
-- Control plane: Go + SQLite (`sophon` CLI, `sophond` daemon)
-- Commander runtimes: Pi, Claude Code, Codex
-- Workers: Pi, Claude Code, Codex
-- Terminal runtime: Herdr
-- Worktree runtime: Treehouse
-- Validation / delivery: no-mistakes
-- Deployment: local-first, single machine
+## Quickstart
 
-## Repository layout
-
-See spec section 60. Implementation follows the milestone order in spec section 61.
-
-## Milestone 3 vertical slice
-
-The first executable path is CLI-driven:
+Build and install the local CLI and daemon:
 
 ```bash
-sophon mission create --project /path/to/project --title "Mission" --objective "Goal"
-sophon task create MSN_ID --title "Task" --objective "Change" --acceptance "Criterion"
-sophon task start TSK_ID --herdr-session NAME
-sophon worker complete TSK_ID --attempt 1 --head-sha SHA --result ~/.sophon/tasks/TSK_ID/1/result.json
+go install ./cmd/sophon ./cmd/sophond
+sophon daemon start
 ```
 
-`task start` acquires a Treehouse lease, writes the generated brief, and launches Codex through Herdr. Completion reaches `ready` only after current-attempt, live-lease, Git ancestry/head/cleanliness, and strict result-schema verification.
-
-## Operator front door
-
-Open the current mission snapshot and enter its conversational commander in one step:
+Then enter the repository you want to work on and describe the work in plain language:
 
 ```bash
-sophon home --db /path/to/sophon.db
+cd /path/to/your/repo
+sophon home
 ```
 
-When more than one mission exists, add `--mission MSN_ID`. If the mission has no commander yet, `home` offers to start Codex; use `--yes` to accept that default without a prompt. Governed learning candidates can be reviewed with `sophon knowledge list`, then advanced explicitly with `knowledge promote`, `knowledge reject`, or `knowledge supersede`.
+`sophon home` opens a workspace in Herdr with your persistent commander. Use `sophon status`, `sophon mission list`, and `sophon daemon status` to inspect the work, missions, and local service.
 
-Runtime prompt sets are compiled into the binaries, so they work from any current directory. During development, set `SOPHON_PROMPT_DIR` to a checkout's `prompts/` directory to use live-edited commander, worker, and skill prompt files instead.
+## Architecture
 
-## Upgrading from Parallel Intellect
-
-Sophon stores new local state in `~/.sophon`. If that directory is absent but `~/.parallel-intellect` exists, Sophon continues using the legacy database, task artifacts, skills, daemon pidfile, log, and health file and prints a migration notice. Move everything in one step when the daemon is stopped:
-
-```bash
-mv ~/.parallel-intellect ~/.sophon
+```text
+operator → commander → sophon → herdr → treehouse → delivery
+                       │
+                 state machine
+                 SQLite + events
 ```
 
-`SOPHON_PROMPT_DIR` replaces `PINTELLECT_PROMPT_DIR`; the old environment variable remains a deprecated fallback when the new variable is unset.
+Sophon decides and records execution state; Herdr runs agents, Treehouse provides isolated worktrees, and delivery moves verified work forward.
 
-## Reliability testing
+## What it guarantees
 
-The default test suite remains hermetic:
+- Structured evidence, not terminal prose, completes a task.
+- Lease fencing prevents stale attempts from acting on current worktrees.
+- Idempotent delivery prevents duplicate releases or pull requests.
+- Durable state and recovery logic let work survive crashes and restarts.
+- Operator authority is explicit: unresolved decisions become signals, not silent agent choices.
 
-```bash
-go test ./...
-go build ./...
-```
-
-Milestone 11's process-kill matrix is opt-in and reports an exactly-once result or explicit recoverable state for every crash boundary:
-
-```bash
-SOPHON_RUN_CRASH_INJECTION=1 ./test/crash-injection.sh
-```
-
-To include the real Herdr stop/re-provision/husk-resume proof, use the guarded named lab path:
-
-```bash
-SOPHON_RUN_CRASH_INJECTION=1 SOPHON_CRASH_HERDR_LAB=1 ./test/crash-injection.sh
-```
+Named for the all-seeing sophons in *The Three-Body Problem*.
