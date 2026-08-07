@@ -20,15 +20,29 @@ type PromptComposer struct {
 	// paths are resolved against the registered project and then InstallDir.
 	Dir        string
 	InstallDir string
+	// SkillBaseDir overrides the parent directory for per-session skills.
+	// Production defaults to ~/.parallel-intellect/skills.
+	SkillBaseDir string
 }
 
 func (c PromptComposer) Compose(snapshot db.CommanderLaunchContext) (string, error) {
+	return c.compose(snapshot, "")
+}
+
+func (c PromptComposer) ComposeWithSkills(snapshot db.CommanderLaunchContext, skillDir string) (string, error) {
+	return c.compose(snapshot, skillDir)
+}
+
+func (c PromptComposer) compose(snapshot db.CommanderLaunchContext, skillDir string) (string, error) {
 	baseline, err := c.promptSet(snapshot.ProjectPath)
 	if err != nil {
 		return "", err
 	}
 	var body strings.Builder
 	body.WriteString(baseline)
+	if skillDir != "" {
+		body.WriteString(runtimeprompts.SkillTriggers(skillDir, runtimeprompts.CommanderSkills))
+	}
 	encoded, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("encode commander mission snapshot: %w", err)
@@ -72,12 +86,23 @@ Project root: %s
 // a placeholder mission. The running agent binds itself by creating a real
 // mission after the operator describes the work conversationally.
 func (c PromptComposer) ComposeIntake(project domain.Project, databasePath string) (string, error) {
+	return c.composeIntake(project, databasePath, "")
+}
+
+func (c PromptComposer) ComposeIntakeWithSkills(project domain.Project, databasePath, skillDir string) (string, error) {
+	return c.composeIntake(project, databasePath, skillDir)
+}
+
+func (c PromptComposer) composeIntake(project domain.Project, databasePath, skillDir string) (string, error) {
 	baseline, err := c.promptSet(project.Path)
 	if err != nil {
 		return "", err
 	}
 	var body strings.Builder
 	body.WriteString(baseline)
+	if skillDir != "" {
+		body.WriteString(runtimeprompts.SkillTriggers(skillDir, runtimeprompts.CommanderSkills))
+	}
 	dbArgument := ""
 	if strings.TrimSpace(databasePath) != "" {
 		dbArgument = fmt.Sprintf(" --db %q", databasePath)
@@ -106,6 +131,28 @@ as preserving them in the mission objective and criteria. This records the
 direction before the intake conversation can be lost.
 `, project.Name, project.ID, project.Path, project.Path, dbArgument)
 	return strings.TrimSpace(body.String()) + "\n", nil
+}
+
+func (c PromptComposer) MaterializeSkills(sessionID domain.SessionID) (string, error) {
+	if sessionID == "" {
+		return "", errors.New("commander session ID is required")
+	}
+	base := c.SkillBaseDir
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home directory: %w", err)
+		}
+		base = filepath.Join(home, ".parallel-intellect", "skills")
+	}
+	dir, err := filepath.Abs(filepath.Join(base, "commander", string(sessionID)))
+	if err != nil {
+		return "", fmt.Errorf("resolve commander skill directory: %w", err)
+	}
+	if err := runtimeprompts.MaterializeSkills(dir, runtimeprompts.CommanderSkills); err != nil {
+		return "", fmt.Errorf("materialize commander skills: %w", err)
+	}
+	return dir, nil
 }
 
 func (c PromptComposer) promptSet(projectPath string) (string, error) {

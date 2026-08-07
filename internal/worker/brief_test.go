@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"parallel-intellect/internal/domain"
+	runtimeprompts "parallel-intellect/prompts"
 )
 
 func TestBriefGenerationComposesWorkerPromptsAndTaskFacts(t *testing.T) {
@@ -62,6 +63,43 @@ func TestBriefGenerationComposesWorkerPromptsAndTaskFacts(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("brief permissions = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestBriefGenerationMaterializesWorkerSkillSubsetAndTriggers(t *testing.T) {
+	root := t.TempDir()
+	generator := BriefGenerator{BaseDir: filepath.Join(root, "tasks"), SkillBaseDir: filepath.Join(root, "skills")}
+	task := domain.Task{ID: "tsk_skills", MissionID: "msn_skills", Title: "Implement", Objective: "Build it.", DeliveryMode: domain.DeliveryBranch}
+	path, err := generator.Render(BriefInput{
+		MissionID: "msn_skills", MissionTitle: "Skills", MissionObjective: "Load skills.", Task: task, Attempt: 2,
+		Project: "parallel-intellect", Worktree: "/worktrees/skills", Branch: "task/skills", BaseSHA: "0123456789abcdef0123456789abcdef01234567",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	skillDir, err := generator.SkillDir(task.ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range runtimeprompts.WorkerSkills {
+		skillPath := filepath.Join(skillDir, name, "SKILL.md")
+		if _, err := os.Stat(skillPath); err != nil {
+			t.Errorf("worker skill %s was not materialized: %v", name, err)
+		}
+		if !strings.Contains(string(body), skillPath) {
+			t.Errorf("worker brief omitted trigger path %s", skillPath)
+		}
+	}
+	for _, name := range runtimeprompts.CommanderSkills {
+		if name != "coding-guidelines" && name != "decision-lifecycle" && name != "diagnostic-reasoning" {
+			if _, err := os.Stat(filepath.Join(skillDir, name, "SKILL.md")); !os.IsNotExist(err) {
+				t.Errorf("worker materialized commander-only skill %s", name)
+			}
+		}
 	}
 }
 

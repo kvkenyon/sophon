@@ -55,16 +55,21 @@ func (s *Starter) Start(ctx context.Context, in StartRequest) (StartResult, erro
 	} else if !errors.Is(err, db.ErrNotFound) {
 		return StartResult{}, err
 	}
-	prompt, err := s.Prompts.Compose(snapshot)
-	if err != nil {
-		return StartResult{}, err
-	}
 	rawSessionID, err := id.New("csn")
 	if err != nil {
 		return StartResult{}, err
 	}
+	sessionID := domain.SessionID(rawSessionID)
+	skillDir, err := s.Prompts.MaterializeSkills(sessionID)
+	if err != nil {
+		return StartResult{}, err
+	}
+	prompt, err := s.Prompts.ComposeWithSkills(snapshot, skillDir)
+	if err != nil {
+		return StartResult{}, err
+	}
 	runtimeSession, err := s.Runtime.Start(ctx, StartConfig{
-		SessionID: domain.SessionID(rawSessionID), ProjectID: snapshot.Mission.ProjectID,
+		SessionID: sessionID, ProjectID: snapshot.Mission.ProjectID,
 		MissionID: in.MissionID, Runtime: in.Runtime,
 		WorkingDir: snapshot.ProjectPath, Prompt: prompt, Model: in.Model, PiExtensionPath: in.PiExtensionPath,
 	})
@@ -105,16 +110,21 @@ func (s *Starter) StartProject(ctx context.Context, in ProjectStartRequest) (Sta
 	} else if !errors.Is(err, db.ErrNotFound) {
 		return StartResult{}, err
 	}
-	prompt, err := s.Prompts.ComposeIntake(project, in.DatabasePath)
-	if err != nil {
-		return StartResult{}, err
-	}
 	rawSessionID, err := id.New("csn")
 	if err != nil {
 		return StartResult{}, err
 	}
+	sessionID := domain.SessionID(rawSessionID)
+	skillDir, err := s.Prompts.MaterializeSkills(sessionID)
+	if err != nil {
+		return StartResult{}, err
+	}
+	prompt, err := s.Prompts.ComposeIntakeWithSkills(project, in.DatabasePath, skillDir)
+	if err != nil {
+		return StartResult{}, err
+	}
 	runtimeSession, err := s.Runtime.Start(ctx, StartConfig{
-		SessionID: domain.SessionID(rawSessionID), ProjectID: in.ProjectID, Runtime: in.Runtime,
+		SessionID: sessionID, ProjectID: in.ProjectID, Runtime: in.Runtime,
 		WorkingDir: project.Path, Prompt: prompt, Model: in.Model,
 	})
 	if err != nil {

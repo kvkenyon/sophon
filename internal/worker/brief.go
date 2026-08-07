@@ -27,7 +27,8 @@ type BriefInput struct {
 }
 
 type BriefGenerator struct {
-	BaseDir string
+	BaseDir      string
+	SkillBaseDir string
 }
 
 func DefaultTaskBaseDir() (string, error) {
@@ -53,6 +54,33 @@ func (g BriefGenerator) AttemptDir(taskID domain.TaskID, attempt int) (string, e
 	return filepath.Join(base, string(taskID), fmt.Sprintf("%d", attempt)), nil
 }
 
+func DefaultSkillBaseDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".parallel-intellect", "skills"), nil
+}
+
+func (g BriefGenerator) SkillDir(taskID domain.TaskID, attempt int) (string, error) {
+	if taskID == "" || attempt < 1 {
+		return "", errors.New("task and attempt are required")
+	}
+	base := g.SkillBaseDir
+	if base == "" {
+		var err error
+		base, err = DefaultSkillBaseDir()
+		if err != nil {
+			return "", err
+		}
+	}
+	dir, err := filepath.Abs(filepath.Join(base, "worker", string(taskID), fmt.Sprintf("%d", attempt)))
+	if err != nil {
+		return "", fmt.Errorf("resolve worker skill directory: %w", err)
+	}
+	return dir, nil
+}
+
 func (g BriefGenerator) Render(in BriefInput) (string, error) {
 	if in.MissionID == "" || in.Task.ID == "" || in.Attempt < 1 || in.Project == "" ||
 		in.Worktree == "" || in.Branch == "" || in.BaseSHA == "" || strings.TrimSpace(in.Task.Objective) == "" {
@@ -64,6 +92,13 @@ func (g BriefGenerator) Render(in BriefInput) (string, error) {
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create task brief directory: %w", err)
+	}
+	skillDir, err := g.SkillDir(in.Task.ID, in.Attempt)
+	if err != nil {
+		return "", err
+	}
+	if err := runtimeprompts.MaterializeSkills(skillDir, runtimeprompts.WorkerSkills); err != nil {
+		return "", fmt.Errorf("materialize worker skills: %w", err)
 	}
 	resultPath := filepath.Join(dir, "result.json")
 	criteria := in.Task.AcceptanceCriteria
@@ -83,6 +118,7 @@ func (g BriefGenerator) Render(in BriefInput) (string, error) {
 	body.WriteString(common)
 	body.WriteString("\n\n")
 	body.WriteString(implementation)
+	body.WriteString(runtimeprompts.SkillTriggers(skillDir, runtimeprompts.WorkerSkills))
 	body.WriteString("\n\n# Codex runtime overlay\n\n")
 	body.WriteString("Use Codex autonomously for this one implementation attempt. Treat this complete prompt as the generated brief; do not wait for a human.\n")
 	body.WriteString("\n# Generated task brief\n\n")

@@ -2,6 +2,8 @@ package prompts
 
 import (
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -25,6 +27,50 @@ func TestEmbeddedRuntimeSetsContainTheirContent(t *testing.T) {
 		}
 		if !strings.Contains(string(body), test.want) {
 			t.Errorf("%s/%s omitted %q", test.set, test.file, test.want)
+		}
+	}
+}
+
+func TestMaterializeSkillsWritesRequestedEmbeddedSet(t *testing.T) {
+	t.Setenv(OverrideEnv, "")
+	dir := filepath.Join(t.TempDir(), "session-skills")
+	if err := MaterializeSkills(dir, CommanderSkills); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range CommanderSkills {
+		path := filepath.Join(dir, name, "SKILL.md")
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read materialized %s: %v", name, err)
+		}
+		embedded, err := fs.ReadFile(Embedded, "skills/"+name+"/SKILL.md")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(body) != string(embedded) {
+			t.Errorf("materialized %s differs from embedded skill", name)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("%s permissions = %o, want 600", name, info.Mode().Perm())
+		}
+	}
+}
+
+func TestSkillTriggersUseOnlyRoleRelevantAbsolutePaths(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "skills")
+	triggers := SkillTriggers(dir, WorkerSkills)
+	for _, name := range WorkerSkills {
+		if !strings.Contains(triggers, filepath.Join(dir, name, "SKILL.md")) {
+			t.Errorf("worker trigger omitted %s: %s", name, triggers)
+		}
+	}
+	for _, name := range CommanderSkills {
+		if name != "coding-guidelines" && name != "decision-lifecycle" && name != "diagnostic-reasoning" && strings.Contains(triggers, name+"/SKILL.md") {
+			t.Errorf("worker trigger included commander-only skill %s: %s", name, triggers)
 		}
 	}
 }

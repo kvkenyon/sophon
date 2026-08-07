@@ -8,6 +8,7 @@ import (
 
 	"parallel-intellect/internal/db"
 	"parallel-intellect/internal/domain"
+	runtimeprompts "parallel-intellect/prompts"
 )
 
 func TestPromptComposerUsesEmbeddedPromptsOutsideRepository(t *testing.T) {
@@ -114,5 +115,30 @@ func TestPromptComposerIntakeCreatesMissionConversationally(t *testing.T) {
 	}
 	if strings.Contains(composed, "# Bound mission") {
 		t.Fatalf("intake prompt invented a mission:\n%s", composed)
+	}
+}
+
+func TestPromptComposerMaterializesFullSkillSetAndAddsTriggers(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "skills")
+	composer := PromptComposer{SkillBaseDir: base}
+	skillDir, err := composer.MaterializeSkills("csn_prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	composed, err := composer.ComposeWithSkills(db.CommanderLaunchContext{
+		ProjectPath: t.TempDir(), ProjectName: "project",
+		Mission: domain.Mission{ID: "msn_prompt", Objective: "resolve prompts"},
+	}, skillDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range runtimeprompts.CommanderSkills {
+		path := filepath.Join(skillDir, name, "SKILL.md")
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("commander skill %s was not materialized: %v", name, err)
+		}
+		if !strings.Contains(composed, path) {
+			t.Errorf("commander prompt omitted trigger path %s", path)
+		}
 	}
 }
