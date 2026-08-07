@@ -35,6 +35,16 @@ pintellect worker complete TSK_ID --attempt 1 --head-sha SHA --result ~/.paralle
 
 `task start` acquires a Treehouse lease, writes the generated brief, and launches Codex through Herdr. Completion reaches `ready` only after current-attempt, live-lease, Git ancestry/head/cleanliness, and strict result-schema verification.
 
+## Operator front door
+
+Open the current mission snapshot and enter its conversational commander in one step:
+
+```bash
+pintellect home --db /path/to/pintellect.db
+```
+
+When more than one mission exists, add `--mission MSN_ID`. If the mission has no commander yet, `home` offers to start Codex; use `--yes` to accept that default without a prompt. Governed learning candidates can be reviewed with `pintellect knowledge list`, then advanced explicitly with `knowledge promote`, `knowledge reject`, or `knowledge supersede`.
+
 ## Reliability testing
 
 The default test suite remains hermetic:

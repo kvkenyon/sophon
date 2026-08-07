@@ -13,12 +13,17 @@ import (
 	"parallel-intellect/internal/db"
 )
 
-type PromptComposer struct{ Dir string }
+type PromptComposer struct {
+	// Dir overrides prompt discovery. Absolute paths are used directly; relative
+	// paths are resolved against the registered project and then InstallDir.
+	Dir        string
+	InstallDir string
+}
 
 func (c PromptComposer) Compose(snapshot db.CommanderLaunchContext) (string, error) {
-	dir := strings.TrimSpace(c.Dir)
-	if dir == "" {
-		dir = filepath.Join("prompts", "commander")
+	dir, err := c.resolveDir(snapshot.ProjectPath)
+	if err != nil {
+		return "", err
 	}
 	var paths []string
 	if err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
@@ -74,4 +79,31 @@ Project: %s
 	}
 	fmt.Fprintf(&body, "\n## Current mission state snapshot\n\n```json\n%s\n```\n", encoded)
 	return strings.TrimSpace(body.String()) + "\n", nil
+}
+
+func (c PromptComposer) resolveDir(projectPath string) (string, error) {
+	relative := strings.TrimSpace(c.Dir)
+	if relative == "" {
+		relative = filepath.Join("prompts", "commander")
+	}
+	if filepath.IsAbs(relative) {
+		return relative, nil
+	}
+	candidates := make([]string, 0, 2)
+	if projectPath = strings.TrimSpace(projectPath); projectPath != "" {
+		candidates = append(candidates, filepath.Join(projectPath, relative))
+	}
+	if installDir := strings.TrimSpace(c.InstallDir); installDir != "" {
+		candidates = append(candidates, filepath.Join(installDir, relative))
+	}
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err == nil && info.IsDir() {
+			return candidate, nil
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("inspect commander prompt set %s: %w", candidate, err)
+		}
+	}
+	return "", fmt.Errorf("commander prompt set not found relative to registered project or binary install directory (checked %s)", strings.Join(candidates, ", "))
 }

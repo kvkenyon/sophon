@@ -49,6 +49,10 @@ func run(ctx context.Context, args []string) error {
 		return project(ctx, args[1:])
 	case "status":
 		return statusCommand(ctx, args[1:])
+	case "home":
+		return homeCommand(ctx, args[1:])
+	case "knowledge":
+		return knowledgeCommand(ctx, args[1:])
 	case "task":
 		return task(ctx, args[1:])
 	case "worker":
@@ -703,10 +707,11 @@ func criteriaValues(values []string) []domain.Criterion {
 func usage() {
 	fmt.Fprintln(os.Stderr, `Usage:
   pintellect init [--db PATH]
-	  pintellect status --mission ID [--db PATH] [--json]
-	  pintellect project add PATH [--name NAME] [--db PATH] [--json]
-	  pintellect project list [--db PATH] [--json]
-	  pintellect project inspect NAME [--db PATH] [--json]
+  pintellect home [--mission ID] [--db PATH] [--yes]
+  pintellect status --mission ID [--db PATH] [--json]
+  pintellect project add PATH [--name NAME] [--db PATH] [--json]
+  pintellect project list [--db PATH] [--json]
+  pintellect project inspect NAME [--db PATH] [--json]
   pintellect mission create --project PATH --title TITLE --objective OBJECTIVE [--acceptance TEXT]
   pintellect task create MISSION --title TITLE --objective OBJECTIVE [--acceptance TEXT]
   pintellect task start TASK [--herdr-session NAME] [--db PATH]
@@ -716,7 +721,7 @@ func usage() {
   pintellect task deliver TASK [--command-id ID] [--base BRANCH] [--db PATH]
   pintellect task release TASK [--command-id ID] [--db PATH]
   pintellect worker complete TASK --attempt N --head-sha SHA --result FILE [--db PATH]
-	  pintellect worker inspect TASK [--attempt N] [--db PATH] [--json]
+  pintellect worker inspect TASK [--attempt N] [--db PATH] [--json]
   pintellect task|mission timeline ID [--db PATH] [--json]
   pintellect signal raise --mission ID --question TEXT [--task ID] [--kind KIND] [--context TEXT] [--recommendation TEXT] [--command-id ID] [--db PATH] [--json]
   pintellect signal list [--mission ID] [--status STATUS] [--db PATH] [--json]
@@ -725,5 +730,8 @@ func usage() {
   pintellect commander start --agent pi|claude|codex --mission ID [--herdr-session NAME]
   pintellect commander prompt|steer|follow-up MESSAGE [--mission ID]
   pintellect commander attach|status [--mission ID]
+  pintellect knowledge list [--status candidate|active] [--db PATH] [--json]
+  pintellect knowledge promote|reject ID [--db PATH]
+  pintellect knowledge supersede ID --by REPLACEMENT [--db PATH]
   pintellect version`)
 }

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -40,7 +42,7 @@ func commanderStart(ctx context.Context, args []string) error {
 	herdrBinary := flags.String("herdr", "herdr", "Herdr CLI binary")
 	herdrSession := flags.String("herdr-session", "", "Herdr session name (required)")
 	herdrWorkspace := flags.String("herdr-workspace-label", "Parallel Intellect Commander", "Herdr workspace presentation label")
-	promptDir := flags.String("prompt-dir", "prompts/commander", "commander prompt directory")
+	promptDir := flags.String("prompt-dir", "", "commander prompt directory override")
 	model := flags.String("model", "", "runtime model (required for Pi)")
 	piExtension := flags.String("pi-extension", "", "absolute Pi lifecycle extension path")
 	maxTurns := flags.Int("max-turns", 30, "maximum commander turns")
@@ -70,8 +72,12 @@ func commanderStart(ctx context.Context, args []string) error {
 	}
 	defer store.Close()
 	terminal := herdr.NewCommandAdapter(*herdrBinary, *herdrSession, *herdrWorkspace)
+	installDir, err := binaryInstallDir()
+	if err != nil {
+		return err
+	}
 	starter := commandercontrol.Starter{Store: store, Runtime: commandercontrol.HerdrAdapter{Terminal: terminal},
-		Prompts: commandercontrol.PromptComposer{Dir: *promptDir}}
+		Prompts: commandercontrol.PromptComposer{Dir: *promptDir, InstallDir: installDir}}
 	started, err := starter.Start(ctx, commandercontrol.StartRequest{MissionID: domain.MissionID(*mission), Runtime: runtime,
 		Model: *model, PiExtensionPath: *piExtension,
 		Budget: domain.CommanderBudget{MaxTurns: *maxTurns, MaxDuration: *maxDuration}})
@@ -79,6 +85,18 @@ func commanderStart(ctx context.Context, args []string) error {
 		return err
 	}
 	return encode(started.Session)
+}
+
+func binaryInstallDir() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve pintellect executable: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return "", fmt.Errorf("resolve pintellect executable symlinks: %w", err)
+	}
+	return filepath.Dir(resolved), nil
 }
 
 func commanderSend(ctx context.Context, verb string, args []string) error {
