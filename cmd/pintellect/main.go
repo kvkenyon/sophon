@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"parallel-intellect/internal/db"
+	"parallel-intellect/internal/delivery"
 	"parallel-intellect/internal/domain"
 	gitcontrol "parallel-intellect/internal/git"
 	"parallel-intellect/internal/herdr"
@@ -152,10 +153,83 @@ func task(ctx context.Context, args []string) error {
 	if len(args) >= 2 && args[0] == "validate" {
 		return taskValidate(ctx, domain.TaskID(args[1]), args[2:])
 	}
+	if len(args) >= 2 && args[0] == "deliver" {
+		return taskDeliver(ctx, domain.TaskID(args[1]), args[2:])
+	}
+	if len(args) >= 2 && args[0] == "release" {
+		return taskRelease(ctx, domain.TaskID(args[1]), args[2:])
+	}
 	if len(args) >= 2 && args[0] == "timeline" {
 		return timeline(ctx, "task", args[1], args[2:])
 	}
-	return errors.New("expected: pintellect task create MISSION|start TASK|retry TASK|cancel TASK|validate TASK|timeline TASK")
+	return errors.New("expected: pintellect task create MISSION|start TASK|retry TASK|cancel TASK|validate TASK|deliver TASK|release TASK|timeline TASK")
+}
+
+func taskDeliver(ctx context.Context, taskID domain.TaskID, args []string) error {
+	flags := flag.NewFlagSet("task deliver", flag.ContinueOnError)
+	dbPath := flags.String("db", "", "SQLite database path")
+	gitBinary := flags.String("git", "git", "Git binary")
+	ghBinary := flags.String("gh-axi", "gh-axi", "gh-axi binary")
+	gateBinary := flags.String("no-mistakes", "no-mistakes", "no-mistakes CLI binary")
+	base := flags.String("base", "", "pull request base branch")
+	commandValue := flags.String("command-id", "", "idempotency command ID")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	store, err := openStore(ctx, *dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	command, err := suppliedCommandID(*commandValue)
+	if err != nil {
+		return err
+	}
+	service := delivery.Service{
+		Store:  store,
+		Git:    delivery.CommandGit{Binary: *gitBinary},
+		Remote: delivery.CommandRemote{GitBinary: *gitBinary, GHBinary: *ghBinary},
+		Gate:   delivery.CommandGate{Binary: *gateBinary},
+	}
+	result, err := service.Deliver(ctx, delivery.Request{
+		TaskID: taskID, CommandID: command, Base: *base, Actor: "operator",
+	})
+	if errors.Is(err, delivery.ErrGateFailed) {
+		if encodeErr := encode(result); encodeErr != nil {
+			return encodeErr
+		}
+	}
+	if err != nil {
+		return err
+	}
+	return encode(result)
+}
+
+func taskRelease(ctx context.Context, taskID domain.TaskID, args []string) error {
+	flags := flag.NewFlagSet("task release", flag.ContinueOnError)
+	dbPath := flags.String("db", "", "SQLite database path")
+	treehouseBinary := flags.String("treehouse", "treehouse", "Treehouse CLI binary")
+	gitBinary := flags.String("git", "git", "Git binary")
+	commandValue := flags.String("command-id", "", "idempotency command ID")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	store, err := openStore(ctx, *dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	command, err := suppliedCommandID(*commandValue)
+	if err != nil {
+		return err
+	}
+	leaseService := treehouse.NewService(store, treehouse.NewCommandClient(*treehouseBinary), &gitcontrol.Client{Binary: *gitBinary})
+	service := delivery.Service{Store: store, Leases: leaseService}
+	released, err := service.Release(ctx, taskID, command, "operator")
+	if err != nil {
+		return err
+	}
+	return encode(released)
 }
 
 func taskRetry(ctx context.Context, taskID domain.TaskID, args []string) error {
@@ -450,6 +524,13 @@ func commandID() (domain.CommandID, error) {
 	return domain.CommandID(raw), err
 }
 
+func suppliedCommandID(value string) (domain.CommandID, error) {
+	if strings.TrimSpace(value) != "" {
+		return domain.CommandID(value), nil
+	}
+	return commandID()
+}
+
 func completionCommandID(taskID domain.TaskID, attempt int, headSHA, resultPath string) domain.CommandID {
 	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%s", taskID, attempt, strings.ToLower(headSHA), resultPath)))
 	return domain.CommandID(fmt.Sprintf("cmd_worker_complete_%x", digest[:16]))
@@ -483,9 +564,11 @@ func usage() {
   pintellect mission create --project PATH --title TITLE --objective OBJECTIVE [--acceptance TEXT]
   pintellect task create MISSION --title TITLE --objective OBJECTIVE [--acceptance TEXT]
   pintellect task start TASK [--herdr-session NAME] [--db PATH]
-	  pintellect task retry TASK [--db PATH]
-	  pintellect task cancel TASK [--herdr-session NAME] [--db PATH]
+  pintellect task retry TASK [--db PATH]
+  pintellect task cancel TASK [--herdr-session NAME] [--db PATH]
   pintellect task validate TASK --unit-test COMMAND [--typecheck COMMAND] [--lint COMMAND] [--project-validation COMMAND]
+  pintellect task deliver TASK [--command-id ID] [--base BRANCH] [--db PATH]
+  pintellect task release TASK [--command-id ID] [--db PATH]
   pintellect worker complete TASK --attempt N --head-sha SHA --result FILE [--db PATH]
   pintellect task|mission timeline ID [--db PATH] [--json]
   pintellect signal list [--mission ID] [--status STATUS] [--db PATH] [--json]

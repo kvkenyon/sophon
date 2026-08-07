@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"parallel-intellect/internal/db"
+	"parallel-intellect/internal/delivery"
 	"parallel-intellect/internal/domain"
 	"parallel-intellect/internal/signals"
 	"parallel-intellect/internal/worker"
@@ -118,6 +119,7 @@ case "$1" in
     holder=$(sed -n '1p' %q)
     printf '[{"name":"slice","path":%q,"status":"leased","lease_id":"lease-cli","lease_holder":"%%s"}]\n' "$holder"
     ;;
+  return) exit 0 ;;
   *) exit 2 ;;
 esac
 `, leaseState, repo, leaseState, repo)
@@ -168,6 +170,24 @@ esac
 	}
 	if ready.State != domain.TaskReady {
 		t.Fatalf("completed slice task = %+v", ready)
+	}
+	deliveredJSON := runCLI(t, "task", "deliver", string(task.ID), "--db", dbPath,
+		"--command-id", "cmd_cli_deliver")
+	var delivered delivery.Result
+	if err := json.Unmarshal(deliveredJSON, &delivered); err != nil {
+		t.Fatal(err)
+	}
+	if delivered.Task.State != domain.TaskDeliveredBranch || delivered.Delivery.HeadSHA != head {
+		t.Fatalf("delivered branch = %+v", delivered)
+	}
+	releasedJSON := runCLI(t, "task", "release", string(task.ID), "--db", dbPath,
+		"--treehouse", treehouseBinary, "--command-id", "cmd_cli_release")
+	var released domain.TreehouseLease
+	if err := json.Unmarshal(releasedJSON, &released); err != nil {
+		t.Fatal(err)
+	}
+	if released.State != domain.TreehouseLeaseReleased || released.LeaseID != "lease-cli" {
+		t.Fatalf("released branch lease = %+v", released)
 	}
 }
 
