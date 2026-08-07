@@ -103,6 +103,9 @@ func (s *Store) CreateMission(ctx context.Context, commandID domain.CommandID, i
 		}); err != nil {
 			return domain.Mission{}, err
 		}
+		if _, err := regenerateMissionDigestTx(ctx, tx, mission.ID, "control-plane", "mission.created", &commandID); err != nil {
+			return domain.Mission{}, err
+		}
 		return mission, nil
 	})
 }
@@ -214,6 +217,24 @@ func (s *Store) TransitionTask(ctx context.Context, commandID domain.CommandID, 
 		if current.State == domain.TaskQueued && current.Version == in.ExpectedVersion &&
 			current.CurrentAttempt == in.Attempt && in.ExpectedState == domain.TaskQueued &&
 			in.To == domain.TaskProvisioning {
+			mission, err := scanMission(tx.QueryRowContext(ctx, missionSelect+" WHERE id = ?", current.MissionID))
+			if err != nil {
+				return domain.Task{}, err
+			}
+			if mission.Budget.MaxWallClock > 0 && time.Since(mission.CreatedAt) >= mission.Budget.MaxWallClock {
+				return expireTaskBudgetTx(ctx, tx, current, "mission.wall_clock", in.Actor, &commandID)
+			}
+			if mission.Budget.MaxConcurrentTasks > 0 {
+				var active int
+				if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE mission_id = ? AND state IN (
+					'provisioning', 'starting', 'running', 'blocked', 'collecting', 'ready',
+					'validating', 'delivery_blocked')`, current.MissionID).Scan(&active); err != nil {
+					return domain.Task{}, fmt.Errorf("count concurrent mission tasks: %w", err)
+				}
+				if active >= mission.Budget.MaxConcurrentTasks {
+					return expireTaskBudgetTx(ctx, tx, current, "mission.concurrent_tasks", in.Actor, &commandID)
+				}
+			}
 			openSignals, err := openSignalDependenciesTx(ctx, tx, in.TaskID)
 			if err != nil {
 				return domain.Task{}, err
@@ -273,6 +294,11 @@ func (s *Store) TransitionTask(ctx context.Context, commandID domain.CommandID, 
 		}); err != nil {
 			return domain.Task{}, err
 		}
+		if taskpolicy.IsTerminal(updated.State) {
+			if _, err := regenerateMissionDigestTx(ctx, tx, updated.MissionID, "control-plane", "task."+string(updated.State), &commandID); err != nil {
+				return domain.Task{}, err
+			}
+		}
 		return updated, nil
 	})
 }
@@ -289,25 +315,30 @@ func (s *Store) RetryTask(ctx context.Context, commandID domain.CommandID, in Re
 	if in.TaskID == "" || in.ExpectedVersion < 1 || in.Actor == "" {
 		return domain.Task{}, errors.New("task, expected version, and actor are required")
 	}
-	return runCommand(ctx, s, commandID, "task.retry", in, func(tx *sql.Tx) (domain.Task, error) {
+	type retryResult struct {
+		Task      domain.Task `json:"task"`
+		Exhausted bool        `json:"exhausted"`
+	}
+	result, err := runCommand(ctx, s, commandID, "task.retry", in, func(tx *sql.Tx) (retryResult, error) {
 		current, err := getTaskTx(ctx, tx, in.TaskID)
 		if err != nil {
-			return domain.Task{}, err
+			return retryResult{}, err
 		}
 		if current.Version != in.ExpectedVersion {
-			return domain.Task{}, &ConflictError{Current: current}
+			return retryResult{}, &ConflictError{Current: current}
 		}
 		if !taskpolicy.IsRetryable(current.State) {
-			return domain.Task{}, ErrTaskNotRetryable
+			return retryResult{}, ErrTaskNotRetryable
 		}
 		var maximum int
 		if err := tx.QueryRowContext(ctx,
 			"SELECT max_task_attempts FROM missions WHERE id = ?", current.MissionID).Scan(&maximum); err != nil {
-			return domain.Task{}, fmt.Errorf("load attempt budget: %w", err)
+			return retryResult{}, fmt.Errorf("load attempt budget: %w", err)
 		}
 		nextAttempt := current.CurrentAttempt + 1
 		if maximum > 0 && nextAttempt > maximum {
-			return domain.Task{}, ErrAttemptBudget
+			updated, err := expireRetryBudgetTx(ctx, tx, current, "mission.task_attempts", in.Actor, &commandID)
+			return retryResult{Task: updated, Exhausted: true}, err
 		}
 		now := time.Now().UTC()
 		result, err := tx.ExecContext(ctx, `UPDATE tasks
@@ -316,56 +347,63 @@ func (s *Store) RetryTask(ctx context.Context, commandID domain.CommandID, in Re
 			domain.TaskQueued, nextAttempt, nullableString(in.BaseSHA), formatTime(now),
 			in.TaskID, in.ExpectedVersion, current.CurrentAttempt)
 		if err != nil {
-			return domain.Task{}, fmt.Errorf("retry task: %w", err)
+			return retryResult{}, fmt.Errorf("retry task: %w", err)
 		}
 		rows, err := result.RowsAffected()
 		if err != nil {
-			return domain.Task{}, fmt.Errorf("count retry update: %w", err)
+			return retryResult{}, fmt.Errorf("count retry update: %w", err)
 		}
 		if rows == 0 {
 			reloaded, reloadErr := getTaskTx(ctx, tx, in.TaskID)
 			if reloadErr != nil {
-				return domain.Task{}, reloadErr
+				return retryResult{}, reloadErr
 			}
-			return domain.Task{}, &ConflictError{Current: reloaded}
+			return retryResult{}, &ConflictError{Current: reloaded}
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE task_attempts
 			SET completed_at = COALESCE(completed_at, ?)
 			WHERE task_id = ? AND attempt = ?`, formatTime(now), in.TaskID, current.CurrentAttempt); err != nil {
-			return domain.Task{}, fmt.Errorf("close previous attempt: %w", err)
+			return retryResult{}, fmt.Errorf("close previous attempt: %w", err)
 		}
 		// A retry is an attempt fence, not merely a state reset.  A completion
 		// holding the old lease can never satisfy the new current_attempt.
 		if _, err := tx.ExecContext(ctx, `UPDATE treehouse_leases SET state = ?
 			WHERE task_id = ? AND attempt = ? AND state = ?`, domain.TreehouseLeaseFenced,
 			in.TaskID, current.CurrentAttempt, domain.TreehouseLeaseActive); err != nil {
-			return domain.Task{}, fmt.Errorf("fence previous attempt lease: %w", err)
+			return retryResult{}, fmt.Errorf("fence previous attempt lease: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO task_attempts(task_id, attempt, base_sha, branch, created_at) VALUES (?, ?, ?, ?, ?)`,
 			in.TaskID, nextAttempt, nullableString(in.BaseSHA), nullableString(in.Branch), formatTime(now)); err != nil {
-			return domain.Task{}, fmt.Errorf("insert retry attempt: %w", err)
+			return retryResult{}, fmt.Errorf("insert retry attempt: %w", err)
 		}
 		updated, err := getTaskTx(ctx, tx, in.TaskID)
 		if err != nil {
-			return domain.Task{}, err
+			return retryResult{}, err
 		}
 		if err := appendEvent(ctx, tx, eventInput{
 			MissionID: &updated.MissionID, TaskID: &updated.ID, Actor: in.Actor,
 			Type: "attempt.fenced", CommandID: &commandID,
 			Payload: map[string]any{"attempt": current.CurrentAttempt, "reason": "retry"},
 		}); err != nil {
-			return domain.Task{}, err
+			return retryResult{}, err
 		}
 		if err := appendEvent(ctx, tx, eventInput{
 			MissionID: &updated.MissionID, TaskID: &updated.ID, Actor: in.Actor,
 			Type: "task.retry", CommandID: &commandID,
 			Payload: map[string]any{"from_attempt": current.CurrentAttempt, "attempt": nextAttempt, "state": updated.State, "version": updated.Version},
 		}); err != nil {
-			return domain.Task{}, err
+			return retryResult{}, err
 		}
-		return updated, nil
+		return retryResult{Task: updated}, nil
 	})
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if result.Exhausted {
+		return result.Task, ErrAttemptBudget
+	}
+	return result.Task, nil
 }
 
 // CancelTask records both required cancellation transitions atomically. Cleanup

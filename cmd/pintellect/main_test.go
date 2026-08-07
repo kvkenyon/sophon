@@ -117,6 +117,39 @@ func TestCLIStatusEmptyMission(t *testing.T) {
 	}
 }
 
+func TestCLIMissionDigestRegeneratesArtifact(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := db.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.CreateProject(context.Background(), "cmd_digest_project", db.CreateProjectInput{Name: "digest", Path: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mission, err := store.CreateMission(context.Background(), "cmd_digest_mission", db.CreateMissionInput{ProjectID: project, Title: "Digest", Objective: "Compact mission context."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	output := string(runCLI(t, "mission", "digest", string(mission.ID), "--db", dbPath))
+	if !strings.Contains(output, "## Objective") || !strings.Contains(output, "Compact mission context.") {
+		t.Fatalf("digest output=%s", output)
+	}
+	store, err = db.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	artifact, err := store.LatestMissionDigest(context.Background(), mission.ID)
+	if err != nil || artifact.Kind != "mission.digest" {
+		t.Fatalf("artifact=%+v err=%v", artifact, err)
+	}
+}
+
 func TestCLISignalListInspectAndResolveJSON(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "state.db")

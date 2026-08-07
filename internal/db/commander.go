@@ -10,6 +10,7 @@ import (
 	"time"
 
 	commanderpolicy "parallel-intellect/internal/commandersession"
+	"parallel-intellect/internal/digest"
 	"parallel-intellect/internal/domain"
 	"parallel-intellect/internal/id"
 	signalpolicy "parallel-intellect/internal/signals"
@@ -22,6 +23,7 @@ type CommanderLaunchContext struct {
 	Tasks       []domain.Task         `json:"tasks"`
 	Signals     []signalpolicy.Signal `json:"signals"`
 	Events      []domain.Event        `json:"recent_events"`
+	Digest      *digest.Artifact      `json:"mission_digest,omitempty"`
 }
 
 func (s *Store) CommanderLaunchContext(ctx context.Context, missionID domain.MissionID) (CommanderLaunchContext, error) {
@@ -47,6 +49,12 @@ func (s *Store) CommanderLaunchContext(ctx context.Context, missionID domain.Mis
 		return CommanderLaunchContext{}, err
 	}
 	result.Events = events
+	artifact, err := s.LatestMissionDigest(ctx, missionID)
+	if err == nil {
+		result.Digest = &artifact
+	} else if !errors.Is(err, ErrNotFound) {
+		return CommanderLaunchContext{}, err
+	}
 	return result, nil
 }
 
@@ -79,17 +87,21 @@ func (s *Store) RecordCommanderSession(ctx context.Context, commandID domain.Com
 		session := in.Session
 		session.MissionID, session.ProjectID = mission.ID, mission.ProjectID
 		session.State, session.Version = domain.CommanderSessionRunning, 1
+		session.Budget = normalizeCommanderBudget(session.Budget)
+		session.TurnCount = 1
 		session.LastEventSequence = sequence
 		session.CreatedAt, session.UpdatedAt = now, now
 		if _, err := tx.ExecContext(ctx, `INSERT INTO commander_sessions(
 			id, project_id, mission_id, runtime, state, version, herdr_session_name,
 			herdr_workspace_id, herdr_tab_id, herdr_pane_id, herdr_agent_name,
-			agent_session_id, model, pi_extension_path, last_event_sequence, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			agent_session_id, model, pi_extension_path, last_event_sequence, created_at, updated_at,
+			max_turns, max_duration_ns, turn_count
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			session.ID, session.ProjectID, session.MissionID, session.Runtime, session.State, session.Version,
 			session.HerdrSessionName, session.HerdrWorkspaceID, session.HerdrTabID, session.HerdrPaneID,
 			session.HerdrAgentName, session.AgentSessionID, nullableString(session.Model),
-			nullableString(session.PiExtensionPath), session.LastEventSequence, formatTime(now), formatTime(now)); err != nil {
+			nullableString(session.PiExtensionPath), session.LastEventSequence, formatTime(now), formatTime(now),
+			session.Budget.MaxTurns, int64(session.Budget.MaxDuration), session.TurnCount); err != nil {
 			return domain.CommanderSession{}, fmt.Errorf("insert commander session: %w", err)
 		}
 		result, err := tx.ExecContext(ctx, `UPDATE missions SET commander_session_id = ?, version = version + 1
@@ -140,15 +152,17 @@ func (s *Store) CommanderSessions(ctx context.Context) ([]domain.CommanderSessio
 const commanderSessionSelect = `SELECT id, project_id, mission_id, runtime, state, version,
 	herdr_session_name, herdr_workspace_id, herdr_tab_id, herdr_pane_id, herdr_agent_name,
 	agent_session_id, model, pi_extension_path, last_event_sequence, created_at, updated_at,
-	last_observed_at, stopped_at, failure_reason FROM commander_sessions`
+	last_observed_at, stopped_at, failure_reason, max_turns, max_duration_ns, turn_count FROM commander_sessions`
 
 func scanCommanderSession(row rowScanner) (domain.CommanderSession, error) {
 	var session domain.CommanderSession
 	var project, mission, herdrSession, workspace, tab, pane, agentName, agentSession sql.NullString
 	var model, extension, created, updated, observed, stopped, reason sql.NullString
+	var maxDuration int64
 	if err := row.Scan(&session.ID, &project, &mission, &session.Runtime, &session.State, &session.Version,
 		&herdrSession, &workspace, &tab, &pane, &agentName, &agentSession, &model, &extension,
-		&session.LastEventSequence, &created, &updated, &observed, &stopped, &reason); err != nil {
+		&session.LastEventSequence, &created, &updated, &observed, &stopped, &reason,
+		&session.Budget.MaxTurns, &maxDuration, &session.TurnCount); err != nil {
 		return domain.CommanderSession{}, err
 	}
 	session.ProjectID, session.MissionID = domain.ProjectID(project.String), domain.MissionID(mission.String)
@@ -156,6 +170,7 @@ func scanCommanderSession(row rowScanner) (domain.CommanderSession, error) {
 	session.HerdrTabID, session.HerdrPaneID = tab.String, pane.String
 	session.HerdrAgentName, session.AgentSessionID = agentName.String, agentSession.String
 	session.Model, session.PiExtensionPath, session.FailureReason = model.String, extension.String, reason.String
+	session.Budget.MaxDuration = time.Duration(maxDuration)
 	var err error
 	session.CreatedAt, err = parseTime(created.String)
 	if err == nil {
@@ -172,6 +187,16 @@ func scanCommanderSession(row rowScanner) (domain.CommanderSession, error) {
 		}
 	}
 	return session, err
+}
+
+func normalizeCommanderBudget(value domain.CommanderBudget) domain.CommanderBudget {
+	if value.MaxTurns == 0 {
+		value.MaxTurns = 30
+	}
+	if value.MaxDuration == 0 {
+		value.MaxDuration = 45 * time.Minute
+	}
+	return value
 }
 
 type CommanderSessionPlacement struct {

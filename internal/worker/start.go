@@ -22,6 +22,7 @@ type Starter struct {
 	Herdr      herdr.Adapter
 	Briefs     BriefGenerator
 	Validation []string
+	Budget     domain.WorkerBudget
 }
 
 type StartResult struct {
@@ -49,6 +50,9 @@ func (s *Starter) Start(ctx context.Context, taskID domain.TaskID) (StartResult,
 	current, err = s.transition(ctx, current, domain.TaskProvisioning)
 	if err != nil {
 		return StartResult{}, err
+	}
+	if current.State == domain.TaskNeedsAttention {
+		return StartResult{Task: current}, db.ErrBudgetExhausted
 	}
 	leaseCommand, err := newCommandID()
 	if err != nil {
@@ -102,7 +106,8 @@ func (s *Starter) Start(ctx context.Context, taskID domain.TaskID) (StartResult,
 		Session: domain.WorkerSession{ID: domain.SessionID(sessionID), Runtime: "codex",
 			HerdrSessionName: runtimeSession.SessionName, HerdrWorkspaceID: runtimeSession.WorkspaceID,
 			HerdrTabID: runtimeSession.TabID, HerdrPaneID: runtimeSession.PaneID,
-			HerdrAgentName: runtimeSession.AgentName, AgentSessionID: runtimeSession.AgentSessionID},
+			HerdrAgentName: runtimeSession.AgentName, AgentSessionID: runtimeSession.AgentSessionID,
+			Budget: s.Budget},
 	})
 	if err != nil {
 		return StartResult{}, fmt.Errorf("record worker session: %w", err)

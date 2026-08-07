@@ -160,6 +160,9 @@ func (s *Store) ResolveSignal(ctx context.Context, commandID domain.CommandID, i
 		}); err != nil {
 			return signalpolicy.Signal{}, err
 		}
+		if _, err := regenerateMissionDigestTx(ctx, tx, resolved.MissionID, "control-plane", "signal.resolved", &commandID); err != nil {
+			return signalpolicy.Signal{}, err
+		}
 		return resolved, nil
 	})
 }

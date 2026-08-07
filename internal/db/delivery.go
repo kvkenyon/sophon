@@ -209,6 +209,11 @@ func (s *Store) PrepareDelivery(ctx context.Context, commandID domain.CommandID,
 				"head_sha": strings.ToLower(in.HeadSHA), "state": state}}); err != nil {
 			return delivery.Result{}, err
 		}
+		if in.Mode == domain.DeliveryBranch {
+			if _, err := regenerateMissionDigestTx(ctx, tx, updated.MissionID, "control-plane", "task.delivered_branch", &commandID); err != nil {
+				return delivery.Result{}, err
+			}
+		}
 		return delivery.Result{Task: updated, Delivery: record}, nil
 	})
 }
@@ -354,6 +359,9 @@ func (s *Store) CompleteDelivery(ctx context.Context, commandID domain.CommandID
 			Actor: in.Actor, Type: "delivery.completed", CommandID: &commandID,
 			Payload: map[string]any{"attempt": in.Attempt, "mode": record.Mode, "branch": record.Branch,
 				"head_sha": record.HeadSHA, "pr_url": in.PRURL, "pr_number": in.PRNumber}}); err != nil {
+			return delivery.Result{}, err
+		}
+		if _, err := regenerateMissionDigestTx(ctx, tx, updated.MissionID, "control-plane", "task.delivered", &commandID); err != nil {
 			return delivery.Result{}, err
 		}
 		return delivery.Result{Task: updated, Delivery: record}, nil

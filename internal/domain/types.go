@@ -184,6 +184,15 @@ type WorkerSession struct {
 	RecoveryPromptAt *time.Time         `json:"recovery_prompt_at,omitempty"`
 	StoppedAt        *time.Time         `json:"stopped_at,omitempty"`
 	FailureReason    string             `json:"failure_reason,omitempty"`
+	Budget           WorkerBudget       `json:"budget"`
+	RestartCount     int                `json:"restart_count"`
+	FixRoundCount    int                `json:"fix_round_count"`
+}
+
+type WorkerBudget struct {
+	MaxRuntime   time.Duration `json:"max_runtime"`
+	MaxRestarts  int           `json:"max_restarts"`
+	MaxFixRounds int           `json:"max_fix_rounds"`
 }
 
 type CommanderSessionState string
@@ -222,6 +231,13 @@ type CommanderSession struct {
 	LastObservedAt    *time.Time            `json:"last_observed_at,omitempty"`
 	StoppedAt         *time.Time            `json:"stopped_at,omitempty"`
 	FailureReason     string                `json:"failure_reason,omitempty"`
+	Budget            CommanderBudget       `json:"budget"`
+	TurnCount         int                   `json:"turn_count"`
+}
+
+type CommanderBudget struct {
+	MaxTurns    int           `json:"max_turns"`
+	MaxDuration time.Duration `json:"max_duration"`
 }
 
 type VerificationResult struct {

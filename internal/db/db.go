@@ -123,6 +123,7 @@ var (
 	ErrNotFound         = errors.New("not found")
 	ErrCommandConflict  = errors.New("command id reused with different request")
 	ErrAttemptBudget    = errors.New("mission task-attempt budget exhausted")
+	ErrBudgetExhausted  = errors.New("execution budget exhausted")
 	ErrTaskNotRetryable = errors.New("task is not retryable")
 	ErrStaleAttempt     = errors.New("task attempt is not current")
 	ErrLeaseExists      = errors.New("task attempt already has a Treehouse lease")

@@ -89,14 +89,17 @@ func (s *Store) RecordWorkerSession(ctx context.Context, commandID domain.Comman
 		session.TaskID, session.Attempt = in.TaskID, in.Attempt
 		session.State = domain.WorkerSessionRunning
 		session.Version = 1
+		session.Budget = normalizeWorkerBudget(session.Budget)
 		session.CreatedAt, session.UpdatedAt = now, now
 		if _, err := tx.ExecContext(ctx, `INSERT INTO worker_sessions(
 			id, task_id, attempt, runtime, state, version, herdr_session_name, herdr_workspace_id,
-			herdr_tab_id, herdr_pane_id, herdr_agent_name, agent_session_id, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, session.ID, session.TaskID, session.Attempt,
+			herdr_tab_id, herdr_pane_id, herdr_agent_name, agent_session_id, created_at, updated_at,
+			max_runtime_ns, max_restarts, max_fix_rounds
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, session.ID, session.TaskID, session.Attempt,
 			session.Runtime, session.State, session.Version, session.HerdrSessionName, session.HerdrWorkspaceID,
 			session.HerdrTabID, session.HerdrPaneID, session.HerdrAgentName, session.AgentSessionID,
-			formatTime(now), formatTime(now)); err != nil {
+			formatTime(now), formatTime(now), int64(session.Budget.MaxRuntime), session.Budget.MaxRestarts,
+			session.Budget.MaxFixRounds); err != nil {
 			return domain.WorkerSession{}, fmt.Errorf("insert worker session: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE task_attempts SET worker_session_id = ?
@@ -148,7 +151,8 @@ const workerSessionSelect = `SELECT id, task_id, attempt, runtime, state, versio
 	herdr_session_name, herdr_workspace_id, herdr_tab_id, herdr_pane_id,
 	herdr_agent_name, agent_session_id,
 	created_at, updated_at, last_observed_at, idle_at, inactive_at,
-	recovery_prompt_at, stopped_at, failure_reason FROM worker_sessions`
+	recovery_prompt_at, stopped_at, failure_reason, max_runtime_ns, max_restarts,
+	max_fix_rounds, restart_count, fix_round_count FROM worker_sessions`
 
 type workerRowScanner interface {
 	Scan(...any) error
@@ -158,11 +162,13 @@ func scanWorkerSession(row workerRowScanner) (domain.WorkerSession, error) {
 	var session domain.WorkerSession
 	var created, updated string
 	var agentSession, observed, idle, inactive, recovery, stopped, reason sql.NullString
+	var maxRuntime int64
 	if err := row.Scan(&session.ID, &session.TaskID, &session.Attempt, &session.Runtime,
 		&session.State, &session.Version, &session.HerdrSessionName, &session.HerdrWorkspaceID,
 		&session.HerdrTabID, &session.HerdrPaneID, &session.HerdrAgentName, &agentSession,
 		&created, &updated, &observed, &idle,
-		&inactive, &recovery, &stopped, &reason); err != nil {
+		&inactive, &recovery, &stopped, &reason, &maxRuntime, &session.Budget.MaxRestarts,
+		&session.Budget.MaxFixRounds, &session.RestartCount, &session.FixRoundCount); err != nil {
 		return domain.WorkerSession{}, err
 	}
 	var err error
@@ -196,7 +202,21 @@ func scanWorkerSession(row workerRowScanner) (domain.WorkerSession, error) {
 	if agentSession.Valid {
 		session.AgentSessionID = agentSession.String
 	}
+	session.Budget.MaxRuntime = time.Duration(maxRuntime)
 	return session, nil
+}
+
+func normalizeWorkerBudget(value domain.WorkerBudget) domain.WorkerBudget {
+	if value.MaxRuntime == 0 {
+		value.MaxRuntime = 90 * time.Minute
+	}
+	if value.MaxRestarts == 0 {
+		value.MaxRestarts = 2
+	}
+	if value.MaxFixRounds == 0 {
+		value.MaxFixRounds = 5
+	}
+	return value
 }
 
 func getWorkerSessionTx(ctx context.Context, tx *sql.Tx, sessionID domain.SessionID) (domain.WorkerSession, error) {
@@ -239,6 +259,22 @@ func (s *Store) TransitionWorkerSession(ctx context.Context, commandID domain.Co
 	}
 	if in.Placement != nil && (in.Placement.HerdrWorkspaceID == "" || in.Placement.HerdrTabID == "" || in.Placement.HerdrPaneID == "") {
 		return domain.WorkerSession{}, errors.New("complete Herdr replacement placement is required")
+	}
+	if in.Placement != nil {
+		budgetTask, err := s.ReserveWorkerBudget(ctx, domain.CommandID(string(commandID)+":budget:restart"), ReserveWorkerBudgetInput{
+			TaskID: in.TaskID, Attempt: in.Attempt, SessionID: in.SessionID,
+			ExpectedVersion: in.ExpectedVersion, Dimension: "restart", Actor: in.Actor,
+		})
+		if err != nil {
+			return domain.WorkerSession{}, err
+		}
+		if budgetTask.State == domain.TaskNeedsAttention {
+			session, loadErr := s.WorkerSession(ctx, in.TaskID, in.Attempt)
+			if loadErr != nil {
+				return domain.WorkerSession{}, loadErr
+			}
+			return session, ErrBudgetExhausted
+		}
 	}
 	return runCommand(ctx, s, commandID, "worker.session.transition", in, func(tx *sql.Tx) (domain.WorkerSession, error) {
 		current, err := getWorkerSessionTx(ctx, tx, in.SessionID)
@@ -530,6 +566,9 @@ func (s *Store) CompleteWorkerTask(ctx context.Context, commandID domain.Command
 				"from": domain.TaskCollecting, "to": domain.TaskReady, "version": updated.Version,
 				"attempt": in.Attempt, "head_sha": in.HeadSHA, "result_sha256": in.ResultSHA256,
 			}}); err != nil {
+			return domain.Task{}, err
+		}
+		if _, err := regenerateMissionDigestTx(ctx, tx, updated.MissionID, "control-plane", "task.ready", &commandID); err != nil {
 			return domain.Task{}, err
 		}
 		return updated, nil

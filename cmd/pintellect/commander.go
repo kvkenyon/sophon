@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"strings"
+	"time"
 
 	commandercontrol "parallel-intellect/internal/commander"
 	"parallel-intellect/internal/db"
@@ -42,6 +43,8 @@ func commanderStart(ctx context.Context, args []string) error {
 	promptDir := flags.String("prompt-dir", "prompts/commander", "commander prompt directory")
 	model := flags.String("model", "", "runtime model (required for Pi)")
 	piExtension := flags.String("pi-extension", "", "absolute Pi lifecycle extension path")
+	maxTurns := flags.Int("max-turns", 30, "maximum commander turns")
+	maxDuration := flags.Duration("max-duration", 45*time.Minute, "maximum commander duration")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -67,7 +70,8 @@ func commanderStart(ctx context.Context, args []string) error {
 	starter := commandercontrol.Starter{Store: store, Runtime: commandercontrol.HerdrAdapter{Terminal: terminal},
 		Prompts: commandercontrol.PromptComposer{Dir: *promptDir}}
 	started, err := starter.Start(ctx, commandercontrol.StartRequest{MissionID: domain.MissionID(*mission), Runtime: runtime,
-		Model: *model, PiExtensionPath: *piExtension})
+		Model: *model, PiExtensionPath: *piExtension,
+		Budget: domain.CommanderBudget{MaxTurns: *maxTurns, MaxDuration: *maxDuration}})
 	if err != nil {
 		return err
 	}

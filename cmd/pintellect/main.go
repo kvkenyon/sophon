@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"parallel-intellect/internal/db"
 	"parallel-intellect/internal/delivery"
@@ -85,7 +86,42 @@ func mission(ctx context.Context, args []string) error {
 	if len(args) >= 2 && args[0] == "timeline" {
 		return timeline(ctx, "mission", args[1], args[2:])
 	}
-	return errors.New("expected: pintellect mission create|timeline")
+	if len(args) >= 2 && args[0] == "digest" {
+		return missionDigest(ctx, domain.MissionID(args[1]), args[2:])
+	}
+	return errors.New("expected: pintellect mission create|timeline|digest")
+}
+
+func missionDigest(ctx context.Context, missionID domain.MissionID, args []string) error {
+	flags := flag.NewFlagSet("mission digest", flag.ContinueOnError)
+	dbPath := flags.String("db", "", "SQLite database path")
+	jsonOutput := flags.Bool("json", false, "emit artifact metadata and content as JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("mission digest does not accept positional arguments")
+	}
+	store, err := openStore(ctx, *dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	command, err := commandID()
+	if err != nil {
+		return err
+	}
+	artifact, err := store.RegenerateMissionDigest(ctx, command, db.RegenerateMissionDigestInput{
+		MissionID: missionID, Actor: "operator", Reason: "explicit command",
+	})
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return encode(artifact)
+	}
+	_, err = os.Stdout.Write([]byte(artifact.Content))
+	return err
 }
 
 func statusCommand(ctx context.Context, args []string) error {
@@ -164,6 +200,9 @@ func missionCreate(ctx context.Context, args []string) error {
 	title := flags.String("title", "", "mission title")
 	objective := flags.String("objective", "", "mission objective")
 	maxAttempts := flags.Int("max-task-attempts", 3, "maximum attempts per task")
+	maxDuration := flags.Duration("max-duration", 4*time.Hour, "maximum mission wall-clock duration")
+	maxConcurrent := flags.Int("max-concurrent-tasks", 8, "maximum concurrently active tasks")
+	maxValidation := flags.Int("max-validation-rounds", 5, "maximum validation rounds per task")
 	var criteria stringList
 	flags.Var(&criteria, "acceptance", "acceptance criterion (repeatable)")
 	if err := flags.Parse(args); err != nil {
@@ -202,7 +241,8 @@ func missionCreate(ctx context.Context, args []string) error {
 	}
 	created, err := store.CreateMission(ctx, missionCommand, db.CreateMissionInput{
 		ProjectID: projectID, Title: *title, Objective: *objective, AcceptanceCriteria: criteriaValues(criteria),
-		Budget: domain.MissionBudget{MaxTaskAttempts: *maxAttempts},
+		Budget: domain.MissionBudget{MaxWallClock: *maxDuration, MaxConcurrentTasks: *maxConcurrent,
+			MaxTaskAttempts: *maxAttempts, MaxValidationRuns: *maxValidation},
 	})
 	if err != nil {
 		return err
@@ -408,6 +448,9 @@ func taskStart(ctx context.Context, taskID domain.TaskID, args []string) error {
 	herdrSession := flags.String("herdr-session", "default", "explicit Herdr session name")
 	herdrWorkspace := flags.String("herdr-workspace-label", "Parallel Intellect", "Herdr workspace presentation label")
 	taskFiles := flags.String("task-files", "", "task artifact base directory")
+	maxWorkerRuntime := flags.Duration("max-worker-runtime", 90*time.Minute, "maximum worker runtime")
+	maxWorkerRestarts := flags.Int("max-worker-restarts", 2, "maximum worker restarts")
+	maxFixRounds := flags.Int("max-fix-rounds", 5, "maximum worker fix rounds")
 	var validation stringList
 	flags.Var(&validation, "validate", "required validation command or instruction (repeatable)")
 	if err := flags.Parse(args); err != nil {
@@ -426,6 +469,8 @@ func taskStart(ctx context.Context, taskID domain.TaskID, args []string) error {
 		Store: store, Treehouse: treehouseService,
 		Herdr:  herdr.NewCommandAdapter(*herdrBinary, *herdrSession, *herdrWorkspace),
 		Briefs: worker.BriefGenerator{BaseDir: *taskFiles}, Validation: validation,
+		Budget: domain.WorkerBudget{MaxRuntime: *maxWorkerRuntime, MaxRestarts: *maxWorkerRestarts,
+			MaxFixRounds: *maxFixRounds},
 	}
 	started, err := starter.Start(ctx, taskID)
 	if err != nil {

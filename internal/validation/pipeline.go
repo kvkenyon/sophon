@@ -86,6 +86,9 @@ func (p *Pipeline) ValidateTask(ctx context.Context, request Request) (Report, e
 	if err != nil {
 		return Report{}, err
 	}
+	if validating.State == domain.TaskNeedsAttention {
+		return Report{Task: validating}, errors.New("validation round budget exhausted")
+	}
 	report := Report{Passed: true, Runs: make([]Run, 0, len(request.Validators))}
 	runIDs := make([]string, 0, len(request.Validators))
 	runIDSet := make(map[string]struct{}, len(request.Validators))

@@ -11,6 +11,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Task recovery is implemented by `internal/db` and `internal/worker/cancel.go`: retry fences the old attempt before creating the next queued attempt; cancellation is terminal before best-effort conditional lease return and worker-tab cleanup.
 - Delivery policy and external boundaries live in `internal/delivery`; every attempt is pinned to its recorded branch/head SHA, PR recovery matches repository + branch + SHA, and branch-only delivery retains its lease until the explicit M2 release path runs.
 - Commander runtime policy lives in `internal/commander`; sessions reuse the M5 Herdr profiles, persist mission and native resume identity, and advance their durable event-wake cursor only after Herdr accepts the structured mission message.
+- Mission intelligence is rooted in `internal/db/digest.go`, `internal/knowledge`, and `internal/db/budget.go`; digests remain regenerable artifacts, critical-policy writes are mechanically fenced, and every autonomous budget reservation must commit its `needs_attention` projection with a `budget.exhausted` event.
 - Add schema changes as numbered, forward-only files in `migrations/`; run `go test ./...` and `go build ./...` before delivery.
 
 ## Maintaining this file

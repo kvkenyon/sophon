@@ -23,6 +23,7 @@ type StartRequest struct {
 	Runtime         herdr.Runtime
 	Model           string
 	PiExtensionPath string
+	Budget          domain.CommanderBudget
 }
 
 type StartResult struct {
@@ -66,6 +67,7 @@ func (s *Starter) Start(ctx context.Context, in StartRequest) (StartResult, erro
 			HerdrWorkspaceID: runtimeSession.Herdr.WorkspaceID, HerdrTabID: runtimeSession.Herdr.TabID,
 			HerdrPaneID: runtimeSession.Herdr.PaneID, HerdrAgentName: runtimeSession.Herdr.AgentName,
 			AgentSessionID: runtimeSession.Herdr.AgentSessionID, Model: in.Model, PiExtensionPath: in.PiExtensionPath,
+			Budget: in.Budget,
 		},
 	})
 	if err != nil {
@@ -97,6 +99,19 @@ func (c *Controller) Send(ctx context.Context, missionID domain.MissionID, kind 
 	}
 	if persisted.State == domain.CommanderSessionStopped || persisted.State == domain.CommanderSessionFailed {
 		return domain.CommanderSession{}, fmt.Errorf("commander session is %s", persisted.State)
+	}
+	budgetCommand, err := newCommandID()
+	if err != nil {
+		return domain.CommanderSession{}, err
+	}
+	persisted, err = c.Store.ReserveCommanderTurn(ctx, budgetCommand, db.ReserveCommanderTurnInput{
+		MissionID: missionID, SessionID: persisted.ID, ExpectedVersion: persisted.Version, Actor: "operator",
+	})
+	if err != nil {
+		return domain.CommanderSession{}, err
+	}
+	if persisted.State == domain.CommanderSessionNeedsAttention {
+		return persisted, db.ErrBudgetExhausted
 	}
 	snapshot, err := c.Store.CommanderLaunchContext(ctx, missionID)
 	if err != nil {

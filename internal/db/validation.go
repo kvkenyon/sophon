@@ -43,6 +43,15 @@ func (s *Store) BeginValidation(ctx context.Context, commandID domain.CommandID,
 		if current.CurrentAttempt != in.Attempt {
 			return domain.Task{}, ErrStaleAttempt
 		}
+		var maximum, used int
+		if err := tx.QueryRowContext(ctx, `SELECT m.max_validation_runs,
+			(SELECT COUNT(*) FROM events e WHERE e.task_id = t.id AND e.type = 'validation.started')
+			FROM tasks t JOIN missions m ON m.id = t.mission_id WHERE t.id = ?`, current.ID).Scan(&maximum, &used); err != nil {
+			return domain.Task{}, fmt.Errorf("load validation round budget: %w", err)
+		}
+		if maximum > 0 && used >= maximum {
+			return expireTaskBudgetTx(ctx, tx, current, "mission.validation_rounds", in.Actor, &commandID)
+		}
 		from := current.State
 		switch from {
 		case domain.TaskReady, domain.TaskDeliveryBlocked:

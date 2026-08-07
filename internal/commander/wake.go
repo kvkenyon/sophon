@@ -55,6 +55,19 @@ func (w *EventWaker) Wake(ctx context.Context, missionID domain.MissionID) (doma
 		return persisted, nil
 	}
 	if len(relevant) > 0 {
+		budgetCommand, err := newCommandID()
+		if err != nil {
+			return domain.CommanderSession{}, err
+		}
+		persisted, err = w.Store.ReserveCommanderTurn(ctx, budgetCommand, db.ReserveCommanderTurnInput{
+			MissionID: missionID, SessionID: persisted.ID, ExpectedVersion: persisted.Version, Actor: "event-router",
+		})
+		if err != nil {
+			return domain.CommanderSession{}, err
+		}
+		if persisted.State == domain.CommanderSessionNeedsAttention {
+			return persisted, db.ErrBudgetExhausted
+		}
 		body, err := json.Marshal(WakeEnvelope{Kind: "mission_events", MissionID: missionID, Events: relevant})
 		if err != nil {
 			return domain.CommanderSession{}, err

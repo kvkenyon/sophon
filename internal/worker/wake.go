@@ -45,6 +45,20 @@ func (w *Waker) Wake(ctx context.Context, in WakeRequest) (domain.WorkerSession,
 	if session.State != domain.WorkerSessionIdle && session.State != domain.WorkerSessionInactive {
 		return domain.WorkerSession{}, fmt.Errorf("%w: session is %s", ErrWorkerUnavailable, session.State)
 	}
+	budgetTask, err := w.Store.ReserveWorkerBudget(ctx, domain.CommandID(string(in.CommandID)+":budget:fix"), db.ReserveWorkerBudgetInput{
+		TaskID: task.ID, Attempt: task.CurrentAttempt, SessionID: session.ID,
+		ExpectedVersion: session.Version, Dimension: "fix_round", Actor: "commander",
+	})
+	if err != nil {
+		return domain.WorkerSession{}, err
+	}
+	if budgetTask.State == domain.TaskNeedsAttention {
+		return domain.WorkerSession{}, db.ErrBudgetExhausted
+	}
+	session, err = w.Store.WorkerSession(ctx, task.ID, task.CurrentAttempt)
+	if err != nil {
+		return domain.WorkerSession{}, err
+	}
 	lease, err := w.Store.TreehouseLease(ctx, task.ID, task.CurrentAttempt)
 	if err != nil {
 		return domain.WorkerSession{}, err
