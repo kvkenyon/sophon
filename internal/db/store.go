@@ -73,7 +73,7 @@ func (s *Store) CreateMission(ctx context.Context, commandID domain.CommandID, i
 		commanderSessionID := in.CommanderSessionID
 		if commanderSessionID == "" {
 			err := tx.QueryRowContext(ctx, `SELECT id FROM commander_sessions
-				WHERE project_id = ? AND mission_id IS NULL ORDER BY created_at LIMIT 1`, in.ProjectID).
+				WHERE project_id = ? AND mission_id IS NULL AND state NOT IN ('stopped', 'failed') ORDER BY created_at LIMIT 1`, in.ProjectID).
 				Scan(&commanderSessionID)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return domain.Mission{}, fmt.Errorf("load project intake commander: %w", err)
@@ -81,7 +81,7 @@ func (s *Store) CreateMission(ctx context.Context, commandID domain.CommandID, i
 		} else {
 			var projectID domain.ProjectID
 			var missionID sql.NullString
-			if err := tx.QueryRowContext(ctx, "SELECT project_id, mission_id FROM commander_sessions WHERE id = ?", commanderSessionID).
+			if err := tx.QueryRowContext(ctx, "SELECT project_id, mission_id FROM commander_sessions WHERE id = ? AND state NOT IN ('stopped', 'failed')", commanderSessionID).
 				Scan(&projectID, &missionID); err != nil {
 				return domain.Mission{}, mapNotFound("load mission commander", err)
 			}

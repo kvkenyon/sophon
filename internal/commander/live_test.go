@@ -122,7 +122,32 @@ func TestRealHerdrCodexCommanderSmoke(t *testing.T) {
 	}
 	waitCommanderState(t, runtime, runtimeSession(persisted, projectPath), StateIdle, 4*time.Minute)
 	waitCommanderPaneText(t, runner, sessionName, persisted.HerdrPaneID, "COMMANDER_M7_STEER_OK", time.Minute)
-	t.Logf("live Codex commander received mission context and responded to a subsequent steer in %s", sessionName)
+
+	if _, stderr, err := runner.Run(context.Background(), "tab", "close", persisted.HerdrTabID, "--session", sessionName); err != nil {
+		t.Fatalf("kill commander pane tab: %v: %s", err, stderr)
+	}
+	missing, err := (&Reconciler{Store: store, Runtime: runtime}).Reconcile(context.Background(), mission.ID)
+	if err != nil || missing.State != domain.CommanderSessionNeedsAttention {
+		t.Fatalf("reconcile killed commander pane: session=%+v err=%v", missing, err)
+	}
+	recovered, err := (&Recovery{Store: store, Runtime: runtime, Prompts: PromptComposer{Dir: promptDir}}).RecoverProject(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("recover killed commander pane: %v", err)
+	}
+	if recovered.ID == persisted.ID || recovered.HerdrPaneID == persisted.HerdrPaneID {
+		t.Fatalf("recovery reused dead durable placement: old=%+v new=%+v", persisted, recovered)
+	}
+	if _, err := (&Controller{Store: store, Runtime: runtime}).Send(context.Background(), mission.ID, MessageSteer,
+		"Recovery proof: reply exactly COMMANDER_M7_RECOVERY_OK and then wait."); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.CommanderSession(context.Background(), mission.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCommanderState(t, runtime, runtimeSession(current, projectPath), StateIdle, 4*time.Minute)
+	waitCommanderPaneText(t, runner, sessionName, current.HerdrPaneID, "COMMANDER_M7_RECOVERY_OK", time.Minute)
+	t.Logf("live Codex commander recovered from a killed pane into replacement %s in %s", current.HerdrPaneID, sessionName)
 }
 
 func waitCommanderState(t *testing.T, runtime Adapter, session Session, want State, timeout time.Duration) {

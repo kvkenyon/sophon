@@ -98,7 +98,7 @@ func (s *Store) RecordCommanderSession(ctx context.Context, commandID domain.Com
 			}
 		}
 		var existing int
-		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM commander_sessions WHERE project_id = ?", projectID).Scan(&existing); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM commander_sessions WHERE project_id = ? AND state NOT IN ('stopped', 'failed')", projectID).Scan(&existing); err != nil {
 			return domain.CommanderSession{}, fmt.Errorf("inspect project commander: %w", err)
 		}
 		if existing != 0 {
@@ -161,13 +161,13 @@ func (s *Store) RecordCommanderSession(ctx context.Context, commandID domain.Com
 // a project, whether it is in conversational intake or bound to a mission.
 func (s *Store) ProjectCommanderSession(ctx context.Context, projectID domain.ProjectID) (domain.CommanderSession, error) {
 	var count int
-	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM commander_sessions WHERE project_id = ?", projectID).Scan(&count); err != nil {
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM commander_sessions WHERE project_id = ? AND state NOT IN ('stopped', 'failed')", projectID).Scan(&count); err != nil {
 		return domain.CommanderSession{}, fmt.Errorf("count project commanders: %w", err)
 	}
 	if count > 1 {
 		return domain.CommanderSession{}, errors.New("project has multiple commander sessions")
 	}
-	session, err := scanCommanderSession(s.db.QueryRowContext(ctx, commanderSessionSelect+" WHERE project_id = ?", projectID))
+	session, err := scanCommanderSession(s.db.QueryRowContext(ctx, commanderSessionSelect+" WHERE project_id = ? AND state NOT IN ('stopped', 'failed')", projectID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.CommanderSession{}, ErrNotFound
 	}
@@ -175,7 +175,7 @@ func (s *Store) ProjectCommanderSession(ctx context.Context, projectID domain.Pr
 }
 
 func (s *Store) CommanderSession(ctx context.Context, missionID domain.MissionID) (domain.CommanderSession, error) {
-	session, err := scanCommanderSession(s.db.QueryRowContext(ctx, commanderSessionSelect+" WHERE mission_id = ?", missionID))
+	session, err := scanCommanderSession(s.db.QueryRowContext(ctx, commanderSessionSelect+" WHERE mission_id = ? AND state NOT IN ('stopped', 'failed')", missionID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.CommanderSession{}, ErrNotFound
 	}
@@ -183,7 +183,7 @@ func (s *Store) CommanderSession(ctx context.Context, missionID domain.MissionID
 }
 
 func (s *Store) CommanderSessions(ctx context.Context) ([]domain.CommanderSession, error) {
-	rows, err := s.db.QueryContext(ctx, commanderSessionSelect+" WHERE mission_id IS NOT NULL ORDER BY created_at, id")
+	rows, err := s.db.QueryContext(ctx, commanderSessionSelect+" WHERE mission_id IS NOT NULL AND state NOT IN ('stopped', 'failed') ORDER BY created_at, id")
 	if err != nil {
 		return nil, err
 	}
@@ -324,6 +324,69 @@ func (s *Store) ObserveCommanderSession(ctx context.Context, commandID domain.Co
 					"to": in.ObservedState, "herdr_pane_id": updated.HerdrPaneID, "reason": in.FailureReason}}); err != nil {
 				return domain.CommanderSession{}, err
 			}
+		}
+		return updated, nil
+	})
+}
+
+// RetireCommanderSession terminally preserves a dead placement and releases
+// its project/mission slot for a replacement commander. It is deliberately a
+// distinct command from observation: a replacement must never make the dead
+// record appear live again.
+func (s *Store) RetireCommanderSession(ctx context.Context, commandID domain.CommandID, sessionID domain.SessionID, expectedState domain.CommanderSessionState, expectedVersion int64, actor, reason string) (domain.CommanderSession, error) {
+	if sessionID == "" || expectedVersion < 1 || strings.TrimSpace(actor) == "" || strings.TrimSpace(reason) == "" {
+		return domain.CommanderSession{}, errors.New("session, version, actor, and retirement reason are required")
+	}
+	if err := commanderpolicy.ValidateTransition(expectedState, domain.CommanderSessionStopped); err != nil {
+		return domain.CommanderSession{}, err
+	}
+	in := struct {
+		SessionID       domain.SessionID             `json:"session_id"`
+		ExpectedState   domain.CommanderSessionState `json:"expected_state"`
+		ExpectedVersion int64                        `json:"expected_version"`
+		Actor           string                       `json:"actor"`
+		Reason          string                       `json:"reason"`
+	}{sessionID, expectedState, expectedVersion, actor, reason}
+	return runCommand(ctx, s, commandID, "commander.session.retire", in, func(tx *sql.Tx) (domain.CommanderSession, error) {
+		current, err := getCommanderSessionTx(ctx, tx, sessionID)
+		if err != nil {
+			return domain.CommanderSession{}, err
+		}
+		if current.State != expectedState || current.Version != expectedVersion {
+			return domain.CommanderSession{}, errors.New("stale commander-session retirement")
+		}
+		now := time.Now().UTC()
+		result, err := tx.ExecContext(ctx, `UPDATE commander_sessions SET state = 'stopped', version = version + 1,
+			updated_at = ?, last_observed_at = ?, stopped_at = ?, failure_reason = ?
+			WHERE id = ? AND state = ? AND version = ?`, formatTime(now), formatTime(now), formatTime(now),
+			reason, sessionID, expectedState, expectedVersion)
+		if err != nil {
+			return domain.CommanderSession{}, err
+		}
+		if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+			return domain.CommanderSession{}, errors.New("stale commander-session retirement")
+		}
+		if current.MissionID != "" {
+			result, err = tx.ExecContext(ctx, `UPDATE missions SET commander_session_id = NULL, version = version + 1
+				WHERE id = ? AND commander_session_id = ?`, current.MissionID, current.ID)
+			if err != nil {
+				return domain.CommanderSession{}, fmt.Errorf("release retired commander mission binding: %w", err)
+			}
+			if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+				return domain.CommanderSession{}, errors.New("stale retired commander mission binding")
+			}
+		}
+		updated, err := getCommanderSessionTx(ctx, tx, sessionID)
+		if err != nil {
+			return domain.CommanderSession{}, err
+		}
+		var missionID *domain.MissionID
+		if current.MissionID != "" {
+			missionID = &current.MissionID
+		}
+		if err := appendEvent(ctx, tx, eventInput{MissionID: missionID, Actor: actor, Type: "commander.session.retired", CommandID: &commandID,
+			Payload: map[string]any{"commander_session_id": current.ID, "from": current.State, "to": domain.CommanderSessionStopped, "reason": reason}}); err != nil {
+			return domain.CommanderSession{}, err
 		}
 		return updated, nil
 	})

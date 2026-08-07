@@ -3,6 +3,7 @@ package commander
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,17 +24,29 @@ type fakeCommanderRuntime struct {
 	followUps   []string
 	aborts      int
 	replacement *Session
+	resumeErr   error
 }
 
 func (f *fakeCommanderRuntime) Start(_ context.Context, config StartConfig) (Session, error) {
 	f.starts++
 	f.startConfig = config
+	tab, pane := "w1:t1", "w1:p1"
+	if f.starts > 1 {
+		tab, pane = "w1:t3", "w1:p3"
+	}
 	return Session{ID: config.SessionID, MissionID: config.MissionID, Runtime: config.Runtime, Herdr: herdr.Session{
 		Runtime: config.Runtime, AgentName: "pi-commander-" + string(config.MissionID),
 		AgentSessionID: "agent-session-1", SessionName: "fm-lab-commanders", WorkspaceID: "w1",
-		TabID: "w1:t1", PaneID: "w1:p1", WorktreePath: config.WorkingDir,
+		TabID: tab, PaneID: pane, WorktreePath: config.WorkingDir,
 		Model: config.Model, PiExtensionPath: config.PiExtensionPath,
 	}}, nil
+}
+func (f *fakeCommanderRuntime) Resume(_ context.Context, session Session, message string) (Session, error) {
+	f.followUps = append(f.followUps, message)
+	if f.resumeErr != nil {
+		return Session{}, f.resumeErr
+	}
+	return f.delivered(session), nil
 }
 
 func (f *fakeCommanderRuntime) Prompt(_ context.Context, session Session, message string) (Session, error) {
@@ -209,6 +222,59 @@ func TestControllerPreservesPromptSteerAndFollowUpOperations(t *testing.T) {
 	}
 	if stopped.State != domain.CommanderSessionStopped || runtime.aborts != 1 || stopped.StoppedAt == nil {
 		t.Fatalf("abort = %+v runtime aborts=%d", stopped, runtime.aborts)
+	}
+}
+
+func TestRecoveryReplacesMissingCommanderOrStartsFresh(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		resumeErr  error
+		wantStarts int
+	}{
+		{name: "resume", wantStarts: 1},
+		{name: "fresh fallback", resumeErr: errors.New("native session unavailable"), wantStarts: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, missionID, promptDir := commanderTestStore(t)
+			runtime := &fakeCommanderRuntime{state: StateMissing, resumeErr: test.resumeErr}
+			started, err := (&Starter{Store: store, Runtime: runtime, Prompts: PromptComposer{Dir: promptDir}}).Start(context.Background(),
+				StartRequest{MissionID: missionID, Runtime: herdr.RuntimeCodex})
+			if err != nil {
+				t.Fatal(err)
+			}
+			replacement := runtimeSession(started.Session, t.TempDir())
+			replacement.Herdr.TabID, replacement.Herdr.PaneID = "w1:t2", "w1:p2"
+			runtime.replacement = &replacement
+			missing, err := (&Reconciler{Store: store, Runtime: runtime}).Reconcile(context.Background(), missionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recovered, err := (&Recovery{Store: store, Runtime: runtime, Prompts: PromptComposer{Dir: promptDir}}).RecoverProject(context.Background(), started.Session.ProjectID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recovered.ID == missing.ID || recovered.State != domain.CommanderSessionRunning || runtime.starts != test.wantStarts {
+				t.Fatalf("recovered=%+v missing=%+v starts=%d", recovered, missing, runtime.starts)
+			}
+			if test.resumeErr == nil && recovered.HerdrPaneID != "w1:p2" {
+				t.Fatalf("resume placement = %+v", recovered)
+			}
+			if _, err := (&Recovery{Store: store, Runtime: runtime, Prompts: PromptComposer{Dir: promptDir}}).RecoverProject(context.Background(), started.Session.ProjectID); err != nil {
+				t.Fatalf("idempotent second recovery: %v", err)
+			}
+			events, err := store.MissionEvents(context.Background(), missionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			retired, replacementRecorded := false, false
+			for _, event := range events {
+				retired = retired || event.Type == "commander.session.retired"
+				replacementRecorded = replacementRecorded || event.Type == "commander.started"
+			}
+			if !retired || !replacementRecorded {
+				t.Fatalf("recovery events = %+v", events)
+			}
+		})
 	}
 }
 

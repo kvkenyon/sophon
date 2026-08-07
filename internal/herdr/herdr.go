@@ -177,6 +177,58 @@ func (a *CommandAdapter) Submit(ctx context.Context, session Session, message st
 	return session, nil
 }
 
+// Resume creates a replacement tab for a structurally missing pane. Unlike a
+// husk, there is no old tab to label or close; the caller owns retirement of
+// the dead durable placement after this replacement has been verified.
+func (a *CommandAdapter) Resume(ctx context.Context, missing Session, message string) (Session, error) {
+	if a == nil || a.runner == nil || strings.TrimSpace(a.SessionName) == "" ||
+		missing.WorkspaceID == "" || strings.TrimSpace(missing.WorktreePath) == "" ||
+		strings.TrimSpace(missing.AgentName) == "" || !validAgentSessionID(sessionRuntime(missing), missing.AgentSessionID) {
+		return Session{}, ErrSessionHusk
+	}
+	if missing.SessionName != "" && missing.SessionName != a.SessionName {
+		return Session{}, errors.New("Herdr resume session identity mismatch")
+	}
+	if strings.TrimSpace(message) == "" {
+		return Session{}, errors.New("Herdr resume message is required")
+	}
+	stdout, stderr, err := a.run(ctx, "tab", "create", "--workspace", missing.WorkspaceID,
+		"--cwd", missing.WorktreePath, "--label", missing.AgentName, "--no-focus")
+	if err != nil {
+		return Session{}, commandError("create missing commander replacement tab", err, stderr)
+	}
+	var created struct {
+		Result struct {
+			Tab struct {
+				ID string `json:"tab_id"`
+			} `json:"tab"`
+			RootPane struct {
+				ID string `json:"pane_id"`
+			} `json:"root_pane"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(stdout, &created); err != nil {
+		return Session{}, fmt.Errorf("decode Herdr missing commander replacement response: %w", err)
+	}
+	replacement := missing
+	replacement.TabID, replacement.PaneID = created.Result.Tab.ID, created.Result.RootPane.ID
+	if replacement.TabID == "" || replacement.PaneID == "" || replacement.PaneID == missing.PaneID {
+		return Session{}, errors.New("Herdr replacement response omitted distinct tab/pane identity")
+	}
+	command, err := resumeCommand(replacement)
+	if err != nil {
+		return Session{}, err
+	}
+	if err := a.launchRuntimeInPane(ctx, replacement, command, false); err != nil {
+		return Session{}, fmt.Errorf("resume %s in replacement pane: %w", sessionRuntime(missing), err)
+	}
+	if _, stderr, err := a.run(ctx, "agent", "prompt", replacement.PaneID, message,
+		"--wait", "--until", "working", "--timeout", "30000"); err != nil {
+		return Session{}, commandError("verify resumed "+string(sessionRuntime(missing)), err, stderr)
+	}
+	return replacement, nil
+}
+
 func (a *CommandAdapter) replaceHusk(ctx context.Context, husk Session, message string) (Session, error) {
 	if husk.WorkspaceID == "" || husk.TabID == "" || strings.TrimSpace(husk.WorktreePath) == "" {
 		return Session{}, errors.New("Herdr husk replacement requires workspace, tab, and worktree identity")

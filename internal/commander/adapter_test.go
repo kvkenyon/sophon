@@ -21,6 +21,11 @@ func (f *fakeTerminal) Start(_ context.Context, request herdr.StartRequest) (her
 		SessionName: "fm-lab", WorkspaceID: "w1", TabID: "t1", PaneID: "p1",
 		WorktreePath: request.WorktreePath, Model: request.Model, PiExtensionPath: request.PiExtensionPath}, nil
 }
+func (f *fakeTerminal) Resume(_ context.Context, session herdr.Session, message string) (herdr.Session, error) {
+	f.submissions = append(f.submissions, message)
+	session.TabID, session.PaneID = "t2", "p2"
+	return session, nil
+}
 func (f *fakeTerminal) Observe(context.Context, herdr.Session) (herdr.State, error) {
 	return f.state, nil
 }

@@ -27,7 +27,7 @@ var transitions = map[domain.CommanderSessionState]map[domain.CommanderSessionSt
 	},
 	domain.CommanderSessionNeedsAttention: {
 		domain.CommanderSessionRunning: {}, domain.CommanderSessionIdle: {},
-		domain.CommanderSessionFailed: {}, domain.CommanderSessionStopping: {},
+		domain.CommanderSessionFailed: {}, domain.CommanderSessionStopping: {}, domain.CommanderSessionStopped: {},
 	},
 	domain.CommanderSessionStopping: {
 		domain.CommanderSessionStopped: {}, domain.CommanderSessionNeedsAttention: {},

@@ -76,8 +76,19 @@ func homeCommand(ctx context.Context, args []string) error {
 		if err != nil {
 			return fmt.Errorf("resume project commander: %w", err)
 		}
-		if session.State == domain.CommanderSessionStopped || session.State == domain.CommanderSessionFailed ||
-			session.State == domain.CommanderSessionNeedsAttention {
+		if session.State == domain.CommanderSessionNeedsAttention {
+			installDir, installErr := binaryInstallDir()
+			if installErr != nil {
+				return installErr
+			}
+			session, err = (&commandercontrol.Recovery{Store: store, Runtime: commandercontrol.HerdrAdapter{Terminal: terminal},
+				Prompts: commandercontrol.PromptComposer{Dir: *promptDir, InstallDir: installDir}, DatabasePath: *dbPath}).RecoverProject(ctx, project.ID)
+			if err != nil {
+				return fmt.Errorf("recover project commander: %w", err)
+			}
+			fmt.Printf("Commander recovered for %s.\n", project.Name)
+		}
+		if session.State == domain.CommanderSessionStopped || session.State == domain.CommanderSessionFailed {
 			return fmt.Errorf("project commander %s requires attention (%s): %s", session.ID, session.State, session.FailureReason)
 		}
 		if session.HerdrSessionName != operatorSession {

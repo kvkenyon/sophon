@@ -90,6 +90,7 @@ func TestCLIHomeFromRepositoryStartsIntakeAndReattachesIdempotently(t *testing.T
 	dbPath := filepath.Join(root, "pintellect.db")
 
 	callLog := filepath.Join(root, "herdr.calls")
+	deadPane := filepath.Join(root, "commander-pane-dead")
 	herdrBinary := filepath.Join(root, "fake-herdr-home")
 	herdrScript := fmt.Sprintf(`#!/bin/sh
 set -eu
@@ -97,16 +98,17 @@ printf '%%s\n' "$*" >> %q
 case "$1 $2" in
 	"session list") printf '{"sessions":[{"name":"fm-lab-home","running":true,"socket_path":"/tmp/lab.sock"}]}\n' ;;
   "workspace create") printf '{"result":{"workspace":{"workspace_id":"hw1"},"tab":{"tab_id":"hw1:t1"},"root_pane":{"pane_id":"hw1:p1"}}}\n' ;;
+	"tab create") printf '{"result":{"tab":{"tab_id":"hw1:t2"},"root_pane":{"pane_id":"hw1:p2"}}}\n' ;;
   "pane run"|"tab rename"|"agent rename") printf '{"result":{"ok":true}}\n' ;;
   "pane read") printf 'OpenAI Codex\n' ;;
-  "pane get") printf '{"result":{"pane":{"pane_id":"hw1:p1"}}}\n' ;;
-  "agent get") printf '{"result":{"agent":{"agent":"codex","pane_id":"hw1:p1","agent_status":"idle","state_change_seq":1,"agent_session":{"value":"home-codex-session"}}}}\n' ;;
-  "agent prompt") printf '{"result":{"agent":{"agent":"codex","pane_id":"hw1:p1","agent_session":{"value":"home-codex-session"}},"ok":true}}\n' ;;
+	"pane get") if [ -f %q ] && [ "$3" = "hw1:p1" ]; then printf '{"error":{"code":"pane_not_found"}}\n'; else printf '{"result":{"pane":{"pane_id":"%%s"}}}\n' "$3"; fi ;;
+  "agent get") printf '{"result":{"agent":{"agent":"codex","pane_id":"%%s","agent_status":"idle","state_change_seq":1,"agent_session":{"value":"home-codex-session"}}}}\n' "$3" ;;
+  "agent prompt") printf '{"result":{"agent":{"agent":"codex","pane_id":"%%s","agent_session":{"value":"home-codex-session"}},"ok":true}}\n' "$3" ;;
 	"agent focus") printf '{"result":{"ok":true}}\n' ;;
   "agent attach") printf 'attached home commander\n' ;;
   *) exit 2 ;;
 esac
-`, callLog)
+`, callLog, deadPane)
 	writeCLIFile(t, herdrBinary, herdrScript, 0o700)
 
 	originalWorkingDir, err := os.Getwd()
@@ -151,8 +153,30 @@ esac
 	if err != nil || session.MissionID != "" || session.HerdrSessionName != "fm-lab-home" {
 		t.Fatalf("intake commander=%+v err=%v", session, err)
 	}
+	if err := os.WriteFile(deadPane, []byte("dead"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
+	}
+	output = string(runCLI(t, "home", "--db", dbPath, "--herdr", herdrBinary))
+	if !strings.Contains(output, "Commander recovered") || !strings.Contains(output, "attached home commander") {
+		t.Fatalf("recovered home output:\n%s", output)
+	}
+	store, err = db.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := store.ProjectCommanderSession(context.Background(), projects[0].ID)
+	if err != nil || recovered.ID == session.ID || recovered.HerdrPaneID != "hw1:p2" {
+		t.Fatalf("recovered commander=%+v err=%v", recovered, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output = string(runCLI(t, "home", "--db", dbPath, "--herdr", herdrBinary))
+	if !strings.Contains(output, "attached home commander") || strings.Contains(output, "Commander recovered") {
+		t.Fatalf("second recovered home output:\n%s", output)
 	}
 	var mission domain.Mission
 	if err := json.Unmarshal(runCLI(t, "mission", "create", "--project", projects[0].Path, "--title", "Natural intake", "--objective", "Execute the described work", "--acceptance", "The result is verified", "--db", dbPath), &mission); err != nil {
@@ -164,7 +188,7 @@ esac
 	}
 	defer store.Close()
 	bound, err := store.ProjectCommanderSession(context.Background(), projects[0].ID)
-	if err != nil || bound.ID != session.ID || bound.MissionID != mission.ID || mission.CommanderSessionID != session.ID {
+	if err != nil || bound.ID != recovered.ID || bound.MissionID != mission.ID || mission.CommanderSessionID != recovered.ID {
 		t.Fatalf("bound commander=%+v mission=%+v err=%v", bound, mission, err)
 	}
 }

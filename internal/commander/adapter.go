@@ -43,6 +43,7 @@ type Session struct {
 // M5 Herdr launch profiles.
 type Adapter interface {
 	Start(context.Context, StartConfig) (Session, error)
+	Resume(context.Context, Session, string) (Session, error)
 	Prompt(context.Context, Session, string) (Session, error)
 	Steer(context.Context, Session, string) (Session, error)
 	FollowUp(context.Context, Session, string) (Session, error)
@@ -52,10 +53,25 @@ type Adapter interface {
 
 type terminal interface {
 	Start(context.Context, herdr.StartRequest) (herdr.Session, error)
+	Resume(context.Context, herdr.Session, string) (herdr.Session, error)
 	Observe(context.Context, herdr.Session) (herdr.State, error)
 	Submit(context.Context, herdr.Session, string) (herdr.Session, error)
 	Cancel(context.Context, herdr.Session) error
 	Stop(context.Context, herdr.Session) error
+}
+
+// Resume creates a replacement placement for a lost commander and resumes its
+// native agent session there. The caller records it as a new durable session.
+func (a HerdrAdapter) Resume(ctx context.Context, session Session, message string) (Session, error) {
+	if a.Terminal == nil {
+		return Session{}, errors.New("commander Herdr terminal is required")
+	}
+	updated, err := a.Terminal.Resume(ctx, session.Herdr, message)
+	if err != nil {
+		return Session{}, err
+	}
+	session.Herdr = updated
+	return session, nil
 }
 
 type HerdrAdapter struct{ Terminal terminal }
