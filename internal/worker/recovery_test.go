@@ -13,6 +13,7 @@ import (
 	"parallel-intellect/internal/db"
 	"parallel-intellect/internal/domain"
 	"parallel-intellect/internal/herdr"
+	taskpolicy "parallel-intellect/internal/task"
 )
 
 type recoveryHerdr struct {
@@ -50,6 +51,13 @@ func (h *recoveryHerdr) Wake(_ context.Context, session herdr.Session, message s
 
 type fixedOutcome struct {
 	kind OutcomeKind
+}
+
+func TestForgottenCompletionUsesInFlightStabilizationWindow(t *testing.T) {
+	reconciler := Reconciler{}
+	if got := reconciler.stabilizationDelay(); got != taskpolicy.InFlightStabilizationWindow {
+		t.Fatalf("default completion stabilization = %s, want %s", got, taskpolicy.InFlightStabilizationWindow)
+	}
 }
 
 func (o fixedOutcome) Inspect(context.Context, domain.Task, domain.TaskAttempt) (OutcomeKind, error) {
@@ -330,7 +338,7 @@ func setupRunningWorker(t *testing.T) (*db.Store, domain.Task, domain.WorkerSess
 	}
 	task = recoveryTaskTransition(t, store, task, domain.TaskStarting, "starting")
 	session, err := store.RecordWorkerSession(ctx, domain.CommandID("cmd_worker_"+suffix), db.RecordWorkerSessionInput{
-		TaskID: task.ID, Attempt: 1, ExpectedVersion: task.Version, Actor: "test",
+		TaskID: task.ID, Attempt: 1, Actor: "test",
 		Session: domain.WorkerSession{ID: domain.SessionID("wsn_" + suffix), Runtime: "codex",
 			HerdrSessionName: "fm-lab-recovery", HerdrWorkspaceID: "w1", HerdrTabID: "w1:t1", HerdrPaneID: "w1:p1",
 			HerdrAgentName: "pi-task-a1", AgentSessionID: "codex-session-1"},

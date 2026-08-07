@@ -33,11 +33,17 @@ type recordingHerdr struct {
 	request herdr.StartRequest
 	session herdr.Session
 	calls   int
+	onStart func() error
 }
 
 func (h *recordingHerdr) StartCodex(_ context.Context, request herdr.StartRequest) (herdr.Session, error) {
 	h.calls++
 	h.request = request
+	if h.onStart != nil {
+		if err := h.onStart(); err != nil {
+			return herdr.Session{}, err
+		}
+	}
 	return h.session, nil
 }
 
@@ -110,5 +116,74 @@ func TestStarterRunsMissionTaskLeaseBriefHerdrSlice(t *testing.T) {
 	}
 	if persisted.ID != result.WorkerSession.ID || persisted.HerdrPaneID != "w1:p1" {
 		t.Fatalf("persisted worker session = %+v", persisted)
+	}
+}
+
+func TestLaunchRecoveryErrorExplainsRetry(t *testing.T) {
+	taskID := domain.TaskID("tsk_recovery_race")
+	message := launchRecoveryError(taskID).Error()
+	for _, want := range []string{
+		"marked needs_attention by recovery",
+		"pintellect task retry tsk_recovery_race",
+		"pintellect task start tsk_recovery_race",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("launch recovery error %q omits %q", message, want)
+		}
+	}
+}
+
+func TestStarterExplainsPathologicalRecoveryEscalation(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := db.Open(ctx, filepath.Join(root, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	projectID, err := store.CreateProject(ctx, "cmd_project_race", db.CreateProjectInput{Name: "project", Path: "/registered/project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mission, err := store.CreateMission(ctx, "cmd_mission_race", db.CreateMissionInput{
+		ProjectID: projectID, Title: "mission", Objective: "objective",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.CreateTask(ctx, "cmd_task_race", db.CreateTaskInput{
+		MissionID: mission.ID, Kind: domain.TaskImplementation, Title: "task", Objective: "objective",
+		WorkerAgent: "codex", DeliveryMode: domain.DeliveryBranch,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acquirer := &recordingAcquirer{store: store, lease: domain.TreehouseLease{
+		LeaseID: "lease-race", LeaseHolder: "parallel-intellect:" + string(task.ID) + ":1",
+		WorktreePath: "/worktrees/race", Project: "project", Branch: "task/race",
+		BaseSHA: "0123456789abcdef0123456789abcdef01234567",
+	}}
+	herdrAdapter := &recordingHerdr{session: herdr.Session{
+		AgentName: "codex-task", AgentSessionID: "codex-session-race", SessionName: "fm-lab-race",
+		WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1",
+	}}
+	herdrAdapter.onStart = func() error {
+		current, err := store.Task(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		_, err = store.TransitionTask(ctx, "cmd_recovery_race", db.TransitionTaskInput{
+			TaskID: current.ID, Attempt: current.CurrentAttempt, ExpectedState: current.State,
+			ExpectedVersion: current.Version, To: domain.TaskNeedsAttention, Actor: "recovery",
+		})
+		return err
+	}
+	starter := Starter{Store: store, Treehouse: acquirer, Herdr: herdrAdapter,
+		Briefs: BriefGenerator{BaseDir: filepath.Join(root, "tasks")}}
+
+	_, err = starter.Start(ctx, task.ID)
+	if err == nil || !strings.Contains(err.Error(), "marked needs_attention by recovery") ||
+		!strings.Contains(err.Error(), "pintellect task retry "+string(task.ID)) {
+		t.Fatalf("pathological recovery error = %v", err)
 	}
 }

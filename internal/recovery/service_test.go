@@ -7,6 +7,7 @@ import (
 
 	"parallel-intellect/internal/db"
 	"parallel-intellect/internal/domain"
+	taskpolicy "parallel-intellect/internal/task"
 	"parallel-intellect/internal/treehouse"
 	"parallel-intellect/internal/validation"
 	"parallel-intellect/internal/worker"
@@ -43,11 +44,13 @@ func (f *fixedCompletion) Resume(context.Context, domain.TaskID) (domain.Task, e
 	return f.task, nil
 }
 
-func TestStartupMissingWorkerEscalatesWithoutReplacement(t *testing.T) {
+func TestAbandonedStartingTaskEscalatesAfterStabilizationWindow(t *testing.T) {
 	store, task := recoveryTask(t, domain.TaskStarting, false)
 	defer store.Close()
 	workerFactoryCalls := 0
-	service := Service{Store: store, Leases: fixedLeases{}, Worker: func(domain.WorkerSession) WorkerReconciler {
+	service := Service{Store: store, Leases: fixedLeases{}, Now: func() time.Time {
+		return task.UpdatedAt.Add(taskpolicy.InFlightStabilizationWindow)
+	}, Worker: func(domain.WorkerSession) WorkerReconciler {
 		workerFactoryCalls++
 		return nil
 	}}
@@ -69,6 +72,35 @@ func TestStartupMissingWorkerEscalatesWithoutReplacement(t *testing.T) {
 	lease, err := store.TreehouseLease(context.Background(), task.ID, 1)
 	if err != nil || lease.State != domain.TreehouseLeaseActive {
 		t.Fatalf("missing worker altered lease=%+v err=%v", lease, err)
+	}
+}
+
+func TestStartupRecoveryPassDuringWorkerLaunchLeavesSessionRecordable(t *testing.T) {
+	store, task := recoveryTask(t, domain.TaskStarting, false)
+	defer store.Close()
+	service := Service{Store: store, Leases: fixedLeases{}}
+
+	report, err := service.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Tasks) != 1 || report.Tasks[0].State != domain.TaskStarting ||
+		report.Tasks[0].Status != StatusAwaitingWorkerStart {
+		t.Fatalf("recovery interrupted in-flight launch: %+v", report)
+	}
+
+	_, err = store.RecordWorkerSession(context.Background(), "cmd_recovery_race_worker", db.RecordWorkerSessionInput{
+		TaskID: task.ID, Attempt: 1, Actor: "scheduler",
+		Session: domain.WorkerSession{ID: "wsn_recovery_race", Runtime: "codex",
+			HerdrSessionName: "fm-lab", HerdrWorkspaceID: "w1", HerdrTabID: "t1", HerdrPaneID: "p1",
+			HerdrAgentName: "pi-task-a1", AgentSessionID: "codex-session"},
+	})
+	if err != nil {
+		t.Fatalf("record worker session after recovery pass: %v", err)
+	}
+	current, err := store.Task(context.Background(), task.ID)
+	if err != nil || current.State != domain.TaskRunning {
+		t.Fatalf("task after session record = %+v, error = %v", current, err)
 	}
 }
 
@@ -206,7 +238,7 @@ func recoveryTask(t *testing.T, state domain.TaskState, withWorker bool) (*db.St
 		t.Fatal("running fixture requires a worker")
 	}
 	_, err = store.RecordWorkerSession(ctx, "cmd_recovery_worker", db.RecordWorkerSessionInput{TaskID: task.ID,
-		Attempt: 1, ExpectedVersion: task.Version, Actor: "test", Session: domain.WorkerSession{
+		Attempt: 1, Actor: "test", Session: domain.WorkerSession{
 			ID: "wsn_recovery", Runtime: "codex", HerdrSessionName: "fm-lab", HerdrWorkspaceID: "w1",
 			HerdrTabID: "t1", HerdrPaneID: "p1", HerdrAgentName: "pi-task-a1", AgentSessionID: "codex-session",
 		}})

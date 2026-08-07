@@ -120,7 +120,7 @@ func TestRealHerdrRestartReconciliation(t *testing.T) {
 		t.Fatal(err)
 	}
 	workerSession, err := store.RecordWorkerSession(context.Background(), "cmd_m11_live_worker", db.RecordWorkerSessionInput{
-		TaskID: task.ID, Attempt: 1, ExpectedVersion: task.Version, Actor: "test",
+		TaskID: task.ID, Attempt: 1, Actor: "test",
 		Session: domain.WorkerSession{ID: "wsn_m11_live", Runtime: "codex",
 			HerdrSessionName: runtime.SessionName, HerdrWorkspaceID: runtime.WorkspaceID,
 			HerdrTabID: runtime.TabID, HerdrPaneID: runtime.PaneID, HerdrAgentName: runtime.AgentName,

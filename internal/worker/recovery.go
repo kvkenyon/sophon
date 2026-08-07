@@ -13,6 +13,7 @@ import (
 	"parallel-intellect/internal/db"
 	"parallel-intellect/internal/domain"
 	"parallel-intellect/internal/herdr"
+	taskpolicy "parallel-intellect/internal/task"
 )
 
 const DefaultRecoveryPrompt = "Your Herdr session became idle without a structured task outcome. Re-check the current attempt and write its structured completion, failure, or blocker artifact. Terminal prose is not an outcome."
@@ -294,7 +295,7 @@ func (r *Reconciler) stabilizationDelay() time.Duration {
 	if r.StabilizationDelay > 0 {
 		return r.StabilizationDelay
 	}
-	return 5 * time.Second
+	return taskpolicy.InFlightStabilizationWindow
 }
 
 func (r *Reconciler) recoveryWait() time.Duration {

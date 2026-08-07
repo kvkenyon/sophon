@@ -101,8 +101,18 @@ func (s *Starter) Start(ctx context.Context, taskID domain.TaskID) (StartResult,
 	if err != nil {
 		return StartResult{}, err
 	}
+	current, err = s.Store.Task(ctx, taskID)
+	if err != nil {
+		return StartResult{}, err
+	}
+	if current.CurrentAttempt != attempt {
+		return StartResult{}, db.ErrStaleAttempt
+	}
+	if current.State == domain.TaskNeedsAttention {
+		return StartResult{}, launchRecoveryError(taskID)
+	}
 	workerSession, err := s.Store.RecordWorkerSession(ctx, commandID, db.RecordWorkerSessionInput{
-		TaskID: taskID, Attempt: attempt, ExpectedVersion: current.Version, Actor: "scheduler",
+		TaskID: taskID, Attempt: attempt, Actor: "scheduler",
 		Session: domain.WorkerSession{ID: domain.SessionID(sessionID), Runtime: "codex",
 			HerdrSessionName: runtimeSession.SessionName, HerdrWorkspaceID: runtimeSession.WorkspaceID,
 			HerdrTabID: runtimeSession.TabID, HerdrPaneID: runtimeSession.PaneID,
@@ -110,6 +120,10 @@ func (s *Starter) Start(ctx context.Context, taskID domain.TaskID) (StartResult,
 			Budget: s.Budget},
 	})
 	if err != nil {
+		var conflict *db.ConflictError
+		if errors.As(err, &conflict) && conflict.Current.State == domain.TaskNeedsAttention {
+			return StartResult{}, launchRecoveryError(taskID)
+		}
 		return StartResult{}, fmt.Errorf("record worker session: %w", err)
 	}
 	current, err = s.Store.Task(ctx, taskID)
@@ -117,6 +131,10 @@ func (s *Starter) Start(ctx context.Context, taskID domain.TaskID) (StartResult,
 		return StartResult{}, err
 	}
 	return StartResult{Task: current, Lease: lease, WorkerSession: workerSession, BriefPath: briefPath}, nil
+}
+
+func launchRecoveryError(taskID domain.TaskID) error {
+	return fmt.Errorf("task %s was marked needs_attention by recovery while its worker launch was in flight; run `pintellect task retry %s`, then run `pintellect task start %s` again", taskID, taskID, taskID)
 }
 
 func (s *Starter) transition(ctx context.Context, current domain.Task, to domain.TaskState) (domain.Task, error) {

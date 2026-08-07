@@ -299,7 +299,7 @@ func runningWorker(t *testing.T, budget domain.WorkerBudget) (*Store, domain.Tas
 	}
 	task, _ = store.Task(context.Background(), task.ID)
 	task = transitionTask(t, store, task, domain.TaskStarting, "worker_starting")
-	session, err := store.RecordWorkerSession(context.Background(), "cmd_worker_record", RecordWorkerSessionInput{TaskID: task.ID, Attempt: 1, ExpectedVersion: task.Version, Actor: "scheduler", Session: domain.WorkerSession{ID: "wsn_budget", Runtime: "codex", HerdrSessionName: "fm-lab-budget", HerdrWorkspaceID: "workspace", HerdrTabID: "tab", HerdrPaneID: "pane", HerdrAgentName: "worker", AgentSessionID: "native", Budget: budget}})
+	session, err := store.RecordWorkerSession(context.Background(), "cmd_worker_record", RecordWorkerSessionInput{TaskID: task.ID, Attempt: 1, Actor: "scheduler", Session: domain.WorkerSession{ID: "wsn_budget", Runtime: "codex", HerdrSessionName: "fm-lab-budget", HerdrWorkspaceID: "workspace", HerdrTabID: "tab", HerdrPaneID: "pane", HerdrAgentName: "worker", AgentSessionID: "native", Budget: budget}})
 	if err != nil {
 		store.Close()
 		t.Fatal(err)

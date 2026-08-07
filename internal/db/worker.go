@@ -46,17 +46,16 @@ func (s *Store) TaskLaunchContext(ctx context.Context, taskID domain.TaskID) (Ta
 }
 
 type RecordWorkerSessionInput struct {
-	TaskID          domain.TaskID        `json:"task_id"`
-	Attempt         int                  `json:"attempt"`
-	ExpectedVersion int64                `json:"expected_version"`
-	Session         domain.WorkerSession `json:"session"`
-	Actor           string               `json:"actor"`
+	TaskID  domain.TaskID        `json:"task_id"`
+	Attempt int                  `json:"attempt"`
+	Session domain.WorkerSession `json:"session"`
+	Actor   string               `json:"actor"`
 }
 
 // RecordWorkerSession atomically binds the response-derived Herdr identity to
 // the current attempt and advances starting -> running.
 func (s *Store) RecordWorkerSession(ctx context.Context, commandID domain.CommandID, in RecordWorkerSessionInput) (domain.WorkerSession, error) {
-	if in.TaskID == "" || in.Attempt < 1 || in.ExpectedVersion < 1 || in.Actor == "" ||
+	if in.TaskID == "" || in.Attempt < 1 || in.Actor == "" ||
 		in.Session.ID == "" || in.Session.Runtime == "" || in.Session.HerdrSessionName == "" ||
 		in.Session.HerdrWorkspaceID == "" || in.Session.HerdrTabID == "" || in.Session.HerdrPaneID == "" ||
 		in.Session.HerdrAgentName == "" || in.Session.AgentSessionID == "" {
@@ -70,7 +69,7 @@ func (s *Store) RecordWorkerSession(ctx context.Context, commandID domain.Comman
 		if current.CurrentAttempt != in.Attempt {
 			return domain.WorkerSession{}, ErrStaleAttempt
 		}
-		if current.Version != in.ExpectedVersion || current.State != domain.TaskStarting {
+		if current.State != domain.TaskStarting {
 			return domain.WorkerSession{}, &ConflictError{Current: current}
 		}
 		if err := taskpolicy.ValidateTransition(current, domain.TaskRunning); err != nil {
@@ -108,7 +107,7 @@ func (s *Store) RecordWorkerSession(ctx context.Context, commandID domain.Comman
 		}
 		result, err := tx.ExecContext(ctx, `UPDATE tasks SET state = ?, version = version + 1, updated_at = ?
 			WHERE id = ? AND state = ? AND version = ? AND current_attempt = ?`, domain.TaskRunning,
-			formatTime(now), in.TaskID, domain.TaskStarting, in.ExpectedVersion, in.Attempt)
+			formatTime(now), in.TaskID, domain.TaskStarting, current.Version, in.Attempt)
 		if err != nil {
 			return domain.WorkerSession{}, fmt.Errorf("start worker task: %w", err)
 		}
@@ -126,7 +125,7 @@ func (s *Store) RecordWorkerSession(ctx context.Context, commandID domain.Comman
 		}
 		if err := appendEvent(ctx, tx, eventInput{MissionID: &current.MissionID, TaskID: &current.ID,
 			Actor: in.Actor, Type: "task.running", CommandID: &commandID, Payload: map[string]any{
-				"from": domain.TaskStarting, "to": domain.TaskRunning, "version": in.ExpectedVersion + 1,
+				"from": domain.TaskStarting, "to": domain.TaskRunning, "version": current.Version + 1,
 				"attempt": in.Attempt,
 			}}); err != nil {
 			return domain.WorkerSession{}, err

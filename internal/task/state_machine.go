@@ -4,9 +4,14 @@ package task
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"parallel-intellect/internal/domain"
 )
+
+// InFlightStabilizationWindow prevents recovery from treating a recently
+// started launch or completion handoff as abandoned work.
+const InFlightStabilizationWindow = 30 * time.Second
 
 var ErrIllegalTransition = errors.New("illegal task state transition")
 

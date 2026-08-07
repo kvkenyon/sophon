@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"parallel-intellect/internal/db"
 	"parallel-intellect/internal/delivery"
@@ -26,21 +27,22 @@ const (
 type Status string
 
 const (
-	StatusQueued              Status = "queued"
-	StatusAwaitingLease       Status = "awaiting_lease"
-	StatusAwaitingWorkerStart Status = "awaiting_worker_start"
-	StatusWorkerObserved      Status = "worker_observed"
-	StatusWorkerInactive      Status = "worker_inactive"
-	StatusWorkerMissing       Status = "worker_missing"
-	StatusCompletionResumed   Status = "completion_resumed"
-	StatusFailureRecorded     Status = "failure_recorded"
-	StatusBlockerRecorded     Status = "blocker_recorded"
-	StatusReady               Status = "ready"
-	StatusValidationResumable Status = "validation_resumable"
-	StatusDeliveryPending     Status = "delivery_pending"
-	StatusDeliveryResumed     Status = "delivery_resumed"
-	StatusNeedsAttention      Status = "needs_attention"
-	StatusCancelling          Status = "cancelling"
+	StatusQueued                Status = "queued"
+	StatusAwaitingLease         Status = "awaiting_lease"
+	StatusAwaitingWorkerStart   Status = "awaiting_worker_start"
+	StatusWorkerObserved        Status = "worker_observed"
+	StatusWorkerInactive        Status = "worker_inactive"
+	StatusWorkerMissing         Status = "worker_missing"
+	StatusCompletionStabilizing Status = "completion_stabilizing"
+	StatusCompletionResumed     Status = "completion_resumed"
+	StatusFailureRecorded       Status = "failure_recorded"
+	StatusBlockerRecorded       Status = "blocker_recorded"
+	StatusReady                 Status = "ready"
+	StatusValidationResumable   Status = "validation_resumable"
+	StatusDeliveryPending       Status = "delivery_pending"
+	StatusDeliveryResumed       Status = "delivery_resumed"
+	StatusNeedsAttention        Status = "needs_attention"
+	StatusCancelling            Status = "cancelling"
 )
 
 type TaskResult struct {
@@ -79,6 +81,7 @@ type Service struct {
 	Worker     func(domain.WorkerSession) WorkerReconciler
 	Completion CompletionResumer
 	Delivery   DeliveryReconciler
+	Now        func() time.Time
 }
 
 // Reconcile executes one restart pass. Per-task external failures are retained
@@ -117,6 +120,15 @@ func (s *Service) reconcileTask(ctx context.Context, task domain.Task) TaskResul
 		return result
 	}
 	result.State = current.State
+	if s.inFlightStabilizing(current) {
+		switch current.State {
+		case domain.TaskStarting:
+			result.Status = StatusAwaitingWorkerStart
+		case domain.TaskCollecting:
+			result.Status = StatusCompletionStabilizing
+		}
+		return result
+	}
 
 	lease, leaseErr := s.Store.TreehouseLease(ctx, current.ID, current.CurrentAttempt)
 	if errors.Is(leaseErr, db.ErrNotFound) {
@@ -211,6 +223,20 @@ func (s *Service) reconcileTask(ctx context.Context, task domain.Task) TaskResul
 		result.Status, result.Outcome = StatusReady, OutcomeExactlyOnce
 	}
 	return result
+}
+
+func (s *Service) inFlightStabilizing(task domain.Task) bool {
+	if task.State != domain.TaskStarting && task.State != domain.TaskCollecting {
+		return false
+	}
+	return s.now().Sub(task.UpdatedAt) < taskpolicy.InFlightStabilizationWindow
+}
+
+func (s *Service) now() time.Time {
+	if s.Now != nil {
+		return s.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (s *Service) reconcileValidationOrDelivery(ctx context.Context, task domain.Task, result TaskResult) TaskResult {

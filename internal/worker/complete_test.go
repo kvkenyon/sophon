@@ -266,7 +266,7 @@ func newCompletionFixture(t *testing.T, newCommit bool) completionFixture {
 	}
 	task = transitionFixture(t, store, task, domain.TaskStarting, "starting")
 	_, err = store.RecordWorkerSession(ctx, domain.CommandID("cmd_worker_"+suffix), db.RecordWorkerSessionInput{
-		TaskID: task.ID, Attempt: 1, ExpectedVersion: task.Version, Actor: "test",
+		TaskID: task.ID, Attempt: 1, Actor: "test",
 		Session: domain.WorkerSession{ID: domain.SessionID("wsn_" + suffix), Runtime: "codex", HerdrSessionName: "fm-lab-test",
 			HerdrWorkspaceID: "w1", HerdrTabID: "w1:t1", HerdrPaneID: "w1:p1",
 			HerdrAgentName: "pi-task-a1", AgentSessionID: "codex-session-1"},
