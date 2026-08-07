@@ -75,7 +75,7 @@ func (s *Service) Acquire(ctx context.Context, commandID domain.CommandID, taskI
 		}
 		return cause
 	}
-	branch := TaskBranch(taskID)
+	branch := TaskBranch(taskID, attempt)
 	snapshot, err := s.git.CreateTaskBranch(ctx, allocation.WorktreePath, branch)
 	if err != nil {
 		return domain.TreehouseLease{}, compensate(fmt.Errorf("inspect acquired worktree: %w", err))
@@ -103,10 +103,10 @@ func (s *Service) Acquire(ctx context.Context, commandID domain.CommandID, taskI
 	return lease, nil
 }
 
-// TaskBranch applies the product-wide task-branch convention. Attempt fencing
-// remains in the lease and holder identities, not the branch name.
-func TaskBranch(taskID domain.TaskID) string {
-	return TaskBranchPrefix + string(taskID)
+// TaskBranch applies the product-wide task-branch convention. Each attempt
+// gets its own branch because attempts are independently leased and fenced.
+func TaskBranch(taskID domain.TaskID, attempt int) string {
+	return fmt.Sprintf("%s%s/attempt-%d", TaskBranchPrefix, taskID, attempt)
 }
 
 // Release refuses stale attempts before invoking Treehouse. The external call
