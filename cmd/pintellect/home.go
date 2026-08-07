@@ -58,8 +58,11 @@ func homeCommand(ctx context.Context, args []string) error {
 	}
 	workspaceLabel := project.Name + " · commander"
 
-	session, err := store.ProjectCommanderSession(ctx, project.ID)
-	if errors.Is(err, db.ErrNotFound) {
+	session, found, err := reconcileHomeCommanderSessions(ctx, store, project.ID, *herdrBinary, workspaceLabel)
+	if err != nil {
+		return err
+	}
+	if !found {
 		session, err = startProjectCommander(ctx, store, project, homeStartOptions{
 			Agent: *agent, DatabasePath: *dbPath, HerdrBinary: *herdrBinary,
 			HerdrSession: operatorSession, HerdrWorkspace: workspaceLabel, PromptDir: *promptDir,
@@ -72,8 +75,6 @@ func homeCommand(ctx context.Context, args []string) error {
 		} else {
 			fmt.Printf("Commander ready to resume mission %s for %s.\n", session.MissionID, project.Name)
 		}
-	} else if err != nil {
-		return err
 	} else {
 		terminal := herdr.NewCommandAdapter(*herdrBinary, session.HerdrSessionName, workspaceLabel)
 		session, err = (&commandercontrol.Reconciler{
@@ -102,6 +103,60 @@ func homeCommand(ctx context.Context, args []string) error {
 		}
 	}
 	return attachHomeCommander(ctx, *herdrBinary, session)
+}
+
+// reconcileHomeCommanderSessions repairs records created by older front-door
+// recovery paths before home chooses a commander. Only one non-terminal
+// record may survive; every other placement is closed by its persisted tab
+// identity, never by a workspace label or a best-effort search.
+func reconcileHomeCommanderSessions(ctx context.Context, store *db.Store, projectID domain.ProjectID, herdrBinary, workspaceLabel string) (domain.CommanderSession, bool, error) {
+	sessions, err := store.ProjectCommanderSessions(ctx, projectID)
+	if err != nil {
+		return domain.CommanderSession{}, false, err
+	}
+	var keep *domain.CommanderSession
+	for index := range sessions {
+		if !commanderSessionTerminal(sessions[index].State) {
+			keep = &sessions[index]
+			break
+		}
+	}
+	for _, candidate := range sessions {
+		if keep != nil && candidate.ID == keep.ID {
+			continue
+		}
+		if !commanderSessionTerminal(candidate.State) {
+			command, commandErr := commandID()
+			if commandErr != nil {
+				return domain.CommanderSession{}, false, commandErr
+			}
+			if _, retireErr := store.RetireCommanderSession(ctx, command, candidate.ID, candidate.State, candidate.Version, "home", "superseded by newer project commander session"); retireErr != nil {
+				return domain.CommanderSession{}, false, fmt.Errorf("retire duplicate commander %s: %w", candidate.ID, retireErr)
+			}
+		}
+		// A terminal record can still own a visible tab after an interrupted
+		// recovery. Observe first and close only its exact persisted tab.
+		terminal := herdr.NewCommandAdapter(herdrBinary, candidate.HerdrSessionName, workspaceLabel)
+		if cleanupErr := (commandercontrol.HerdrAdapter{Terminal: terminal}).Cleanup(ctx, commanderSessionRuntime(candidate, projectID)); cleanupErr != nil {
+			return domain.CommanderSession{}, false, fmt.Errorf("clean stale commander placement %s: %w", candidate.ID, cleanupErr)
+		}
+	}
+	if keep == nil {
+		return domain.CommanderSession{}, false, nil
+	}
+	return *keep, true, nil
+}
+
+func commanderSessionTerminal(state domain.CommanderSessionState) bool {
+	return state == domain.CommanderSessionStopped || state == domain.CommanderSessionFailed
+}
+
+func commanderSessionRuntime(session domain.CommanderSession, projectID domain.ProjectID) commandercontrol.Session {
+	return commandercontrol.Session{ID: session.ID, ProjectID: projectID, MissionID: session.MissionID, Runtime: herdr.Runtime(session.Runtime), Herdr: herdr.Session{
+		Runtime: herdr.Runtime(session.Runtime), AgentName: session.HerdrAgentName, AgentSessionID: session.AgentSessionID,
+		SessionName: session.HerdrSessionName, WorkspaceID: session.HerdrWorkspaceID, TabID: session.HerdrTabID,
+		PaneID: session.HerdrPaneID,
+	}}
 }
 
 type listedHerdrSession struct {

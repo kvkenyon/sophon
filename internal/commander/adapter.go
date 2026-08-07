@@ -49,6 +49,7 @@ type Adapter interface {
 	FollowUp(context.Context, Session, string) (Session, error)
 	State(context.Context, Session) (State, error)
 	Abort(context.Context, Session) error
+	Cleanup(context.Context, Session) error
 }
 
 type terminal interface {
@@ -160,6 +161,23 @@ func (a HerdrAdapter) Abort(ctx context.Context, session Session) error {
 	}
 	if state == herdr.StateLost {
 		return herdr.ErrSessionMissing
+	}
+	return a.Terminal.Stop(ctx, session.Herdr)
+}
+
+// Cleanup closes one exact stale tab when it is still present. A structurally
+// missing pane has already disappeared with its tab, so it is clean by
+// definition. This deliberately never searches by label or workspace.
+func (a HerdrAdapter) Cleanup(ctx context.Context, session Session) error {
+	if a.Terminal == nil {
+		return errors.New("commander Herdr terminal is required")
+	}
+	state, err := a.Terminal.Observe(ctx, session.Herdr)
+	if err != nil {
+		return err
+	}
+	if state == herdr.StateLost {
+		return nil
 	}
 	return a.Terminal.Stop(ctx, session.Herdr)
 }

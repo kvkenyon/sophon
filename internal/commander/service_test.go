@@ -63,6 +63,7 @@ func (f *fakeCommanderRuntime) FollowUp(_ context.Context, session Session, mess
 }
 func (f *fakeCommanderRuntime) State(context.Context, Session) (State, error) { return f.state, nil }
 func (f *fakeCommanderRuntime) Abort(context.Context, Session) error          { f.aborts++; return nil }
+func (f *fakeCommanderRuntime) Cleanup(context.Context, Session) error        { f.aborts++; return nil }
 func (f *fakeCommanderRuntime) delivered(session Session) Session {
 	if f.replacement != nil {
 		return *f.replacement

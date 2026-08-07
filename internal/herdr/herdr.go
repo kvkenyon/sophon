@@ -266,7 +266,10 @@ func (a *CommandAdapter) replaceHusk(ctx context.Context, husk Session, message 
 	if err != nil {
 		return Session{}, err
 	}
-	if err := a.launchRuntimeInPane(ctx, replacement, command, true); err != nil {
+	// Native resume restores an existing Codex/Claude/Pi transcript and may not
+	// redraw a fresh composer banner. Registration plus the prompt below is the
+	// end-to-end readiness proof, just as it is for a structurally missing pane.
+	if err := a.launchRuntimeInPane(ctx, replacement, command, false); err != nil {
 		return Session{}, fmt.Errorf("resume %s in replacement pane: %w", sessionRuntime(husk), err)
 	}
 	if _, stderr, err := a.run(ctx, "agent", "prompt", replacement.PaneID, message,

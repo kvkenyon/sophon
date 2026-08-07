@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -191,6 +192,52 @@ esac
 	bound, err := store.ProjectCommanderSession(context.Background(), projects[0].ID)
 	if err != nil || bound.ID != recovered.ID || bound.MissionID != mission.ID || mission.CommanderSessionID != recovered.ID {
 		t.Fatalf("bound commander=%+v mission=%+v err=%v", bound, mission, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the legacy front door's bad recovery bookkeeping: it left an
+	// older commander live beside the replacement. home must keep the newer
+	// placement and retire the duplicate before it can attach.
+	raw, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DROP INDEX commander_sessions_active_project_idx`); err != nil {
+		_ = raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`UPDATE commander_sessions SET state = 'needs_attention', stopped_at = NULL WHERE id = ?`, session.ID); err != nil {
+		_ = raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output = string(runCLI(t, "home", "--db", dbPath, "--herdr", herdrBinary))
+	if !strings.Contains(output, "attached home commander") {
+		t.Fatalf("deduplicated home output:\n%s", output)
+	}
+	store, err = db.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	sessions, err := store.ProjectCommanderSessions(context.Background(), projects[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := 0
+	for _, candidate := range sessions {
+		if candidate.State != domain.CommanderSessionStopped && candidate.State != domain.CommanderSessionFailed {
+			live++
+		}
+		if candidate.ID == session.ID && candidate.State != domain.CommanderSessionStopped {
+			t.Fatalf("legacy duplicate was not retired: %+v", candidate)
+		}
+	}
+	if live != 1 {
+		t.Fatalf("live commander sessions=%d sessions=%+v", live, sessions)
 	}
 }
 

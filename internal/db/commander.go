@@ -229,6 +229,26 @@ func (s *Store) ProjectCommanderSession(ctx context.Context, projectID domain.Pr
 	return session, err
 }
 
+// ProjectCommanderSessions returns the complete commander history for a
+// project, newest first. The front door uses this to repair older databases
+// that predate the one-commander invariant before choosing a live placement.
+func (s *Store) ProjectCommanderSessions(ctx context.Context, projectID domain.ProjectID) ([]domain.CommanderSession, error) {
+	rows, err := s.db.QueryContext(ctx, commanderSessionSelect+" WHERE project_id = ? ORDER BY created_at DESC, id DESC", projectID)
+	if err != nil {
+		return nil, fmt.Errorf("list project commander sessions: %w", err)
+	}
+	defer rows.Close()
+	sessions := make([]domain.CommanderSession, 0)
+	for rows.Next() {
+		session, err := scanCommanderSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, session)
+	}
+	return sessions, rows.Err()
+}
+
 func (s *Store) CommanderSession(ctx context.Context, missionID domain.MissionID) (domain.CommanderSession, error) {
 	session, err := scanCommanderSession(s.db.QueryRowContext(ctx, commanderSessionSelect+" WHERE mission_id = ? AND state NOT IN ('stopped', 'failed')", missionID))
 	if errors.Is(err, sql.ErrNoRows) {

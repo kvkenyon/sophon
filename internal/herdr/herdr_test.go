@@ -451,7 +451,6 @@ func TestCommandAdapterCreatesReplacementBeforeClosingHusk(t *testing.T) {
 		{stdout: `{"result":{"type":"command_started"}}`},
 		{stdout: `{"result":{"pane":{"pane_id":"w1:p2"}}}`},
 		{stdout: `{"result":{"agent":{"pane_id":"w1:p2","agent_status":"idle","state_change_seq":1}}}`},
-		{stdout: `OpenAI Codex`},
 		{stdout: `{"result":{"type":"prompt_sent"}}`},
 		{stdout: `{"result":{"type":"tab_closed"}}`},
 		{stdout: `{"result":{"tabs":[{"tab_id":"w1:t2","label":"pi-worker"}]}}`},
@@ -476,7 +475,6 @@ func TestCommandAdapterCreatesReplacementBeforeClosingHusk(t *testing.T) {
 		{"pane", "run", "w1:p2", "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume codex-session-1", "--session", "fm-lab-contract"},
 		{"pane", "get", "w1:p2", "--session", "fm-lab-contract"},
 		{"agent", "get", "w1:p2", "--session", "fm-lab-contract"},
-		{"pane", "read", "w1:p2", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
 		{"agent", "prompt", "w1:p2", "continue after restart", "--wait", "--until", "working", "--timeout", "30000", "--session", "fm-lab-contract"},
 		{"tab", "close", "w1:t1", "--session", "fm-lab-contract"},
 		{"tab", "list", "--workspace", "w1", "--session", "fm-lab-contract"},
@@ -492,7 +490,6 @@ func TestHerdrRuntimeConformanceResumesClaudeAndPiAfterRestart(t *testing.T) {
 	tests := []struct {
 		name          string
 		session       Session
-		composer      string
 		resumeCommand string
 	}{
 		{
@@ -500,7 +497,6 @@ func TestHerdrRuntimeConformanceResumesClaudeAndPiAfterRestart(t *testing.T) {
 			session: Session{Runtime: RuntimeClaude, SessionName: "fm-lab-contract", WorkspaceID: "w1",
 				TabID: "w1:t1", PaneID: "w1:p1", AgentName: "pi-task-a1", AgentSessionID: "claude-session-1",
 				WorktreePath: "/worktrees/claude", Model: "claude-opus-5"},
-			composer:      "Claude Code\n❯",
 			resumeCommand: "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --model 'claude-opus-5' --resume claude-session-1",
 		},
 		{
@@ -508,7 +504,6 @@ func TestHerdrRuntimeConformanceResumesClaudeAndPiAfterRestart(t *testing.T) {
 			session: Session{Runtime: RuntimePi, SessionName: "fm-lab-contract", WorkspaceID: "w1",
 				TabID: "w1:t1", PaneID: "w1:p1", AgentName: "pi-task-a1", AgentSessionID: "/sessions/pi-session.jsonl",
 				WorktreePath: piWorktree, Model: "kimi-coding/k3-256k", PiExtensionPath: piExtension},
-			composer: "pi v0.84.0\nescape interrupt",
 			resumeCommand: "FM_PI_HARNESS=pi pi --model 'kimi-coding/k3-256k' -e " + shellQuote(piExtension) +
 				" --session '/sessions/pi-session.jsonl'",
 		},
@@ -524,7 +519,6 @@ func TestHerdrRuntimeConformanceResumesClaudeAndPiAfterRestart(t *testing.T) {
 				{stdout: `{"result":{"type":"command_started"}}`},
 				{stdout: `{"result":{"pane":{"pane_id":"w1:p2"}}}`},
 				{stdout: `{"result":{"agent":{"agent":"` + string(runtime) + `","pane_id":"w1:p2","agent_status":"idle","state_change_seq":1}}}`},
-				{stdout: test.composer},
 				{stdout: `{"result":{"type":"prompt_sent"}}`},
 				{stdout: `{"result":{"type":"tab_closed"}}`},
 				{stdout: `{"result":{"tabs":[{"tab_id":"w1:t2","label":"worker"}]}}`},
@@ -543,7 +537,7 @@ func TestHerdrRuntimeConformanceResumesClaudeAndPiAfterRestart(t *testing.T) {
 				[]string{"pane", "run", "w1:p2", test.resumeCommand, "--session", "fm-lab-contract"}) {
 				t.Fatalf("resume call = %#v", got)
 			}
-			if got := runner.calls[9]; !reflect.DeepEqual(got,
+			if got := runner.calls[8]; !reflect.DeepEqual(got,
 				[]string{"tab", "close", "w1:t1", "--session", "fm-lab-contract"}) {
 				t.Fatalf("husk close call = %#v", got)
 			}
@@ -560,7 +554,6 @@ func TestCommandAdapterLeavesHuskWhenReplacementIsNotVerified(t *testing.T) {
 		{stdout: `{"result":{"type":"command_started"}}`},
 		{stdout: `{"result":{"pane":{"pane_id":"w1:p2"}}}`},
 		{stdout: `{"result":{"agent":{"pane_id":"w1:p2","agent_status":"idle","state_change_seq":1}}}`},
-		{stdout: `OpenAI Codex`},
 		{stderr: `{"error":{"code":"agent_prompt_stalled"}}`, err: errors.New("exit 1")},
 		{stdout: `resumed but prompt was not accepted`},
 	}}
