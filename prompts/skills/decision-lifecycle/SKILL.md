@@ -16,7 +16,7 @@ Use this skill before treating a scout, review, validation result, worker blocke
 
 Every genuine unresolved choice that belongs to the operator must become a durable Signal in the originating mission before the originating activity is considered completely handled.
 The commander performs the semantic inventory because the control plane must not infer decisions from report prose.
-Give each distinct choice a stable, privacy-safe command identity and use `pintellect signal raise --mission ID --kind decision --question TEXT --command-id ID --json` idempotently so retries reuse the same Signal while different choices remain distinct.
+Give each distinct choice a stable, privacy-safe command identity and use `sophon signal raise --mission ID --kind decision --question TEXT --command-id ID --json` idempotently so retries reuse the same Signal while different choices remain distinct.
 
 Inventory the whole artifact or review surface, not only the worker's summary or
 first highlighted finding. Distinct choices get distinct identities; alternate
@@ -39,12 +39,12 @@ semantic inventory.
 
 1. Read the complete originating artifact and include every relevant review result.
 2. Inventory only genuine unresolved operator choices.
-3. For each choice, create or reuse a Signal with `pintellect signal raise`, supplying its mission, optional `--task`, `--kind`, `--question`, `--context`, `--recommendation`, and stable `--command-id`.
+3. For each choice, create or reuse a Signal with `sophon signal raise`, supplying its mission, optional `--task`, `--kind`, `--question`, `--context`, `--recommendation`, and stable `--command-id`.
 4. Verify that the full inventory is registered before treating the originating activity as handled.
 5. Notify the operator in outcome language with evidence, consequences, and a recommendation.
 6. Keep dependent tasks blocked or unstarted through structured dependencies while the Signal is open.
-7. After the operator answers, inspect the Signal with `pintellect signal inspect ID --json`, then record the answer with `pintellect signal resolve ID --answer TEXT --command-id ID --json`. Route it to affected workers only through a supported worker API when their current tasks remain valid.
-8. Confirm with `pintellect signal inspect ID --json` that the Signal is resolved and dependent work remains durably represented.
+7. After the operator answers, inspect the Signal with `sophon signal inspect ID --json`, then record the answer with `sophon signal resolve ID --answer TEXT --command-id ID --json`. Route it to affected workers only through a supported worker API when their current tasks remain valid.
+8. Confirm with `sophon signal inspect ID --json` that the Signal is resolved and dependent work remains durably represented.
 9. Re-read the affected task projection before steering: if the answer changes
    accepted scope, create a new substantive task; if it invalidates current
    work, use the supported cancellation or supersession lifecycle; if it is a

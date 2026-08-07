@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"parallel-intellect/internal/domain"
-	taskpolicy "parallel-intellect/internal/task"
+	"sophon/internal/domain"
+	taskpolicy "sophon/internal/task"
 )
 
 type BudgetExpiration struct {

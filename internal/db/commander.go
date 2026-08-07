@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	commanderpolicy "parallel-intellect/internal/commandersession"
-	"parallel-intellect/internal/digest"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/id"
-	signalpolicy "parallel-intellect/internal/signals"
+	commanderpolicy "sophon/internal/commandersession"
+	"sophon/internal/digest"
+	"sophon/internal/domain"
+	"sophon/internal/id"
+	signalpolicy "sophon/internal/signals"
 )
 
 type CommanderLaunchContext struct {

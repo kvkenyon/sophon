@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/herdr"
-	signalpolicy "parallel-intellect/internal/signals"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	"sophon/internal/herdr"
+	signalpolicy "sophon/internal/signals"
 )
 
 type fakeCommanderRuntime struct {
@@ -74,7 +74,7 @@ func (f *fakeCommanderRuntime) delivered(session Session) Session {
 func TestCommanderLifecyclePersistsReconcilesHuskAndRoutesEvents(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	databasePath := filepath.Join(root, "pintellect.db")
+	databasePath := filepath.Join(root, "sophon.db")
 	projectPath := filepath.Join(root, "project")
 	if err := os.Mkdir(projectPath, 0o755); err != nil {
 		t.Fatal(err)
@@ -186,7 +186,7 @@ func TestCommanderLifecyclePersistsReconcilesHuskAndRoutesEvents(t *testing.T) {
 func TestEventWakeBudgetSignalAndRenewalResumesDelivery(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	store, err := db.Open(ctx, filepath.Join(root, "pintellect.db"))
+	store, err := db.Open(ctx, filepath.Join(root, "sophon.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

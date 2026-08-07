@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/signals"
+	"sophon/internal/domain"
+	"sophon/internal/signals"
 )
 
 func TestMissionCancelClosesSignalsStopsDeadCommanderAndRejectsTasks(t *testing.T) {

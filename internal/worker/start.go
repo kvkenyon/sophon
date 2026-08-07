@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"os"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/herdr"
-	"parallel-intellect/internal/id"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	"sophon/internal/herdr"
+	"sophon/internal/id"
 )
 
 type LeaseAcquirer interface {
@@ -134,7 +134,7 @@ func (s *Starter) Start(ctx context.Context, taskID domain.TaskID) (StartResult,
 }
 
 func launchRecoveryError(taskID domain.TaskID) error {
-	return fmt.Errorf("task %s was marked needs_attention by recovery while its worker launch was in flight; run `pintellect task retry %s`, then run `pintellect task start %s` again", taskID, taskID, taskID)
+	return fmt.Errorf("task %s was marked needs_attention by recovery while its worker launch was in flight; run `sophon task retry %s`, then run `sophon task start %s` again", taskID, taskID, taskID)
 }
 
 func (s *Starter) transition(ctx context.Context, current domain.Task, to domain.TaskState) (domain.Task, error) {

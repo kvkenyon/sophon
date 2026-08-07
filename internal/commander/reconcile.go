@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
+	"sophon/internal/db"
+	"sophon/internal/domain"
 )
 
 const restartWake = `{"kind":"commander_session_resumed","reason":"Herdr restart restored an agent-less pane","action":"Reconcile the current structured mission state before acting."}`

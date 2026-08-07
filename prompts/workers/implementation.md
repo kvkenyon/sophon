@@ -17,10 +17,10 @@ Create the versioned result JSON with a truthful summary, verification commands 
 Submit completion with the current immutable head:
 
 ```bash
-pintellect worker complete TASK \
+sophon worker complete TASK \
   --attempt ATTEMPT \
   --head-sha "$(git rev-parse HEAD)" \
-  --result .parallel-intellect-result.json
+  --result .sophon-result.json
 ```
 
 Do not amend, reset, or make further changes after submitting completion unless the commander returns the same task for follow-up through the control plane.

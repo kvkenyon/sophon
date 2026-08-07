@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/delivery"
-	"parallel-intellect/internal/domain"
-	gitcontrol "parallel-intellect/internal/git"
-	"parallel-intellect/internal/treehouse"
+	"sophon/internal/db"
+	"sophon/internal/delivery"
+	"sophon/internal/domain"
+	gitcontrol "sophon/internal/git"
+	"sophon/internal/treehouse"
 )
 
 const (
@@ -456,7 +456,7 @@ func readyTask(t *testing.T, mode domain.DeliveryMode) (*db.Store, domain.Task, 
 		store.Close()
 		t.Fatal(err)
 	}
-	branch := "pintellect/test/attempt-1"
+	branch := "sophon/test/attempt-1"
 	task, err := store.CreateTask(ctx, "cmd_task", db.CreateTaskInput{
 		MissionID: mission.ID, Kind: domain.TaskImplementation, Title: "Delivery task",
 		Objective: "Create exactly one pull request", DeliveryMode: mode, Branch: branch,

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"parallel-intellect/internal/domain"
+	"sophon/internal/domain"
 )
 
 func TestPipelineCacheKeyDimensions(t *testing.T) {

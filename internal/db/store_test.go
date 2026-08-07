@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"parallel-intellect/internal/domain"
+	"sophon/internal/domain"
 )
 
 func TestCreateMissionPersistsVerbatimIntakeOperatorMessage(t *testing.T) {

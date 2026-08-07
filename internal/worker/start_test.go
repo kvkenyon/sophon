@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/herdr"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	"sophon/internal/herdr"
 )
 
 type recordingAcquirer struct {
@@ -83,7 +83,7 @@ func TestStarterRunsMissionTaskLeaseBriefHerdrSlice(t *testing.T) {
 		t.Fatal(err)
 	}
 	acquirer := &recordingAcquirer{store: store, lease: domain.TreehouseLease{
-		LeaseID: "lease-start", LeaseHolder: "parallel-intellect:" + string(task.ID) + ":1",
+		LeaseID: "lease-start", LeaseHolder: "sophon:" + string(task.ID) + ":1",
 		WorktreePath: "/worktrees/start", Project: "project", Branch: "task/start",
 		BaseSHA: "0123456789abcdef0123456789abcdef01234567",
 	}}
@@ -124,8 +124,8 @@ func TestLaunchRecoveryErrorExplainsRetry(t *testing.T) {
 	message := launchRecoveryError(taskID).Error()
 	for _, want := range []string{
 		"marked needs_attention by recovery",
-		"pintellect task retry tsk_recovery_race",
-		"pintellect task start tsk_recovery_race",
+		"sophon task retry tsk_recovery_race",
+		"sophon task start tsk_recovery_race",
 	} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("launch recovery error %q omits %q", message, want)
@@ -159,7 +159,7 @@ func TestStarterExplainsPathologicalRecoveryEscalation(t *testing.T) {
 		t.Fatal(err)
 	}
 	acquirer := &recordingAcquirer{store: store, lease: domain.TreehouseLease{
-		LeaseID: "lease-race", LeaseHolder: "parallel-intellect:" + string(task.ID) + ":1",
+		LeaseID: "lease-race", LeaseHolder: "sophon:" + string(task.ID) + ":1",
 		WorktreePath: "/worktrees/race", Project: "project", Branch: "task/race",
 		BaseSHA: "0123456789abcdef0123456789abcdef01234567",
 	}}
@@ -183,7 +183,7 @@ func TestStarterExplainsPathologicalRecoveryEscalation(t *testing.T) {
 
 	_, err = starter.Start(ctx, task.ID)
 	if err == nil || !strings.Contains(err.Error(), "marked needs_attention by recovery") ||
-		!strings.Contains(err.Error(), "pintellect task retry "+string(task.ID)) {
+		!strings.Contains(err.Error(), "sophon task retry "+string(task.ID)) {
 		t.Fatalf("pathological recovery error = %v", err)
 	}
 }

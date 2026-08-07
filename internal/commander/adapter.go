@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/herdr"
+	"sophon/internal/domain"
+	"sophon/internal/herdr"
 )
 
 type State string

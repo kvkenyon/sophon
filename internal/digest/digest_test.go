@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"parallel-intellect/internal/domain"
+	"sophon/internal/domain"
 )
 
 func TestRenderRegeneratesSemanticIndexFromSyntheticEventStream(t *testing.T) {

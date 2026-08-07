@@ -11,23 +11,23 @@ import (
 	"strings"
 	"time"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/delivery"
-	"parallel-intellect/internal/domain"
-	gitcontrol "parallel-intellect/internal/git"
-	"parallel-intellect/internal/herdr"
-	"parallel-intellect/internal/id"
-	statusview "parallel-intellect/internal/status"
-	"parallel-intellect/internal/treehouse"
-	validationcore "parallel-intellect/internal/validation"
-	"parallel-intellect/internal/worker"
+	"sophon/internal/db"
+	"sophon/internal/delivery"
+	"sophon/internal/domain"
+	gitcontrol "sophon/internal/git"
+	"sophon/internal/herdr"
+	"sophon/internal/id"
+	statusview "sophon/internal/status"
+	"sophon/internal/treehouse"
+	validationcore "sophon/internal/validation"
+	"sophon/internal/worker"
 )
 
 const version = "0.3.0-m3"
 
 func main() {
 	if err := run(context.Background(), os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "pintellect:", err)
+		fmt.Fprintln(os.Stderr, "sophon:", err)
 		os.Exit(exitCode(err))
 	}
 }
@@ -120,7 +120,7 @@ func mission(ctx context.Context, args []string) error {
 	if len(args) >= 2 && args[0] == "cancel" {
 		return missionCancel(ctx, domain.MissionID(args[1]), args[2:])
 	}
-	return errors.New("expected: pintellect mission list|create|timeline|digest|cancel")
+	return errors.New("expected: sophon mission list|create|timeline|digest|cancel")
 }
 
 type missionListItem struct {
@@ -201,7 +201,7 @@ func missionCancel(ctx context.Context, missionID domain.MissionID, args []strin
 	treehouseBinary := flags.String("treehouse", "treehouse", "Treehouse CLI binary")
 	herdrBinary := flags.String("herdr", "herdr", "Herdr CLI binary")
 	herdrSession := flags.String("herdr-session", "default", "explicit Herdr session name")
-	herdrWorkspace := flags.String("herdr-workspace-label", "pintellect", "Herdr workspace presentation label")
+	herdrWorkspace := flags.String("herdr-workspace-label", "sophon", "Herdr workspace presentation label")
 	commandValue := flags.String("command-id", "", "idempotency command ID")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -417,7 +417,7 @@ func task(ctx context.Context, args []string) error {
 	if len(args) >= 2 && args[0] == "timeline" {
 		return timeline(ctx, "task", args[1], args[2:])
 	}
-	return errors.New("expected: pintellect task create MISSION|start TASK|retry TASK|cancel TASK|validate TASK|deliver TASK|release TASK|timeline TASK")
+	return errors.New("expected: sophon task create MISSION|start TASK|retry TASK|cancel TASK|validate TASK|deliver TASK|release TASK|timeline TASK")
 }
 
 func taskDeliver(ctx context.Context, taskID domain.TaskID, args []string) error {
@@ -519,7 +519,7 @@ func taskCancel(ctx context.Context, taskID domain.TaskID, args []string) error 
 	treehouseBinary := flags.String("treehouse", "treehouse", "Treehouse CLI binary")
 	herdrBinary := flags.String("herdr", "herdr", "Herdr CLI binary")
 	herdrSession := flags.String("herdr-session", "default", "explicit Herdr session name")
-	herdrWorkspace := flags.String("herdr-workspace-label", "pintellect", "Herdr workspace presentation label")
+	herdrWorkspace := flags.String("herdr-workspace-label", "sophon", "Herdr workspace presentation label")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -588,7 +588,7 @@ func taskStart(ctx context.Context, taskID domain.TaskID, args []string) error {
 	treehouseBinary := flags.String("treehouse", "treehouse", "Treehouse CLI binary")
 	herdrBinary := flags.String("herdr", "herdr", "Herdr CLI binary")
 	herdrSession := flags.String("herdr-session", "default", "explicit Herdr session name")
-	herdrWorkspace := flags.String("herdr-workspace-label", "pintellect", "Herdr workspace presentation label")
+	herdrWorkspace := flags.String("herdr-workspace-label", "sophon", "Herdr workspace presentation label")
 	taskFiles := flags.String("task-files", "", "task artifact base directory")
 	maxWorkerRuntime := flags.Duration("max-worker-runtime", 0, "maximum worker runtime (0 is unlimited)")
 	maxWorkerRestarts := flags.Int("max-worker-restarts", 0, "maximum worker restarts (0 is unlimited)")
@@ -698,7 +698,7 @@ func workerCommand(ctx context.Context, args []string) error {
 	if len(args) >= 2 && args[0] == "complete" {
 		return workerComplete(ctx, domain.TaskID(args[1]), args[2:])
 	}
-	return errors.New("expected: pintellect worker inspect TASK [--attempt N] [--db PATH] [--json]|complete TASK --attempt N --head-sha SHA --result FILE")
+	return errors.New("expected: sophon worker inspect TASK [--attempt N] [--db PATH] [--json]|complete TASK --attempt N --head-sha SHA --result FILE")
 }
 
 func workerInspect(ctx context.Context, taskID domain.TaskID, args []string) error {
@@ -845,37 +845,37 @@ func criteriaValues(values []string) []domain.Criterion {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `Usage:
-  pintellect init [--db PATH]
-  pintellect home [--agent codex|claude] [--db PATH]
-  pintellect status --mission ID [--db PATH] [--json]
-  pintellect wait --mission ID [--timeout DURATION] [--after-seq N] [--db PATH]
-  pintellect project add PATH [--name NAME] [--db PATH] [--json]
-  pintellect project list [--db PATH] [--json]
-  pintellect project inspect NAME [--db PATH] [--json]
-  pintellect mission create --project PATH --title TITLE --objective OBJECTIVE [--acceptance TEXT]
-  pintellect mission list [--db PATH] [--json]
-  pintellect mission cancel ID [--db PATH] [--json]
-  pintellect task create MISSION --title TITLE --objective OBJECTIVE [--acceptance TEXT]
-  pintellect task start TASK [--herdr-session NAME] [--db PATH]
-  pintellect task retry TASK [--db PATH]
-  pintellect task cancel TASK [--herdr-session NAME] [--db PATH]
-  pintellect task validate TASK --unit-test COMMAND [--typecheck COMMAND] [--lint COMMAND] [--project-validation COMMAND]
-  pintellect task deliver TASK [--command-id ID] [--base BRANCH] [--db PATH]
-  pintellect task release TASK [--command-id ID] [--db PATH]
-  pintellect worker complete TASK --attempt N --head-sha SHA --result FILE [--db PATH]
-  pintellect worker inspect TASK [--attempt N] [--db PATH] [--json]
-  pintellect task|mission timeline ID [--db PATH] [--json]
-  pintellect signal raise --mission ID --question TEXT [--task ID] [--kind KIND] [--context TEXT] [--recommendation TEXT] [--command-id ID] [--db PATH] [--json]
-  pintellect signal list [--mission ID] [--status STATUS] [--db PATH] [--json]
-  pintellect signal inspect <id> [--db PATH] [--json]
-  pintellect signal resolve <id> --answer ANSWER [--command-id ID] [--db PATH] [--json]
-  pintellect commander start --agent pi|claude|codex --mission ID [--herdr-session NAME] [--max-turns N] [--max-duration DURATION]
-  pintellect commander renew [--session ID] [--mission ID] [--max-turns N] [--max-duration DURATION] [--command-id ID]
-  pintellect commander prompt|steer|follow-up MESSAGE [--mission ID]
-  pintellect commander attach|status [--mission ID]
-  pintellect daemon status|start|stop|restart [--db PATH]
-  pintellect knowledge list [--status candidate|active] [--db PATH] [--json]
-  pintellect knowledge promote|reject ID [--db PATH]
-  pintellect knowledge supersede ID --by REPLACEMENT [--db PATH]
-  pintellect version`)
+  sophon init [--db PATH]
+  sophon home [--agent codex|claude] [--db PATH]
+  sophon status --mission ID [--db PATH] [--json]
+  sophon wait --mission ID [--timeout DURATION] [--after-seq N] [--db PATH]
+  sophon project add PATH [--name NAME] [--db PATH] [--json]
+  sophon project list [--db PATH] [--json]
+  sophon project inspect NAME [--db PATH] [--json]
+  sophon mission create --project PATH --title TITLE --objective OBJECTIVE [--acceptance TEXT]
+  sophon mission list [--db PATH] [--json]
+  sophon mission cancel ID [--db PATH] [--json]
+  sophon task create MISSION --title TITLE --objective OBJECTIVE [--acceptance TEXT]
+  sophon task start TASK [--herdr-session NAME] [--db PATH]
+  sophon task retry TASK [--db PATH]
+  sophon task cancel TASK [--herdr-session NAME] [--db PATH]
+  sophon task validate TASK --unit-test COMMAND [--typecheck COMMAND] [--lint COMMAND] [--project-validation COMMAND]
+  sophon task deliver TASK [--command-id ID] [--base BRANCH] [--db PATH]
+  sophon task release TASK [--command-id ID] [--db PATH]
+  sophon worker complete TASK --attempt N --head-sha SHA --result FILE [--db PATH]
+  sophon worker inspect TASK [--attempt N] [--db PATH] [--json]
+  sophon task|mission timeline ID [--db PATH] [--json]
+  sophon signal raise --mission ID --question TEXT [--task ID] [--kind KIND] [--context TEXT] [--recommendation TEXT] [--command-id ID] [--db PATH] [--json]
+  sophon signal list [--mission ID] [--status STATUS] [--db PATH] [--json]
+  sophon signal inspect <id> [--db PATH] [--json]
+  sophon signal resolve <id> --answer ANSWER [--command-id ID] [--db PATH] [--json]
+  sophon commander start --agent pi|claude|codex --mission ID [--herdr-session NAME] [--max-turns N] [--max-duration DURATION]
+  sophon commander renew [--session ID] [--mission ID] [--max-turns N] [--max-duration DURATION] [--command-id ID]
+  sophon commander prompt|steer|follow-up MESSAGE [--mission ID]
+  sophon commander attach|status [--mission ID]
+  sophon daemon status|start|stop|restart [--db PATH]
+  sophon knowledge list [--status candidate|active] [--db PATH] [--json]
+  sophon knowledge promote|reject ID [--db PATH]
+  sophon knowledge supersede ID --by REPLACEMENT [--db PATH]
+  sophon version`)
 }

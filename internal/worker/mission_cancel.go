@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
+	"sophon/internal/db"
+	"sophon/internal/domain"
 )
 
 // MissionCanceller coordinates the durable mission fence with the existing

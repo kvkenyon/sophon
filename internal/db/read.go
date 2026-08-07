@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"parallel-intellect/internal/domain"
+	"sophon/internal/domain"
 )
 
 const missionSelect = `SELECT id, project_id, commander_session_id, title, objective, acceptance_criteria_json,

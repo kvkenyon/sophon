@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"parallel-intellect/internal/domain"
+	"sophon/internal/domain"
 )
 
 func TestStateMachineLegalPaths(t *testing.T) {

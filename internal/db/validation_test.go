@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/validation"
+	"sophon/internal/domain"
+	"sophon/internal/validation"
 )
 
 func TestValidationRunPersistsArtifactAndPassedEvents(t *testing.T) {

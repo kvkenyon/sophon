@@ -1,4 +1,4 @@
-// Package prompts provides the runtime prompt sets shipped with pintellect.
+// Package prompts provides the runtime prompt sets shipped with sophon.
 package prompts
 
 import (
@@ -12,7 +12,11 @@ import (
 	"strings"
 )
 
-const OverrideEnv = "PINTELLECT_PROMPT_DIR"
+const (
+	OverrideEnv = "SOPHON_PROMPT_DIR"
+	// LegacyOverrideEnv remains readable for one-step upgrades. New values win.
+	LegacyOverrideEnv = "PINTELLECT_PROMPT_DIR"
+)
 
 // CommanderSkills are available to a project commander. WorkerSkills are the
 // deliberately smaller subset that applies to an implementation attempt.
@@ -31,13 +35,13 @@ var (
 var Embedded embed.FS
 
 // Set returns a filesystem and root for a runtime prompt set. During
-// development, PINTELLECT_PROMPT_DIR may point to a checkout's prompts
+// development, SOPHON_PROMPT_DIR may point to a checkout's prompts
 // directory; otherwise it reads the prompt set compiled into the binary.
 func Set(name string) (fs.FS, string, error) {
 	if !isRuntimeSet(name) {
 		return nil, "", fmt.Errorf("unknown runtime prompt set %q", name)
 	}
-	if root := strings.TrimSpace(os.Getenv(OverrideEnv)); root != "" {
+	if root := overrideRoot(); root != "" {
 		dir := filepath.Join(root, name)
 		info, err := os.Stat(dir)
 		if err != nil {
@@ -122,7 +126,7 @@ func skillSet() (fs.FS, string, error) {
 	// Development prompt overrides commonly contain only the edited commander or
 	// worker overlay. Skills remain available from the embedded release set until
 	// the override supplies a complete skills directory.
-	if root := strings.TrimSpace(os.Getenv(OverrideEnv)); root != "" {
+	if root := overrideRoot(); root != "" {
 		candidate := filepath.Join(root, "skills")
 		info, err := os.Stat(candidate)
 		if err == nil {
@@ -136,6 +140,13 @@ func skillSet() (fs.FS, string, error) {
 		}
 	}
 	return Embedded, "skills", nil
+}
+
+func overrideRoot() string {
+	if root := strings.TrimSpace(os.Getenv(OverrideEnv)); root != "" {
+		return root
+	}
+	return strings.TrimSpace(os.Getenv(LegacyOverrideEnv))
 }
 
 func knownSkill(name string) bool {

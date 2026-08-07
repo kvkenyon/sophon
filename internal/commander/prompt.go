@@ -10,9 +10,10 @@ import (
 	"sort"
 	"strings"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	runtimeprompts "parallel-intellect/prompts"
+	"sophon/internal/datahome"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	runtimeprompts "sophon/prompts"
 )
 
 type PromptComposer struct {
@@ -21,7 +22,7 @@ type PromptComposer struct {
 	Dir        string
 	InstallDir string
 	// SkillBaseDir overrides the parent directory for per-session skills.
-	// Production defaults to ~/.parallel-intellect/skills.
+	// Production defaults to ~/.sophon/skills.
 	SkillBaseDir string
 }
 
@@ -120,7 +121,7 @@ Greet the operator briefly and ask what we are working on. After the operator
 describes the task in natural language, infer a concise title, a concrete
 objective, and sensible acceptance criteria. Then run:
 
-    pintellect mission create --project %q --title <title> --objective <objective> --operator-message <verbatim-operator-words> --acceptance <criterion>%s
+    sophon mission create --project %q --title <title> --objective <objective> --operator-message <verbatim-operator-words> --acceptance <criterion>%s
 
 Use repeated --acceptance arguments when useful. Read the returned mission ID,
 treat it as your bound mission, and proceed to execute it through the existing
@@ -139,11 +140,11 @@ func (c PromptComposer) MaterializeSkills(sessionID domain.SessionID) (string, e
 	}
 	base := c.SkillBaseDir
 	if base == "" {
-		home, err := os.UserHomeDir()
+		location, err := datahome.Resolve()
 		if err != nil {
 			return "", fmt.Errorf("resolve home directory: %w", err)
 		}
-		base = filepath.Join(home, ".parallel-intellect", "skills")
+		base = filepath.Join(location.Dir, "skills")
 	}
 	dir, err := filepath.Abs(filepath.Join(base, "commander", string(sessionID)))
 	if err != nil {

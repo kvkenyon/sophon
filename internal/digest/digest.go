@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"parallel-intellect/internal/domain"
-	signalpolicy "parallel-intellect/internal/signals"
+	"sophon/internal/domain"
+	signalpolicy "sophon/internal/signals"
 )
 
 type Artifact struct {

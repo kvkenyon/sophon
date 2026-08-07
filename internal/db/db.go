@@ -15,8 +15,9 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/migrations"
+	"sophon/internal/datahome"
+	"sophon/internal/domain"
+	"sophon/migrations"
 )
 
 type Store struct {
@@ -27,11 +28,11 @@ type Store struct {
 // embedded forward-only migrations. The path may be ":memory:" for tests.
 func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
-		home, err := os.UserHomeDir()
+		location, err := datahome.Resolve()
 		if err != nil {
 			return nil, fmt.Errorf("resolve control-plane home: %w", err)
 		}
-		path = filepath.Join(home, ".parallel-intellect", "pintellect.db")
+		path = location.DatabasePath()
 	}
 	if path != ":memory:" {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

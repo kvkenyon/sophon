@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"parallel-intellect/internal/domain"
+	"sophon/internal/domain"
 )
 
 var ErrIllegalTransition = errors.New("illegal commander-session state transition")

@@ -55,7 +55,7 @@ State these five elements concisely and evidence-first:
 4. the concrete consequences of accepting and declining; and
 5. a recommendation tied to accepted intent.
 
-If operator authority is required, create or reuse the durable Signal with `pintellect signal raise --mission ID --task ID --kind decision --question TEXT --context TEXT --recommendation TEXT --command-id ID --json` rather than leaving the choice only in chat. Inspect a reused Signal with `pintellect signal inspect ID --json`.
+If operator authority is required, create or reuse the durable Signal with `sophon signal raise --mission ID --task ID --kind decision --question TEXT --context TEXT --recommendation TEXT --command-id ID --json` rather than leaving the choice only in chat. Inspect a reused Signal with `sophon signal inspect ID --json`.
 Do not present a review label or model confidence as if it settled authority.
 
 ## Classification examples

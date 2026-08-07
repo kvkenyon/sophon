@@ -1,6 +1,6 @@
 ---
 name: coding-guidelines
-description: Agent-only reference for changing Parallel Intellect's shared tracked behavior and prompts while preserving one-owner contracts, concise always-loaded instructions, compatibility, and verification evidence.
+description: Agent-only reference for changing Sophon's shared tracked behavior and prompts while preserving one-owner contracts, concise always-loaded instructions, compatibility, and verification evidence.
 user-invocable: false
 metadata:
   internal: true
@@ -10,7 +10,7 @@ metadata:
 
 # Coding guidelines
 
-Load this skill before changing Parallel Intellect's shared tracked behavior, prompt set, control-plane contracts, or adapter surfaces.
+Load this skill before changing Sophon's shared tracked behavior, prompt set, control-plane contracts, or adapter surfaces.
 
 ## Knowledge placement
 

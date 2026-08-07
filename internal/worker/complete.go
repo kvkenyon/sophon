@@ -13,10 +13,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	gitcontrol "parallel-intellect/internal/git"
-	"parallel-intellect/internal/treehouse"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	gitcontrol "sophon/internal/git"
+	"sophon/internal/treehouse"
 )
 
 var (

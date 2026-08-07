@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"time"
 
-	"parallel-intellect/internal/domain"
+	"sophon/internal/domain"
 )
 
 func runCommand[T any](ctx context.Context, s *Store, commandID domain.CommandID, kind string, request any, mutate func(*sql.Tx) (T, error)) (T, error) {

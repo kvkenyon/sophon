@@ -14,7 +14,7 @@ func TestVerifyCompletionRequiresNewDescendantAndCleanTree(t *testing.T) {
 	ctx := context.Background()
 	repo := t.TempDir()
 	runGit(t, repo, "init", "-b", "main")
-	runGit(t, repo, "config", "user.name", "Parallel Intellect Test")
+	runGit(t, repo, "config", "user.name", "Sophon Test")
 	runGit(t, repo, "config", "user.email", "test@example.invalid")
 	writeFile(t, filepath.Join(repo, "file.txt"), "base\n")
 	runGit(t, repo, "add", "file.txt")
@@ -46,7 +46,7 @@ func TestCreateTaskBranchAttachesDetachedWorktreeAtRecordedBase(t *testing.T) {
 	ctx := context.Background()
 	repo := t.TempDir()
 	runGit(t, repo, "init", "-b", "main")
-	runGit(t, repo, "config", "user.name", "Parallel Intellect Test")
+	runGit(t, repo, "config", "user.name", "Sophon Test")
 	runGit(t, repo, "config", "user.email", "test@example.invalid")
 	writeFile(t, filepath.Join(repo, "file.txt"), "base\n")
 	runGit(t, repo, "add", "file.txt")
@@ -54,11 +54,11 @@ func TestCreateTaskBranchAttachesDetachedWorktreeAtRecordedBase(t *testing.T) {
 	base := runGit(t, repo, "rev-parse", "HEAD")
 	runGit(t, repo, "checkout", "--detach", "HEAD")
 
-	snapshot, err := NewClient().CreateTaskBranch(ctx, repo, "pintellect/task")
+	snapshot, err := NewClient().CreateTaskBranch(ctx, repo, "sophon/task")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Head != base || snapshot.Branch != "pintellect/task" || !snapshot.Clean {
+	if snapshot.Head != base || snapshot.Branch != "sophon/task" || !snapshot.Clean {
 		t.Fatalf("snapshot = %+v", snapshot)
 	}
 	if got := runGit(t, repo, "symbolic-ref", "--short", "HEAD"); got != snapshot.Branch {
@@ -70,7 +70,7 @@ func TestVerifyCompletionRejectsUnrelatedHead(t *testing.T) {
 	ctx := context.Background()
 	repo := t.TempDir()
 	runGit(t, repo, "init", "-b", "main")
-	runGit(t, repo, "config", "user.name", "Parallel Intellect Test")
+	runGit(t, repo, "config", "user.name", "Sophon Test")
 	runGit(t, repo, "config", "user.email", "test@example.invalid")
 	writeFile(t, filepath.Join(repo, "file.txt"), "base\n")
 	runGit(t, repo, "add", "file.txt")

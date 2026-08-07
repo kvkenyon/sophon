@@ -26,7 +26,7 @@ Give the operator a concise session-only recap without gathering fresh mission s
    A later unrelated message does not resolve an earlier choice.
    Treat it as closed only when a later visible response directly answers, declines, approves, or rejects it.
    Include each supported open decision once and deduplicate by substance.
-6. Do not query Parallel Intellect, the filesystem, GitHub, a browser, or any other external source in the normal recap branch.
+6. Do not query Sophon, the filesystem, GitHub, a browser, or any other external source in the normal recap branch.
    Create no artifact and mutate no state.
    Do not guess live state beyond the last visible event.
 7. If nothing occurred after the boundary but an older visibly open decision exists, report that decision.

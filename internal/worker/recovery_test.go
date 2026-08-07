@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/herdr"
-	taskpolicy "parallel-intellect/internal/task"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	"sophon/internal/herdr"
+	taskpolicy "sophon/internal/task"
 )
 
 type recoveryHerdr struct {
@@ -325,7 +325,7 @@ func setupRunningWorker(t *testing.T) (*db.Store, domain.Task, domain.WorkerSess
 	task = recoveryTaskTransition(t, store, task, domain.TaskProvisioning, "provision")
 	_, err = store.RecordTreehouseLease(ctx, domain.CommandID("cmd_lease_"+suffix), db.RecordTreehouseLeaseInput{
 		TaskID: task.ID, Attempt: 1, ExpectedVersion: task.Version, Actor: "test",
-		Lease: domain.TreehouseLease{LeaseID: "lease-" + suffix, LeaseHolder: "parallel-intellect:" + string(task.ID) + ":1",
+		Lease: domain.TreehouseLease{LeaseID: "lease-" + suffix, LeaseHolder: "sophon:" + string(task.ID) + ":1",
 			WorktreePath: "/tmp/worktree-" + suffix, Project: "project-" + suffix,
 			Branch: "task/" + suffix, BaseSHA: "0123456789abcdef0123456789abcdef01234567"},
 	})

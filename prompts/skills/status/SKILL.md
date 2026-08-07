@@ -1,6 +1,6 @@
 ---
 name: status
-description: Fresh read-only mission snapshot for /status, a status report, catch-up, or a request to see current work; current state comes only from Parallel Intellect.
+description: Fresh read-only mission snapshot for /status, a status report, catch-up, or a request to see current work; current state comes only from Sophon.
 user-invocable: true
 metadata:
   internal: true
@@ -16,7 +16,7 @@ It never cleans up, dispatches, retries, steers, answers a decision, validates, 
 
 ## Gather
 
-Call `pintellect status [--mission ID] --json` exactly once at invocation time and use its structured result as the snapshot authority. When more than one mission exists, supply the selected mission ID; a missing mission returns the valid empty snapshot.
+Call `sophon status [--mission ID] --json` exactly once at invocation time and use its structured result as the snapshot authority. When more than one mission exists, supply the selected mission ID; a missing mission returns the valid empty snapshot.
 Do not supplement it with chat history, event prose, worker output, filesystem scanning, repository probes, or ad hoc GitHub queries.
 Use structured current state rather than interpreting the event timeline.
 Keep a dependency- or time-gated queued item in Up Next until its gate is satisfied.

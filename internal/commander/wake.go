@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
+	"sophon/internal/db"
+	"sophon/internal/domain"
 )
 
 var relevantWakeEvents = map[string]struct{}{

@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/herdr"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	"sophon/internal/herdr"
 )
 
 var ErrWorkerUnavailable = errors.New("original worker session is unavailable")

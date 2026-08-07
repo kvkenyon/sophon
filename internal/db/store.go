@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/id"
-	taskpolicy "parallel-intellect/internal/task"
+	"sophon/internal/domain"
+	"sophon/internal/id"
+	taskpolicy "sophon/internal/task"
 )
 
 type CreateProjectInput struct {

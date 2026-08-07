@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/id"
-	signalpolicy "parallel-intellect/internal/signals"
+	"sophon/internal/domain"
+	"sophon/internal/id"
+	signalpolicy "sophon/internal/signals"
 )
 
 var (

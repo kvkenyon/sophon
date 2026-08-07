@@ -13,12 +13,12 @@ import (
 	"testing"
 	"time"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/delivery"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/signals"
-	statusview "parallel-intellect/internal/status"
-	"parallel-intellect/internal/worker"
+	"sophon/internal/db"
+	"sophon/internal/delivery"
+	"sophon/internal/domain"
+	"sophon/internal/signals"
+	statusview "sophon/internal/status"
+	"sophon/internal/worker"
 )
 
 func TestCLIStatusSnapshotSectionsAndJSON(t *testing.T) {
@@ -398,7 +398,7 @@ func TestCLIOneCodexWorkerVerticalSliceWithHermeticAdapters(t *testing.T) {
 		t.Fatal(err)
 	}
 	runCLIGit(t, repo, "init", "-b", "task-slice")
-	runCLIGit(t, repo, "config", "user.name", "Parallel Intellect Test")
+	runCLIGit(t, repo, "config", "user.name", "Sophon Test")
 	runCLIGit(t, repo, "config", "user.email", "test@example.invalid")
 	writeCLIFile(t, filepath.Join(repo, "base.txt"), "base\n", 0o600)
 	runCLIGit(t, repo, "add", "base.txt")
@@ -511,7 +511,7 @@ esac
 
 func TestCLICommanderStartPromptAttachAndStatus(t *testing.T) {
 	root := t.TempDir()
-	dbPath := filepath.Join(root, "pintellect.db")
+	dbPath := filepath.Join(root, "sophon.db")
 	projectPath := filepath.Join(root, "project")
 	promptDir := filepath.Join(root, "prompts", "commander")
 	if err := os.MkdirAll(projectPath, 0o755); err != nil {
@@ -617,7 +617,7 @@ func TestCLICommanderValidation(t *testing.T) {
 		{"commander", "attach", "unexpected"},
 	} {
 		if err := run(context.Background(), args); err == nil {
-			t.Fatalf("pintellect %s unexpectedly succeeded", strings.Join(args, " "))
+			t.Fatalf("sophon %s unexpectedly succeeded", strings.Join(args, " "))
 		}
 	}
 }
@@ -636,7 +636,7 @@ func runCLI(t *testing.T, args ...string) []byte {
 	output, readErr := io.ReadAll(reader)
 	reader.Close()
 	if runErr != nil {
-		t.Fatalf("pintellect %s: %v", strings.Join(args, " "), runErr)
+		t.Fatalf("sophon %s: %v", strings.Join(args, " "), runErr)
 	}
 	if closeErr != nil || readErr != nil {
 		t.Fatalf("capture CLI output: close=%v read=%v", closeErr, readErr)

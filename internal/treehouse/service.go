@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"time"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	gitcontrol "parallel-intellect/internal/git"
-	"parallel-intellect/internal/id"
-	"parallel-intellect/internal/naming"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	gitcontrol "sophon/internal/git"
+	"sophon/internal/id"
+	"sophon/internal/naming"
 )
 
 type GitInspector interface {
@@ -24,14 +24,25 @@ type Service struct {
 	git   GitInspector
 }
 
-const TaskBranchPrefix = "pintellect/"
+const TaskBranchPrefix = "sophon/"
 
 func NewService(store *db.Store, cli CLI, git GitInspector) *Service {
 	return &Service{store: store, cli: cli, git: git}
 }
 
 func LeaseHolder(taskID domain.TaskID, attempt int) string {
+	return fmt.Sprintf("sophon:%s:%d", taskID, attempt)
+}
+
+func legacyLeaseHolder(taskID domain.TaskID, attempt int) string {
+	// Accept the former prefix only while identifying an attempt-scoped lease
+	// acquired before the rename. Once persisted, all safety checks continue to
+	// compare the exact recorded holder so a replacement lease is never touched.
 	return fmt.Sprintf("parallel-intellect:%s:%d", taskID, attempt)
+}
+
+func leaseHolderMatchesAttempt(holder string, taskID domain.TaskID, attempt int) bool {
+	return holder == LeaseHolder(taskID, attempt) || holder == legacyLeaseHolder(taskID, attempt)
 }
 
 // Acquire allocates externally, inspects Git, and then atomically persists the
@@ -273,7 +284,7 @@ func (s *Service) Reconcile(ctx context.Context) (ReconcileResult, error) {
 			var observed *WorktreeStatus
 			for index := range statuses {
 				status := &statuses[index]
-				if status.Status == "leased" && status.LeaseHolder == holder {
+				if status.Status == "leased" && leaseHolderMatchesAttempt(status.LeaseHolder, target.TaskID, target.Attempt) {
 					if observed != nil {
 						return result, fmt.Errorf("multiple Treehouse leases found for %s", holder)
 					}
@@ -305,7 +316,7 @@ func (s *Service) Reconcile(ctx context.Context) (ReconcileResult, error) {
 			}
 			if _, err := s.store.RecordTreehouseLease(ctx, commandID, db.RecordTreehouseLeaseInput{
 				TaskID: target.TaskID, Attempt: target.Attempt, ExpectedVersion: target.ExpectedVersion,
-				Lease: domain.TreehouseLease{LeaseID: observed.LeaseID, LeaseHolder: holder,
+				Lease: domain.TreehouseLease{LeaseID: observed.LeaseID, LeaseHolder: observed.LeaseHolder,
 					WorktreePath: observed.WorktreePath, Project: target.Project, Branch: branch,
 					BaseSHA: snapshot.Head, AcquiredAt: acquiredAt}, Actor: "recovery",
 			}); err != nil {

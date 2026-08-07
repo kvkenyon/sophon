@@ -9,15 +9,15 @@ import (
 	"path/filepath"
 	"strings"
 
-	commandercontrol "parallel-intellect/internal/commander"
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/herdr"
+	commandercontrol "sophon/internal/commander"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	"sophon/internal/herdr"
 )
 
 func commanderCommand(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("expected: pintellect commander start|renew|prompt|steer|follow-up|attach|status")
+		return errors.New("expected: sophon commander start|renew|prompt|steer|follow-up|attach|status")
 	}
 	switch args[0] {
 	case "start":
@@ -42,7 +42,7 @@ func commanderStart(ctx context.Context, args []string) error {
 	agent := flags.String("agent", "", "commander runtime: pi, claude, or codex")
 	herdrBinary := flags.String("herdr", "herdr", "Herdr CLI binary")
 	herdrSession := flags.String("herdr-session", "", "Herdr session name (required)")
-	herdrWorkspace := flags.String("herdr-workspace-label", "pintellect", "Herdr workspace presentation label")
+	herdrWorkspace := flags.String("herdr-workspace-label", "sophon", "Herdr workspace presentation label")
 	promptDir := flags.String("prompt-dir", "", "commander prompt directory override")
 	model := flags.String("model", "", "runtime model (required for Pi)")
 	piExtension := flags.String("pi-extension", "", "absolute Pi lifecycle extension path")
@@ -142,11 +142,11 @@ func commanderRenew(ctx context.Context, args []string) error {
 func binaryInstallDir() (string, error) {
 	executable, err := os.Executable()
 	if err != nil {
-		return "", fmt.Errorf("resolve pintellect executable: %w", err)
+		return "", fmt.Errorf("resolve sophon executable: %w", err)
 	}
 	resolved, err := filepath.EvalSymlinks(executable)
 	if err != nil {
-		return "", fmt.Errorf("resolve pintellect executable symlinks: %w", err)
+		return "", fmt.Errorf("resolve sophon executable symlinks: %w", err)
 	}
 	return filepath.Dir(resolved), nil
 }
@@ -224,7 +224,7 @@ func commanderAttach(ctx context.Context, args []string) error {
 	return encode(map[string]any{
 		"commander_session": session,
 		"attach":            attachment,
-		"prompt":            "pintellect commander prompt --mission " + string(session.MissionID) + " <message>",
+		"prompt":            "sophon commander prompt --mission " + string(session.MissionID) + " <message>",
 	})
 }
 

@@ -1,8 +1,8 @@
-# Parallel Intellect
+# Sophon
 ## Version 1 Product & Engineering Specification
 
 **Status:** Build specification  
-**Product:** Parallel Intellect  
+**Product:** Sophon<br>
 **Commander runtimes:** Pi, Claude Code, Codex<br>
 **Workers:** Pi, Claude Code, Codex  
 **Terminal runtime:** Herdr  
@@ -15,11 +15,11 @@
 
 # 1. Product definition
 
-Parallel Intellect is a local control plane for autonomous software engineering.
+Sophon is a local control plane for autonomous software engineering.
 
 A human interacts with one persistent **commander agent**. The commander understands objectives, decomposes work, delegates tasks to specialized workers, monitors progress, responds to findings, and synthesizes results.
 
-Parallel Intellect sits underneath the commander and makes multi-agent work reliable.
+Sophon sits underneath the commander and makes multi-agent work reliable.
 
 It owns:
 
@@ -40,7 +40,7 @@ It owns:
 
 Agents provide intelligence.
 
-Parallel Intellect provides authority and state.
+Sophon provides authority and state.
 
 The core principle is:
 
@@ -50,7 +50,7 @@ The core principle is:
 
 # 2. Product goal
 
-Parallel Intellect should provide the useful behavior of FirstMate while replacing its brittle shell, polling, file-state, and backend machinery with a small deterministic control plane.
+Sophon should provide the useful behavior of FirstMate while replacing its brittle shell, polling, file-state, and backend machinery with a small deterministic control plane.
 
 The desired user experience is:
 
@@ -62,7 +62,7 @@ Commander
 "Fix this bug, investigate that slowdown,
 and clean up these tests."
   ↓
-Parallel Intellect
+Sophon
   ├── Codex working on bug
   ├── Claude investigating slowdown
   └── Pi improving tests
@@ -85,7 +85,7 @@ The human should not have to manually:
 
 # 3. Design foundations
 
-Parallel Intellect combines four existing systems and a runtime-adapter boundary rather than reimplementing them.
+Sophon combines four existing systems and a runtime-adapter boundary rather than reimplementing them.
 
 ## FirstMate
 
@@ -116,9 +116,9 @@ FirstMate already contains a large behavioral contract and modular skills around
 
 ## Commander runtimes
 
-Pi, Claude Code, and Codex are co-equal commander runtimes. Parallel Intellect supplies each with a persistent, Herdr-managed session and a structured CLI/API surface for missions, tasks, signals, and recovery.
+Pi, Claude Code, and Codex are co-equal commander runtimes. Sophon supplies each with a persistent, Herdr-managed session and a structured CLI/API surface for missions, tasks, signals, and recovery.
 
-Useful concepts adopted by Parallel Intellect include:
+Useful concepts adopted by Sophon include:
 
 - persistent commander sessions;
 - programmatic orchestration over structured state;
@@ -131,19 +131,19 @@ Useful concepts adopted by Parallel Intellect include:
 
 Herdr owns runtime processes and visible terminals.
 
-Parallel Intellect should never recreate a terminal multiplexer.
+Sophon should never recreate a terminal multiplexer.
 
 ## Treehouse
 
 Treehouse owns Git worktree allocation and lease identity.
 
-Parallel Intellect never performs unmanaged `git worktree` operations.
+Sophon never performs unmanaged `git worktree` operations.
 
 ## no-mistakes
 
 no-mistakes owns the final code-quality and delivery gate.
 
-Parallel Intellect coordinates it rather than rebuilding its review loop.
+Sophon coordinates it rather than rebuilding its review loop.
 
 ---
 
@@ -156,7 +156,7 @@ Commander runtime
     │
     │ reasoning topology
     ▼
-Parallel Intellect
+Sophon
     │
     │ execution topology
     ▼
@@ -185,7 +185,7 @@ Commander
 Pi / Claude Code / Codex
   │
   ▼
-pintellectd
+sophond
   ├── mission state
   ├── task state
   ├── scheduler
@@ -661,7 +661,7 @@ Acquire:
 ```bash
 treehouse get \
   --lease \
-  --lease-holder "parallel-intellect:<task>:<attempt>" \
+  --lease-holder "sophon:<task>:<attempt>" \
   --json
 ```
 
@@ -708,7 +708,7 @@ Herdr owns:
 Recommended layout:
 
 ```text
-Parallel Intellect
+Sophon
 ├── Commander
 │   └── Pi / Claude Code / Codex
 │
@@ -721,7 +721,7 @@ Parallel Intellect
 │       └── Pi
 ```
 
-Parallel Intellect stores stable Herdr identifiers.
+Sophon stores stable Herdr identifiers.
 
 Tab names are presentation only.
 
@@ -745,7 +745,7 @@ All commander runtimes use a terminal-driven adapter through Herdr, just like wo
 
 # 19. Commander session architecture
 
-Parallel Intellect creates each commander as a Herdr-managed terminal session and persists its runtime, Herdr placement, and resumable session identity. A runtime adapter translates the common commander operations to Pi, Claude Code, or Codex.
+Sophon creates each commander as a Herdr-managed terminal session and persists its runtime, Herdr placement, and resumable session identity. A runtime adapter translates the common commander operations to Pi, Claude Code, or Codex.
 
 Conceptual interface:
 
@@ -768,7 +768,7 @@ type Commander interface {
 
 # 20. Commander control surface
 
-The `pintellect` CLI and local API are the common control surface for every commander runtime. Prompts teach commanders to query structured mission and task state, create and update work through command-idempotent operations, message workers, resolve signals, retry or cancel tasks, and request delivery.
+The `sophon` CLI and local API are the common control surface for every commander runtime. Prompts teach commanders to query structured mission and task state, create and update work through command-idempotent operations, message workers, resolve signals, retry or cancel tasks, and request delivery.
 
 Authoritative logic remains in Go. A future runtime may be added behind the commander adapter interface when it satisfies the same lifecycle and conformance requirements.
 
@@ -776,7 +776,7 @@ Authoritative logic remains in Go. A future runtime may be added behind the comm
 
 # 21. Commander reasoning boundaries
 
-Commanders may use their own reasoning tools to analyze plans, compare worker reports, inspect artifacts, critique architecture, and identify missing tests. They may not acquire Treehouse leases, alter mission or task state outside the control surface, modify registered repositories, push code, or deliver PRs. Repository-changing work always becomes a Parallel Intellect task.
+Commanders may use their own reasoning tools to analyze plans, compare worker reports, inspect artifacts, critique architecture, and identify missing tests. They may not acquire Treehouse leases, alter mission or task state outside the control surface, modify registered repositories, push code, or deliver PRs. Repository-changing work always becomes a Sophon task.
 
 ---
 
@@ -787,7 +787,7 @@ The commander should operate on structured state rather than repeatedly interpre
 Good:
 
 ```text
-pintellect task list --mission <id> --state blocked
+sophon task list --mission <id> --state blocked
 ```
 
 Bad:
@@ -833,7 +833,7 @@ coordinator = firstmate
 executor = crewmate
 ```
 
-Parallel Intellect:
+Sophon:
 
 ```text
 human = operator
@@ -843,7 +843,7 @@ executor = worker
 
 Mapping:
 
-| FirstMate | Parallel Intellect |
+| FirstMate | Sophon |
 |---|---|
 | Captain | Operator |
 | FirstMate | Commander |
@@ -973,7 +973,7 @@ generated task brief
 Common rules:
 
 ```text
-You are a Parallel Intellect worker.
+You are a Sophon worker.
 
 You own one assigned task.
 
@@ -982,7 +982,7 @@ Work only inside the assigned worktree.
 Do not:
 - create/delete worktrees;
 - push or merge without the delivery system;
-- change Parallel Intellect task state directly;
+- change Sophon task state directly;
 - contact the operator directly;
 - expand product scope silently;
 - destroy existing work;
@@ -1004,7 +1004,7 @@ When complete:
 Generated path:
 
 ```text
-~/.parallel-intellect/tasks/<task>/<attempt>/brief.md
+~/.sophon/tasks/<task>/<attempt>/brief.md
 ```
 
 Contains:
@@ -1032,10 +1032,10 @@ Contains:
 Implementation worker:
 
 ```bash
-pintellect worker complete TASK \
+sophon worker complete TASK \
   --attempt 1 \
   --head-sha "$(git rev-parse HEAD)" \
-  --result .parallel-intellect-result.json
+  --result .sophon-result.json
 ```
 
 Result:
@@ -1080,7 +1080,7 @@ result valid
 # 30. Structured blockers
 
 ```bash
-pintellect worker block TASK \
+sophon worker block TASK \
   --attempt 1 \
   --kind decision \
   --message blocker.md
@@ -1251,7 +1251,7 @@ Do not spawn a fresh worker unless:
 
 # 35. Forgotten completion recovery
 
-If Herdr reports worker idle but Parallel Intellect lacks a structured outcome:
+If Herdr reports worker idle but Sophon lacks a structured outcome:
 
 1. wait stabilization delay;
 2. check for completion/failure/blocker;
@@ -1350,8 +1350,8 @@ Events are durable history.
 CLI:
 
 ```bash
-pintellect task timeline <id>
-pintellect mission timeline <id>
+sophon task timeline <id>
+sophon mission timeline <id>
 ```
 
 ---
@@ -1534,7 +1534,7 @@ No autonomous mutation of critical policy.
 
 # 42. Self-improvement boundary
 
-Parallel Intellect must never learn to weaken its own authority rules.
+Sophon must never learn to weaken its own authority rules.
 
 The following cannot be modified through learned behavior:
 
@@ -1580,7 +1580,7 @@ Every message becomes an event.
 Conceptual API:
 
 ```python
-await intellect.message_worker(
+await sophon.message_worker(
     task_id,
     "Review identified a missing transaction retry case."
 )
@@ -1589,7 +1589,7 @@ await intellect.message_worker(
 Future:
 
 ```python
-await intellect.message_task(
+await sophon.message_task(
     from_task=a,
     to_task=b,
     message="Are you changing InvitationStatus names?"
@@ -1898,68 +1898,74 @@ Resume from independently verified external state.
 Binary:
 
 ```text
-pintellect
+sophon
 ```
 
 Daemon:
 
 ```text
-pintellectd
+sophond
+```
+
+Local state defaults to `~/.sophon`. For compatibility, when that directory is absent and `~/.parallel-intellect` exists, all state remains in the legacy directory and retains its legacy database and daemon filenames. The one-step migration is:
+
+```bash
+mv ~/.parallel-intellect ~/.sophon
 ```
 
 Setup:
 
 ```bash
-pintellect init
-pintellect doctor
+sophon init
+sophon doctor
 ```
 
 Projects:
 
 ```bash
-pintellect project add .
-pintellect project list
-pintellect project inspect hifive
+sophon project add .
+sophon project list
+sophon project inspect hifive
 ```
 
 Commander:
 
 ```bash
-pintellect commander start --agent codex
-pintellect commander attach
-pintellect commander status
+sophon commander start --agent codex
+sophon commander attach
+sophon commander status
 ```
 
 Missions:
 
 ```bash
-pintellect mission list
-pintellect mission inspect <id>
-pintellect mission timeline <id>
-pintellect mission cancel <id>
+sophon mission list
+sophon mission inspect <id>
+sophon mission timeline <id>
+sophon mission cancel <id>
 ```
 
 Tasks:
 
 ```bash
-pintellect task list
-pintellect task inspect <id>
-pintellect task timeline <id>
+sophon task list
+sophon task inspect <id>
+sophon task timeline <id>
 
-pintellect task retry <id>
-pintellect task cancel <id>
+sophon task retry <id>
+sophon task cancel <id>
 
-pintellect task prompt <id> --file message.md
-pintellect task deliver <id>
-pintellect task release <id>
+sophon task prompt <id> --file message.md
+sophon task deliver <id>
+sophon task release <id>
 ```
 
 Signals:
 
 ```bash
-pintellect signal list
-pintellect signal inspect <id>
-pintellect signal resolve <id>
+sophon signal list
+sophon signal inspect <id>
+sophon signal resolve <id>
 ```
 
 All commands support:
@@ -1996,7 +2002,7 @@ Underway
 Up Next
 ```
 
-Current state comes from Parallel Intellect, never chat history. FirstMate's Bearings similarly distinguishes action-required, completed, active, and queued work using structured state. 
+Current state comes from Sophon, never chat history. FirstMate's Bearings similarly distinguishes action-required, completed, active, and queued work using structured state.
 
 ## `/recap`
 
@@ -2051,7 +2057,7 @@ delivery duration
 
 # 55. Security model
 
-Parallel Intellect is a coordinator, not a sandbox.
+Sophon is a coordinator, not a sandbox.
 
 Workers and commanders can execute local code under user permissions.
 
@@ -2179,7 +2185,7 @@ PR created
 
 # 58. Crash injection
 
-Kill `pintellectd`:
+Kill `sophond`:
 
 ```text
 before lease
@@ -2235,10 +2241,10 @@ All listed commander/worker combinations are supported.
 # 60. Repository layout
 
 ```text
-parallel-intellect/
+sophon/
 ├── cmd/
-│   ├── pintellect/
-│   └── pintellectd/
+│   ├── sophon/
+│   └── sophond/
 │
 ├── internal/
 │   ├── commander/
@@ -2417,7 +2423,7 @@ worker-recovery
 project-management
 ```
 
-Mechanisms call structured Parallel Intellect APIs.
+Mechanisms call structured Sophon APIs.
 
 ---
 
@@ -2492,21 +2498,21 @@ Codex commander:
 
 1. creates a scout or implementation task;
 2. chooses Codex;
-3. Parallel Intellect acquires a Treehouse lease;
+3. Sophon acquires a Treehouse lease;
 4. Herdr starts Codex;
 5. Codex identifies and fixes the race;
 6. Codex commits;
 7. Codex sends structured completion;
-8. Parallel Intellect verifies SHA and lease;
+8. Sophon verifies SHA and lease;
 9. commander creates a review task for Claude;
 10. Claude identifies a missing concurrency test;
-11. Parallel Intellect wakes the original Codex worker;
+11. Sophon wakes the original Codex worker;
 12. Codex adds the test;
 13. only changed validation is rerun;
 14. no-mistakes runs;
 15. no-mistakes passes;
 16. PR is created;
-17. Parallel Intellect records exact PR + SHA;
+17. Sophon records exact PR + SHA;
 18. worker becomes idle/inactive;
 19. mission becomes completed;
 20. Codex presents the operator with:
@@ -2516,13 +2522,13 @@ Codex commander:
     - PR URL;
     - remaining risk.
 
-During this entire sequence, restart `pintellectd` once.
+During this entire sequence, restart `sophond` once.
 
 The outcome must be identical.
 
 ---
 
-# 63. What makes Parallel Intellect different
+# 63. What makes Sophon different
 
 The product is not:
 
@@ -2542,7 +2548,7 @@ when to seek another opinion
 how to synthesize findings
 ```
 
-Parallel Intellect deterministically decides:
+Sophon deterministically decides:
 
 ```text
 what task exists
@@ -2562,7 +2568,7 @@ That boundary is the product.
 
 # 64. V1 product statement
 
-**Parallel Intellect coordinates multiple coding agents as one reliable engineering system.**
+**Sophon coordinates multiple coding agents as one reliable engineering system.**
 
 The commander agent provides persistent high-level reasoning; Pi, Claude Code, and Codex are supported as co-equal commander runtimes and durable specialist workers.
 
@@ -2572,7 +2578,7 @@ Treehouse gives every task isolated Git state.
 
 no-mistakes verifies the final result.
 
-Parallel Intellect owns the durable execution graph connecting them.
+Sophon owns the durable execution graph connecting them.
 
 The objective is not maximum agent autonomy.
 

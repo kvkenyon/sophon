@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"time"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/delivery"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/id"
-	taskpolicy "parallel-intellect/internal/task"
-	"parallel-intellect/internal/treehouse"
-	"parallel-intellect/internal/worker"
+	"sophon/internal/db"
+	"sophon/internal/delivery"
+	"sophon/internal/domain"
+	"sophon/internal/id"
+	taskpolicy "sophon/internal/task"
+	"sophon/internal/treehouse"
+	"sophon/internal/worker"
 )
 
 type Outcome string

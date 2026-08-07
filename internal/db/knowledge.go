@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/id"
-	"parallel-intellect/internal/knowledge"
+	"sophon/internal/domain"
+	"sophon/internal/id"
+	"sophon/internal/knowledge"
 )
 
 type ProposeKnowledgeInput struct {

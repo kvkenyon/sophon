@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/id"
-	taskpolicy "parallel-intellect/internal/task"
-	"parallel-intellect/internal/validation"
+	"sophon/internal/domain"
+	"sophon/internal/id"
+	taskpolicy "sophon/internal/task"
+	"sophon/internal/validation"
 )
 
 func (s *Store) LookupValidation(ctx context.Context, key validation.Key) (*validation.Record, error) {

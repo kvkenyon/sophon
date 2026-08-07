@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"parallel-intellect/internal/delivery"
-	"parallel-intellect/internal/domain"
-	taskpolicy "parallel-intellect/internal/task"
+	"sophon/internal/delivery"
+	"sophon/internal/domain"
+	taskpolicy "sophon/internal/task"
 )
 
 const deliverySelect = `SELECT task_id, attempt, mode, repository, branch, head_sha,

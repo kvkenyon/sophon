@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/knowledge"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	"sophon/internal/knowledge"
 )
 
 func TestDetectHerdrSessionMatrix(t *testing.T) {
@@ -89,7 +89,7 @@ func TestCLIHomeFromRepositoryStartsIntakeAndReattachesIdempotently(t *testing.T
 	}
 	runCLIGit(t, projectPath, "init")
 	writeCLIFile(t, filepath.Join(projectPath, "prompts", "commander", "AGENTS.md"), "PROJECT COMMANDER PROMPT\n", 0o600)
-	dbPath := filepath.Join(root, "pintellect.db")
+	dbPath := filepath.Join(root, "sophon.db")
 
 	callLog := filepath.Join(root, "herdr.calls")
 	deadPane := filepath.Join(root, "commander-pane-dead")
@@ -126,7 +126,7 @@ esac
 	t.Setenv("HERDR_CLIENT_SOCKET_PATH", "")
 
 	output := string(runCLI(t, "home", "--db", dbPath, "--herdr", herdrBinary))
-	if !strings.Contains(output, "Warning: pintellectd is not running; wake routing is unavailable. Start it with: pintellect daemon start") || !strings.Contains(output, "intake mode") || !strings.Contains(output, "attached home commander") {
+	if !strings.Contains(output, "Warning: sophond is not running; wake routing is unavailable. Start it with: sophon daemon start") || !strings.Contains(output, "intake mode") || !strings.Contains(output, "attached home commander") {
 		t.Fatalf("first home output:\n%s", output)
 	}
 	output = string(runCLI(t, "home", "--db", dbPath, "--herdr", herdrBinary))

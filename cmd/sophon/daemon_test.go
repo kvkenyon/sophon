@@ -18,7 +18,7 @@ func TestDaemonLifecycleUsesRecordedPIDOnly(t *testing.T) {
 	if err := daemonStatus(paths); exitCode(err) != daemonNotRunningExitCode {
 		t.Fatalf("initial status = %v", err)
 	}
-	binary := filepath.Join(t.TempDir(), "fake-pintellectd")
+	binary := filepath.Join(t.TempDir(), "fake-sophond")
 	writeCLIFile(t, binary, `#!/bin/sh
 set -eu
 health=""
@@ -40,7 +40,7 @@ while :; do sleep 1; done
 	if err := daemonStart(paths, "", binary); err == nil || !strings.Contains(err.Error(), "already running") {
 		t.Fatalf("double start error = %v", err)
 	}
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(3 * time.Second)
 	for {
 		if _, err := os.Stat(paths.health); err == nil {
 			break
@@ -82,5 +82,23 @@ while :; do sleep 1; done
 
 	if err := run(context.Background(), []string{"daemon", "stop"}); exitCode(err) != daemonNotRunningExitCode {
 		t.Fatalf("unrecorded stop = %v", err)
+	}
+}
+
+func TestCurrentDaemonPathsUseLegacyNamesWithLegacyDataDirectory(t *testing.T) {
+	home := t.TempDir()
+	legacy := filepath.Join(home, ".parallel-intellect")
+	if err := os.Mkdir(legacy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	paths, err := currentDaemonPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paths.pid != filepath.Join(legacy, "pintellectd.pid") ||
+		paths.log != filepath.Join(legacy, "pintellectd.log") ||
+		paths.health != filepath.Join(legacy, "pintellectd.health.json") {
+		t.Fatalf("legacy daemon paths = %+v", paths)
 	}
 }

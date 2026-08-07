@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/herdr"
-	taskpolicy "parallel-intellect/internal/task"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	"sophon/internal/herdr"
+	taskpolicy "sophon/internal/task"
 )
 
 const DefaultRecoveryPrompt = "Your Herdr session became idle without a structured task outcome. Re-check the current attempt and write its structured completion, failure, or blocker artifact. Terminal prose is not an outcome."

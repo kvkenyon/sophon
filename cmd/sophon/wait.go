@@ -9,8 +9,8 @@ import (
 	"os"
 	"time"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
+	"sophon/internal/db"
+	"sophon/internal/domain"
 )
 
 const waitPollInterval = 100 * time.Millisecond

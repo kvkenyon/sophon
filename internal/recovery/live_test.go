@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/herdr"
-	"parallel-intellect/internal/worker"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	"sophon/internal/herdr"
+	"sophon/internal/worker"
 )
 
 type recoveryLabRunner struct {
@@ -40,8 +40,8 @@ func (r recoveryLabRunner) Run(ctx context.Context, args ...string) ([]byte, []b
 // HERDR_LAB_PROVISIONED=1; every non-lifecycle call is routed through helper
 // run, including calls made by the production adapter.
 func TestRealHerdrRestartReconciliation(t *testing.T) {
-	if os.Getenv("PARALLEL_INTELLECT_RECOVERY_SMOKE") != "1" {
-		t.Skip("set PARALLEL_INTELLECT_RECOVERY_SMOKE=1 inside the guarded crash suite")
+	if os.Getenv("SOPHON_RECOVERY_SMOKE") != "1" {
+		t.Skip("set SOPHON_RECOVERY_SMOKE=1 inside the guarded crash suite")
 	}
 	helper := strings.TrimSpace(os.Getenv("HERDR_LAB_HELPER"))
 	sessionName := strings.TrimSpace(os.Getenv("HERDR_LAB_SESSION"))
@@ -90,7 +90,7 @@ func TestRealHerdrRestartReconciliation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	branch := "pintellect/m11-live/attempt-1"
+	branch := "sophon/m11-live/attempt-1"
 	_, err = store.RecordTreehouseLease(context.Background(), "cmd_m11_live_lease", db.RecordTreehouseLeaseInput{
 		TaskID: task.ID, Attempt: 1, ExpectedVersion: task.Version, Actor: "test",
 		Lease: domain.TreehouseLease{LeaseID: "lease-m11-live", LeaseHolder: "holder-m11-live",

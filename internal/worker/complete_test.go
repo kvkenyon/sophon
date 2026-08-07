@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	gitcontrol "parallel-intellect/internal/git"
-	"parallel-intellect/internal/treehouse"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	gitcontrol "sophon/internal/git"
+	"sophon/internal/treehouse"
 )
 
 type completionFixture struct {
@@ -221,7 +221,7 @@ func newCompletionFixture(t *testing.T, newCommit bool) completionFixture {
 		t.Fatal(err)
 	}
 	runTestGit(t, repo, "init", "-b", "task-branch")
-	runTestGit(t, repo, "config", "user.name", "Parallel Intellect Test")
+	runTestGit(t, repo, "config", "user.name", "Sophon Test")
 	runTestGit(t, repo, "config", "user.email", "test@example.invalid")
 	writeTestFile(t, filepath.Join(repo, "base.txt"), "base\n")
 	runTestGit(t, repo, "add", "base.txt")

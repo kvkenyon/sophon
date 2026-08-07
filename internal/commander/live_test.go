@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/herdr"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	"sophon/internal/herdr"
 )
 
 type commanderLabRunner struct {
@@ -35,8 +35,8 @@ func (r commanderLabRunner) Run(ctx context.Context, args ...string) ([]byte, []
 }
 
 func TestRealHerdrCodexCommanderSmoke(t *testing.T) {
-	if os.Getenv("PARALLEL_INTELLECT_COMMANDER_SMOKE") != "1" {
-		t.Skip("set PARALLEL_INTELLECT_COMMANDER_SMOKE=1 to launch a commander in an isolated Herdr lab")
+	if os.Getenv("SOPHON_COMMANDER_SMOKE") != "1" {
+		t.Skip("set SOPHON_COMMANDER_SMOKE=1 to launch a commander in an isolated Herdr lab")
 	}
 	helper := os.Getenv("HERDR_LAB_HELPER")
 	if helper == "" {
@@ -44,7 +44,7 @@ func TestRealHerdrCodexCommanderSmoke(t *testing.T) {
 	}
 	sessionName := strings.TrimSpace(os.Getenv("HERDR_LAB_SESSION"))
 	if sessionName == "" {
-		output, err := exec.Command(helper, "name", "parallel-intellect-m7-commander-runtimes").Output()
+		output, err := exec.Command(helper, "name", "sophon-m7-commander-runtimes").Output()
 		if err != nil {
 			t.Fatal(err)
 		}

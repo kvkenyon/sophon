@@ -6,13 +6,14 @@ import (
 	"strings"
 	"testing"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	runtimeprompts "parallel-intellect/prompts"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	runtimeprompts "sophon/prompts"
 )
 
 func TestPromptComposerUsesEmbeddedPromptsOutsideRepository(t *testing.T) {
-	t.Setenv("PINTELLECT_PROMPT_DIR", "")
+	t.Setenv("SOPHON_PROMPT_DIR", "")
+	t.Setenv(runtimeprompts.LegacyOverrideEnv, "")
 	root := t.TempDir()
 	project := filepath.Join(root, "project")
 	outside := filepath.Join(root, "outside")
@@ -39,7 +40,7 @@ func TestPromptComposerUsesEmbeddedPromptsOutsideRepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(composed, "# Parallel Intellect commander") {
+	if !strings.Contains(composed, "# Sophon commander") {
 		t.Fatalf("embedded prompt missing:\n%s", composed)
 	}
 	for _, rule := range []string{
@@ -49,11 +50,11 @@ func TestPromptComposerUsesEmbeddedPromptsOutsideRepository(t *testing.T) {
 		"Never change a registered project yourself.",
 		"Workers never contact the operator directly.",
 		"no budget binds unless it is",
-		"pintellect wait --mission <id> --after-seq <sequence>",
+		"sophon wait --mission <id> --after-seq <sequence>",
 		"Never sleep-poll.",
-		"pintellect worker inspect TASK --attempt N --json",
-		"pintellect task timeline TASK --json",
-		"pintellect status --mission MISSION --json",
+		"sophon worker inspect TASK --attempt N --json",
+		"sophon task timeline TASK --json",
+		"sophon status --mission MISSION --json",
 		"never paste raw JSON payloads or command dumps",
 		"Never invent follow-on implementation work from inference",
 		"A completed scout must leave a self-contained report",
@@ -80,7 +81,8 @@ func TestPromptComposerPrefersEnvironmentOverride(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(commanderDir, "AGENTS.md"), []byte("OVERRIDE COMMANDER PROMPT"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PINTELLECT_PROMPT_DIR", promptRoot)
+	t.Setenv("SOPHON_PROMPT_DIR", promptRoot)
+	t.Setenv(runtimeprompts.LegacyOverrideEnv, "")
 	composed, err := (PromptComposer{}).Compose(db.CommanderLaunchContext{
 		ProjectPath: filepath.Join(root, "project"), ProjectName: "project",
 		Mission: domain.Mission{ID: "msn_prompt", Objective: "resolve prompts"},
@@ -88,7 +90,7 @@ func TestPromptComposerPrefersEnvironmentOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(composed, "OVERRIDE COMMANDER PROMPT") || strings.Contains(composed, "# Parallel Intellect commander") {
+	if !strings.Contains(composed, "OVERRIDE COMMANDER PROMPT") || strings.Contains(composed, "# Sophon commander") {
 		t.Fatalf("environment override was not preferred:\n%s", composed)
 	}
 }
@@ -99,13 +101,13 @@ func TestPromptComposerIntakeCreatesMissionConversationally(t *testing.T) {
 		t.Fatal(err)
 	}
 	project := domain.Project{ID: "prj_intake", Name: "example", Path: "/work/example"}
-	composed, err := (PromptComposer{Dir: promptDir}).ComposeIntake(project, "/state/pintellect.db")
+	composed, err := (PromptComposer{Dir: promptDir}).ComposeIntake(project, "/state/sophon.db")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, fragment := range []string{
 		"KNOWLEDGE DIGEST SIGNAL BASELINE", "Mode: intake", "ask what we are working on",
-		"pintellect mission create --project", project.Path, "--db \"/state/pintellect.db\"",
+		"sophon mission create --project", project.Path, "--db \"/state/sophon.db\"",
 		"operator must never be asked to run mission create",
 		"--operator-message <verbatim-operator-words>",
 	} {

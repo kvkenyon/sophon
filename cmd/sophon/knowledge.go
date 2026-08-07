@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"strings"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/knowledge"
+	"sophon/internal/db"
+	"sophon/internal/knowledge"
 )
 
 func knowledgeCommand(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("expected: pintellect knowledge list|promote|reject|supersede")
+		return errors.New("expected: sophon knowledge list|promote|reject|supersede")
 	}
 	switch args[0] {
 	case "list":

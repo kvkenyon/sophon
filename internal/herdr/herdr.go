@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/naming"
+	"sophon/internal/domain"
+	"sophon/internal/naming"
 )
 
 type State string
@@ -399,7 +399,7 @@ func (a *CommandAdapter) Start(ctx context.Context, in StartRequest) (Session, e
 	}
 	label := strings.TrimSpace(a.WorkspaceLabel)
 	if label == "" {
-		label = "pintellect"
+		label = "sophon"
 	}
 	stdout, stderr, err := a.run(ctx, "workspace", "create", "--cwd", in.WorktreePath, "--label", label, "--no-focus")
 	if err != nil {

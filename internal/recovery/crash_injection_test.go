@@ -41,11 +41,11 @@ var crashBoundaries = []crashReceipt{
 // boundary receipt and exits abruptly without deferred cleanup, modeling a
 // daemon kill at the requested operation boundary.
 func TestCrashInjectionChild(t *testing.T) {
-	boundary := os.Getenv("PI_CRASH_BOUNDARY")
+	boundary := os.Getenv("SOPHON_CRASH_BOUNDARY")
 	if boundary == "" {
 		t.Skip("crash helper process only")
 	}
-	dir := os.Getenv("PI_CRASH_DIR")
+	dir := os.Getenv("SOPHON_CRASH_DIR")
 	for _, scenario := range crashBoundaries {
 		if scenario.Boundary != boundary {
 			continue
@@ -71,7 +71,7 @@ func TestCrashInjectionChild(t *testing.T) {
 }
 
 func TestCrashInjectionSuite(t *testing.T) {
-	if os.Getenv("PI_RUN_CRASH_INJECTION") != "1" {
+	if os.Getenv("SOPHON_RUN_CRASH_INJECTION") != "1" {
 		t.Skip("run through test/crash-injection.sh")
 	}
 	for _, scenario := range crashBoundaries {
@@ -79,7 +79,7 @@ func TestCrashInjectionSuite(t *testing.T) {
 		t.Run(scenario.Boundary, func(t *testing.T) {
 			dir := t.TempDir()
 			command := exec.Command(os.Args[0], "-test.run=^TestCrashInjectionChild$", "-test.v")
-			command.Env = append(os.Environ(), "PI_CRASH_BOUNDARY="+scenario.Boundary, "PI_CRASH_DIR="+dir)
+			command.Env = append(os.Environ(), "SOPHON_CRASH_BOUNDARY="+scenario.Boundary, "SOPHON_CRASH_DIR="+dir)
 			err := command.Run()
 			var exitErr *exec.ExitError
 			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 86 {

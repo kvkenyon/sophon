@@ -1,6 +1,6 @@
 ---
 name: bootstrap-diagnostics
-description: Agent-only handling procedure for actionable pintellect doctor findings; detect first, obtain current operator consent, then install or repair only through supported mechanisms.
+description: Agent-only handling procedure for actionable sophon doctor findings; detect first, obtain current operator consent, then install or repair only through supported mechanisms.
 user-invocable: false
 metadata:
   internal: true
@@ -10,7 +10,7 @@ metadata:
 
 # Bootstrap diagnostics
 
-Use this skill whenever `pintellect doctor` reports an actionable dependency, authentication, configuration, runtime, repository, lease, or delivery diagnostic.
+Use this skill whenever `sophon doctor` reports an actionable dependency, authentication, configuration, runtime, repository, lease, or delivery diagnostic.
 Informational and passing checks require no action.
 
 ## Governing rule
@@ -19,15 +19,15 @@ Handle a finding before dispatching work that depends on it.
 Detect first, explain the consequence, obtain current operator consent where installation or external change is required, then use only the supported owner path.
 Never silently install, authenticate, weaken a requirement, select around malformed configuration, or restart shared infrastructure.
 
-Run `pintellect doctor` to verify the current condition after an authorized repair.
+Run `sophon doctor` to verify the current condition after an authorized repair.
 Do not treat an earlier prose report as proof that the dependency is now healthy.
 
 ## Finding classes
 
 - **Missing automatically installable dependency** - explain its purpose and the exact proposed installation, then wait for operator consent.
-  `TODO(spec-gap)`: V1 defines detection through `pintellect doctor` but no installation API; until one exists, do not invent an install command.
+  `TODO(spec-gap)`: V1 defines detection through `sophon doctor` but no installation API; until one exists, do not invent an install command.
 - **Manual installation or authentication** - explain why it is required and give the operator the supported instructions supplied by the diagnostic.
-  Wait for the operator to complete the interactive action, then rerun `pintellect doctor`.
+  Wait for the operator to complete the interactive action, then rerun `sophon doctor`.
 - **Invalid runtime or adapter** - block dependent dispatch until the configuration names a verified supported adapter.
   Do not silently fall back when the requested runtime is part of accepted intent.
 - **Malformed configuration or profile** - preserve the actionable error and require correction.

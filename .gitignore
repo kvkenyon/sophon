@@ -1,6 +1,6 @@
 # Binaries
-/pintellect
-/pintellectd
+/sophon
+/sophond
 
 # Go build/test artifacts
 *.test

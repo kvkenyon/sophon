@@ -9,8 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"parallel-intellect/internal/domain"
-	runtimeprompts "parallel-intellect/prompts"
+	"sophon/internal/datahome"
+	"sophon/internal/domain"
+	runtimeprompts "sophon/prompts"
 )
 
 type BriefInput struct {
@@ -32,11 +33,11 @@ type BriefGenerator struct {
 }
 
 func DefaultTaskBaseDir() (string, error) {
-	home, err := os.UserHomeDir()
+	location, err := datahome.Resolve()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
-	return filepath.Join(home, ".parallel-intellect", "tasks"), nil
+	return filepath.Join(location.Dir, "tasks"), nil
 }
 
 func (g BriefGenerator) AttemptDir(taskID domain.TaskID, attempt int) (string, error) {
@@ -55,11 +56,11 @@ func (g BriefGenerator) AttemptDir(taskID domain.TaskID, attempt int) (string, e
 }
 
 func DefaultSkillBaseDir() (string, error) {
-	home, err := os.UserHomeDir()
+	location, err := datahome.Resolve()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
-	return filepath.Join(home, ".parallel-intellect", "skills"), nil
+	return filepath.Join(location.Dir, "skills"), nil
 }
 
 func (g BriefGenerator) SkillDir(taskID domain.TaskID, attempt int) (string, error) {
@@ -154,7 +155,7 @@ func (g BriefGenerator) Render(in BriefInput) (string, error) {
 	body.WriteString("2. Run the required validation and ensure the Git worktree is clean.\n")
 	fmt.Fprintf(&body, "3. Write version 1 completion JSON to `%s` with exactly these fields: `version`, `status`, `summary`, `verification`, `changed_files`, and `risks`.\n", resultPath)
 	body.WriteString("4. Submit exactly once:\n\n```bash\n")
-	fmt.Fprintf(&body, "pintellect worker complete %s \\\n  --attempt %d \\\n  --head-sha \"$(git rev-parse HEAD)\" \\\n  --result %q\n", in.Task.ID, in.Attempt, resultPath)
+	fmt.Fprintf(&body, "sophon worker complete %s \\\n  --attempt %d \\\n  --head-sha \"$(git rev-parse HEAD)\" \\\n  --result %q\n", in.Task.ID, in.Attempt, resultPath)
 	body.WriteString("```\n")
 
 	path := filepath.Join(dir, "brief.md")

@@ -5,9 +5,9 @@ import (
 	"context"
 	"fmt"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/signals"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	"sophon/internal/signals"
 )
 
 // Snapshot is the complete current mission view. Its four section fields map

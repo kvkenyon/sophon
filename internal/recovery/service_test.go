@@ -5,12 +5,12 @@ import (
 	"testing"
 	"time"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	taskpolicy "parallel-intellect/internal/task"
-	"parallel-intellect/internal/treehouse"
-	"parallel-intellect/internal/validation"
-	"parallel-intellect/internal/worker"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	taskpolicy "sophon/internal/task"
+	"sophon/internal/treehouse"
+	"sophon/internal/validation"
+	"sophon/internal/worker"
 )
 
 const (
@@ -213,7 +213,7 @@ func recoveryTask(t *testing.T, state domain.TaskState, withWorker bool) (*db.St
 	_, err = store.RecordTreehouseLease(ctx, "cmd_recovery_lease", db.RecordTreehouseLeaseInput{TaskID: task.ID,
 		Attempt: 1, ExpectedVersion: task.Version, Actor: "test", Lease: domain.TreehouseLease{
 			LeaseID: "lease-recovery", LeaseHolder: "holder-recovery", WorktreePath: t.TempDir(),
-			Project: "project", Branch: "pintellect/recovery/attempt-1", BaseSHA: recoveryBaseSHA,
+			Project: "project", Branch: "sophon/recovery/attempt-1", BaseSHA: recoveryBaseSHA,
 			AcquiredAt: time.Unix(1, 0).UTC(),
 		}})
 	if err != nil {

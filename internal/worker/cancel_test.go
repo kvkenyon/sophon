@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/herdr"
+	"sophon/internal/domain"
+	"sophon/internal/herdr"
 )
 
 type cancelLeases struct {

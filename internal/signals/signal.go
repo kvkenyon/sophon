@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"parallel-intellect/internal/domain"
+	"sophon/internal/domain"
 )
 
 type SignalID string

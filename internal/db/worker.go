@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"time"
 
-	"parallel-intellect/internal/domain"
-	taskpolicy "parallel-intellect/internal/task"
-	sessionpolicy "parallel-intellect/internal/workersession"
+	"sophon/internal/domain"
+	taskpolicy "sophon/internal/task"
+	sessionpolicy "sophon/internal/workersession"
 )
 
 type TaskLaunchContext struct {

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"sophon/internal/datahome"
 )
 
 const daemonNotRunningExitCode = 3
@@ -29,11 +31,11 @@ type daemonHealth struct {
 
 func daemonCommand(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("expected: pintellect daemon status|start|stop|restart")
+		return errors.New("expected: sophon daemon status|start|stop|restart")
 	}
 	flags := flag.NewFlagSet("daemon "+args[0], flag.ContinueOnError)
 	dbPath := flags.String("db", "", "SQLite database path")
-	daemonBinary := flags.String("daemon-binary", "", "pintellectd binary path")
+	daemonBinary := flags.String("daemon-binary", "", "sophond binary path")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -60,17 +62,16 @@ func daemonCommand(ctx context.Context, args []string) error {
 		}
 		return daemonStart(paths, *dbPath, *daemonBinary)
 	default:
-		return errors.New("expected: pintellect daemon status|start|stop|restart")
+		return errors.New("expected: sophon daemon status|start|stop|restart")
 	}
 }
 
 func currentDaemonPaths() (daemonPaths, error) {
-	home, err := os.UserHomeDir()
+	location, err := datahome.Resolve()
 	if err != nil {
 		return daemonPaths{}, fmt.Errorf("resolve home directory: %w", err)
 	}
-	dir := filepath.Join(home, ".parallel-intellect")
-	return daemonPaths{pid: filepath.Join(dir, "pintellectd.pid"), log: filepath.Join(dir, "pintellectd.log"), health: filepath.Join(dir, "pintellectd.health.json")}, nil
+	return daemonPaths{pid: location.DaemonPIDPath(), log: location.DaemonLogPath(), health: location.DaemonHealthPath()}, nil
 }
 
 func daemonPID(paths daemonPaths) (int, bool) {
@@ -144,15 +145,15 @@ func daemonStart(paths daemonPaths, dbPath, binary string) error {
 func findDaemonBinary() (string, error) {
 	self, err := os.Executable()
 	if err == nil {
-		candidate := filepath.Join(filepath.Dir(self), "pintellectd")
+		candidate := filepath.Join(filepath.Dir(self), "sophond")
 		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
 			return candidate, nil
 		}
 	}
-	if candidate, err := exec.LookPath("pintellectd"); err == nil {
+	if candidate, err := exec.LookPath("sophond"); err == nil {
 		return candidate, nil
 	}
-	return "", errors.New("pintellectd is not installed beside pintellect or on PATH")
+	return "", errors.New("sophond is not installed beside sophon or on PATH")
 }
 
 func daemonStop(paths daemonPaths) error {

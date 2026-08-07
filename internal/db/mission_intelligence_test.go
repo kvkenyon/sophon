@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/knowledge"
-	"parallel-intellect/internal/signals"
-	"parallel-intellect/internal/validation"
+	"sophon/internal/domain"
+	"sophon/internal/knowledge"
+	"sophon/internal/signals"
+	"sophon/internal/validation"
 )
 
 func TestMissionDigestRegenerationStoresArtifact(t *testing.T) {

@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	gitcontrol "parallel-intellect/internal/git"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	gitcontrol "sophon/internal/git"
 )
 
 const testSHA = "0123456789abcdef0123456789abcdef01234567"
@@ -121,7 +121,7 @@ func TestAcquirePersistsAndReacquireReusesOneLease(t *testing.T) {
 }
 
 func TestTaskBranchUsesReadableTaskName(t *testing.T) {
-	if got := TaskBranch("Fix concurrent invitation acceptance", "a2e2b9", 1); got != "pintellect/fix-concurrent-invitation-acceptance-a2e2b9/attempt-1" {
+	if got := TaskBranch("Fix concurrent invitation acceptance", "a2e2b9", 1); got != "sophon/fix-concurrent-invitation-acceptance-a2e2b9/attempt-1" {
 		t.Fatalf("task branch = %q", got)
 	}
 }
@@ -265,6 +265,31 @@ func TestReconcileKeepsMatchingLeaseValid(t *testing.T) {
 	}
 }
 
+func TestReconcileKeepsPersistedLegacyHolderValid(t *testing.T) {
+	ctx := context.Background()
+	store, task := provisioningTask(t)
+	defer store.Close()
+	legacyHolder := legacyLeaseHolder(task.ID, 1)
+	lease, err := store.RecordTreehouseLease(ctx, "cmd_record_legacy_holder", db.RecordTreehouseLeaseInput{
+		TaskID: task.ID, Attempt: 1, ExpectedVersion: task.Version, Actor: "test",
+		Lease: domain.TreehouseLease{LeaseID: "lease-legacy-valid", LeaseHolder: legacyHolder,
+			WorktreePath: "/worktrees/legacy-valid", Project: "project",
+			Branch: TaskBranch(task.Title, task.ID, 1), BaseSHA: testSHA, AcquiredAt: time.Now().UTC()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli := &fakeCLI{statuses: []WorktreeStatus{{WorktreePath: lease.WorktreePath, Status: "leased",
+		LeaseID: lease.LeaseID, LeaseHolder: legacyHolder}}}
+	result, err := NewService(store, cli, fakeGit{}).Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Valid != 1 || result.Fenced != 0 || result.Missing != 0 {
+		t.Fatalf("reconcile result = %+v", result)
+	}
+}
+
 func TestReconcileAdoptsLeaseAcquiredBeforeDatabaseRecord(t *testing.T) {
 	ctx := context.Background()
 	store, task := provisioningTask(t)
@@ -299,6 +324,34 @@ func TestReconcileAdoptsLeaseAcquiredBeforeDatabaseRecord(t *testing.T) {
 	}
 }
 
+func TestReconcileAdoptsLeaseWithLegacyHolderPrefix(t *testing.T) {
+	ctx := context.Background()
+	store, task := provisioningTask(t)
+	defer store.Close()
+	branch := TaskBranch(task.Title, task.ID, 1)
+	legacyHolder := legacyLeaseHolder(task.ID, 1)
+	cli := &fakeCLI{statuses: []WorktreeStatus{{WorktreePath: "/worktrees/legacy-holder",
+		Status: "leased", LeaseID: "lease-legacy-holder", LeaseHolder: legacyHolder}}}
+	service := NewService(store, cli, fakeGit{snapshot: gitcontrol.Snapshot{
+		Head: testSHA, Branch: branch, Clean: true,
+	}})
+
+	result, err := service.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Adopted != 1 || result.Awaiting != 0 {
+		t.Fatalf("reconcile result = %+v", result)
+	}
+	lease, err := store.TreehouseLease(ctx, task.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseHolder != legacyHolder {
+		t.Fatalf("adopted holder = %q, want %q", lease.LeaseHolder, legacyHolder)
+	}
+}
+
 func TestReconcileReportsProvisioningTaskStillAwaitingLease(t *testing.T) {
 	store, _ := provisioningTask(t)
 	defer store.Close()
@@ -324,7 +377,7 @@ func TestLeaseMismatchFencesAttemptWithoutTouchingNewHolder(t *testing.T) {
 	}
 	cli.statuses = []WorktreeStatus{{
 		WorktreePath: lease.WorktreePath, Status: "leased",
-		LeaseID: "new-lease", LeaseHolder: "parallel-intellect:other-task:1",
+		LeaseID: "new-lease", LeaseHolder: "sophon:other-task:1",
 	}}
 	result, err := service.Reconcile(ctx)
 	if err != nil {
@@ -496,8 +549,8 @@ func (r *recordingRunner) Run(_ context.Context, _ string, args ...string) ([]by
 }
 
 func TestRealTreehouseCLILeaseSmoke(t *testing.T) {
-	if os.Getenv("PARALLEL_INTELLECT_TREEHOUSE_SMOKE") != "1" {
-		t.Skip("set PARALLEL_INTELLECT_TREEHOUSE_SMOKE=1 to exercise the installed treehouse CLI")
+	if os.Getenv("SOPHON_TREEHOUSE_SMOKE") != "1" {
+		t.Skip("set SOPHON_TREEHOUSE_SMOKE=1 to exercise the installed treehouse CLI")
 	}
 	ctx := context.Background()
 	projectBytes, err := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel").Output()
@@ -505,7 +558,7 @@ func TestRealTreehouseCLILeaseSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	projectPath := strings.TrimSpace(string(projectBytes))
-	holder := "parallel-intellect:real-cli-smoke:" + strings.ReplaceAll(time.Now().UTC().Format(time.RFC3339Nano), ":", "-")
+	holder := "sophon:real-cli-smoke:" + strings.ReplaceAll(time.Now().UTC().Format(time.RFC3339Nano), ":", "-")
 	client := NewCommandClient("treehouse")
 	lease, err := client.Acquire(ctx, projectPath, holder)
 	if err != nil {

@@ -6,12 +6,13 @@ import (
 	"strings"
 	"testing"
 
-	"parallel-intellect/internal/domain"
-	runtimeprompts "parallel-intellect/prompts"
+	"sophon/internal/domain"
+	runtimeprompts "sophon/prompts"
 )
 
 func TestBriefGenerationComposesWorkerPromptsAndTaskFacts(t *testing.T) {
-	t.Setenv("PINTELLECT_PROMPT_DIR", "")
+	t.Setenv("SOPHON_PROMPT_DIR", "")
+	t.Setenv(runtimeprompts.LegacyOverrideEnv, "")
 	outside := t.TempDir()
 	original, err := os.Getwd()
 	if err != nil {
@@ -30,7 +31,7 @@ func TestBriefGenerationComposesWorkerPromptsAndTaskFacts(t *testing.T) {
 	}
 	path, err := generator.Render(BriefInput{
 		MissionID: "msn_brief", MissionTitle: "Milestone 3", MissionObjective: "Reach ready safely.",
-		Task: task, Attempt: 3, Project: "parallel-intellect", Worktree: "/worktrees/m3",
+		Task: task, Attempt: 3, Project: "sophon", Worktree: "/worktrees/m3",
 		Branch: "task/m3", BaseSHA: "0123456789abcdef0123456789abcdef01234567",
 		ValidationRequirements: []string{"go test ./...", "go build ./..."},
 	})
@@ -49,9 +50,9 @@ func TestBriefGenerationComposesWorkerPromptsAndTaskFacts(t *testing.T) {
 	for _, required := range []string{
 		"# Common worker prompt", "# Implementation worker overlay", "# Codex runtime overlay",
 		"`msn_brief` — Milestone 3", "`tsk_brief` — Implement the slice", "Attempt: `3`",
-		"Project: `parallel-intellect`", "Worktree: `/worktrees/m3`", "Branch: `task/m3`",
+		"Project: `sophon`", "Worktree: `/worktrees/m3`", "Branch: `task/m3`",
 		"Base SHA: `0123456789abcdef0123456789abcdef01234567`", "Completion is independently verified.",
-		"go test ./...", "pintellect worker complete tsk_brief", filepath.Join(generator.BaseDir, "tsk_brief", "3", "result.json"),
+		"go test ./...", "sophon worker complete tsk_brief", filepath.Join(generator.BaseDir, "tsk_brief", "3", "result.json"),
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("brief omitted %q\n%s", required, text)
@@ -72,7 +73,7 @@ func TestBriefGenerationMaterializesWorkerSkillSubsetAndTriggers(t *testing.T) {
 	task := domain.Task{ID: "tsk_skills", MissionID: "msn_skills", Title: "Implement", Objective: "Build it.", DeliveryMode: domain.DeliveryBranch}
 	path, err := generator.Render(BriefInput{
 		MissionID: "msn_skills", MissionTitle: "Skills", MissionObjective: "Load skills.", Task: task, Attempt: 2,
-		Project: "parallel-intellect", Worktree: "/worktrees/skills", Branch: "task/skills", BaseSHA: "0123456789abcdef0123456789abcdef01234567",
+		Project: "sophon", Worktree: "/worktrees/skills", Branch: "task/skills", BaseSHA: "0123456789abcdef0123456789abcdef01234567",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -117,12 +118,13 @@ func TestBriefGenerationPrefersEnvironmentPromptOverride(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	t.Setenv("PINTELLECT_PROMPT_DIR", promptRoot)
+	t.Setenv("SOPHON_PROMPT_DIR", promptRoot)
+	t.Setenv(runtimeprompts.LegacyOverrideEnv, "")
 	generator := BriefGenerator{BaseDir: filepath.Join(t.TempDir(), "tasks")}
 	path, err := generator.Render(BriefInput{
 		MissionID: "msn_brief", MissionTitle: "Milestone 3", MissionObjective: "Reach ready safely.",
 		Task:    domain.Task{ID: "tsk_brief", MissionID: "msn_brief", Title: "Implement the slice", Objective: "Build it.", DeliveryMode: domain.DeliveryBranch},
-		Attempt: 1, Project: "parallel-intellect", Worktree: "/worktrees/m3", Branch: "task/m3", BaseSHA: "0123456789abcdef0123456789abcdef01234567",
+		Attempt: 1, Project: "sophon", Worktree: "/worktrees/m3", Branch: "task/m3", BaseSHA: "0123456789abcdef0123456789abcdef01234567",
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -21,9 +21,9 @@ implementation, broadens scope, or turns runtime symptoms into project facts.
 Treat worker-session loss as a presence fact, not proof that task work or validation disappeared.
 Query the current task, attempt, lease, worker-session, validation, Signal, and
 delivery projection through structured APIs. Inspect worker-session state with
-`pintellect worker inspect TASK --attempt N --json`; use
-`pintellect task timeline TASK --json` only for durable event evidence and
-`pintellect status --mission MISSION --json` for the bounded current mission
+`sophon worker inspect TASK --attempt N --json`; use
+`sophon task timeline TASK --json` only for durable event evidence and
+`sophon status --mission MISSION --json` for the bounded current mission
 projection. Do not repeatedly scrape terminal text or reconstruct current state
 from the last event.
 An authoritative validation or delivery operation tied to the current head remains authoritative even when the worker session is lost.
@@ -88,9 +88,9 @@ cannot repair repository custody.
    worker-session state, reserve any configured restart budget through the
    owning operation, and prefer a supported same-attempt resume in the existing
    worktree with persisted agent identity and a concise progress summary.
-   `TODO(spec-gap)`: V1 exposes `pintellect task retry TASK --db PATH` for a new attempt but does not specify a commander API for relaunching the same attempt; do not substitute an invented runtime command.
-6. Use `await intellect.retry_task(task_id)` or
-   `pintellect task retry TASK --db PATH` only when structured reconciliation
+   `TODO(spec-gap)`: V1 exposes `sophon task retry TASK --db PATH` for a new attempt but does not specify a commander API for relaunching the same attempt; do not substitute an invented runtime command.
+6. Use `await sophon.retry_task(task_id)` or
+   `sophon task retry TASK --db PATH` only when structured reconciliation
    and policy establish that a new attempt is required. Retry must fence the old
    attempt before allocating the next attempt and lease. A stale attempt can
    never complete, validate, deliver, or release the new one.

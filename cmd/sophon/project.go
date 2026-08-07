@@ -8,12 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"parallel-intellect/internal/db"
+	"sophon/internal/db"
 )
 
 func project(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("expected: pintellect project add|list|inspect")
+		return errors.New("expected: sophon project add|list|inspect")
 	}
 	switch args[0] {
 	case "add":
@@ -106,7 +106,7 @@ func projectList(ctx context.Context, args []string) error {
 
 func projectInspect(ctx context.Context, args []string) error {
 	if len(args) < 1 {
-		return errors.New("expected: pintellect project inspect NAME [--db PATH] [--json]")
+		return errors.New("expected: sophon project inspect NAME [--db PATH] [--json]")
 	}
 	flags := flag.NewFlagSet("project inspect", flag.ContinueOnError)
 	dbPath := flags.String("db", "", "SQLite database path")

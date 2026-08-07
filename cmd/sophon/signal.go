@@ -6,15 +6,15 @@ import (
 	"flag"
 	"fmt"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/id"
-	"parallel-intellect/internal/signals"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	"sophon/internal/id"
+	"sophon/internal/signals"
 )
 
 func signalCommand(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("expected: pintellect signal raise|list|inspect|resolve")
+		return errors.New("expected: sophon signal raise|list|inspect|resolve")
 	}
 	switch args[0] {
 	case "raise":
@@ -93,7 +93,7 @@ func signalCommand(ctx context.Context, args []string) error {
 		return nil
 	case "inspect":
 		if len(args) < 2 {
-			return errors.New("expected: pintellect signal inspect <id> [--db PATH] [--json]")
+			return errors.New("expected: sophon signal inspect <id> [--db PATH] [--json]")
 		}
 		flags := flag.NewFlagSet("signal inspect", flag.ContinueOnError)
 		path := flags.String("db", "", "SQLite database path")
@@ -129,7 +129,7 @@ func signalCommand(ctx context.Context, args []string) error {
 		return nil
 	case "resolve":
 		if len(args) < 2 {
-			return errors.New("expected: pintellect signal resolve <id> --answer ANSWER [--db PATH] [--json]")
+			return errors.New("expected: sophon signal resolve <id> --answer ANSWER [--db PATH] [--json]")
 		}
 		flags := flag.NewFlagSet("signal resolve", flag.ContinueOnError)
 		path := flags.String("db", "", "SQLite database path")

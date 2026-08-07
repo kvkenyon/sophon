@@ -12,15 +12,15 @@ import (
 	"syscall"
 	"time"
 
-	commandercontrol "parallel-intellect/internal/commander"
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/delivery"
-	"parallel-intellect/internal/domain"
-	gitcontrol "parallel-intellect/internal/git"
-	"parallel-intellect/internal/herdr"
-	startup "parallel-intellect/internal/recovery"
-	"parallel-intellect/internal/treehouse"
-	"parallel-intellect/internal/worker"
+	commandercontrol "sophon/internal/commander"
+	"sophon/internal/db"
+	"sophon/internal/delivery"
+	"sophon/internal/domain"
+	gitcontrol "sophon/internal/git"
+	"sophon/internal/herdr"
+	startup "sophon/internal/recovery"
+	"sophon/internal/treehouse"
+	"sophon/internal/worker"
 )
 
 const version = "0.3.0-m3"
@@ -115,7 +115,7 @@ func main() {
 		}
 	}
 	reconcileTasks(true)
-	log.Printf("pintellectd initialized database %s", *path)
+	log.Printf("sophond initialized database %s", *path)
 
 	enforceBudgets := func() {
 		missions, err := store.Missions(ctx)
@@ -214,7 +214,7 @@ func main() {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Print("pintellectd stopped")
+			log.Print("sophond stopped")
 			return
 		case <-ticker.C:
 			reconcileTasks(false)

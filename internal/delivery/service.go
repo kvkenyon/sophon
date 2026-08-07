@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"parallel-intellect/internal/domain"
+	"sophon/internal/domain"
 )
 
 type Service struct {

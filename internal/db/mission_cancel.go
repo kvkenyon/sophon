@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"parallel-intellect/internal/domain"
-	signalpolicy "parallel-intellect/internal/signals"
+	"sophon/internal/domain"
+	signalpolicy "sophon/internal/signals"
 )
 
 const operatorCancellationNote = "Cancelled by operator."

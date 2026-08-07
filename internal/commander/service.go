@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"strings"
 
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/herdr"
-	"parallel-intellect/internal/id"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	"sophon/internal/herdr"
+	"sophon/internal/id"
 )
 
 type Starter struct {

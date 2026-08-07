@@ -1,6 +1,6 @@
 ---
 name: agent-adapters
-description: Agent-only reference for selecting, starting, steering, recovering, interrupting, resuming, and verifying Parallel Intellect worker runtimes through supported adapters.
+description: Agent-only reference for selecting, starting, steering, recovering, interrupting, resuming, and verifying Sophon worker runtimes through supported adapters.
 user-invocable: false
 metadata:
   internal: true
@@ -16,7 +16,7 @@ Never launch an unverified adapter or silently substitute a different runtime wh
 
 ## Selection and launch
 
-Select the worker explicitly when creating a task with `await intellect.create_task(..., worker=...)`.
+Select the worker explicitly when creating a task with `await sophon.create_task(..., worker=...)`.
 Apply an explicit operator choice first, then any matching configured project or task policy, then the supported default.
 Account for every configured candidate using current adapter support, authentication, capacity, model availability, task fit, and disclosed uncertainty.
 Do not guess provider identity, credential ownership, model support, or reasoning capability from a name.
@@ -38,10 +38,10 @@ A successful send or start acknowledgement is not proof that the worker accepted
 Verify the adapter-specific structured postcondition: correct task and attempt binding, readiness, accepted prompt, and active or valid idle state.
 Trust prompts and other interactive conditions require the verified adapter procedure and the minimum necessary action.
 
-Use `await intellect.message_worker(task_id, message)` for ordinary task-scoped steering.
+Use `await sophon.message_worker(task_id, message)` for ordinary task-scoped steering.
 Use `worker-recovery` before disruptive recovery.
-Use `await intellect.retry_task(task_id)` only for a controlled new attempt after lease and ownership reconciliation.
-Use `await intellect.cancel_task(task_id)` only under the task's cancellation authority and preserve unlanded work.
+Use `await sophon.retry_task(task_id)` only for a controlled new attempt after lease and ownership reconciliation.
+Use `await sophon.cancel_task(task_id)` only under the task's cancellation authority and preserve unlanded work.
 
 `TODO(spec-gap)`: V1 does not define commander-facing same-attempt interrupt, exit, resume, trust-confirmation, or readiness APIs.
 Do not invent terminal keystrokes or direct process commands; surface the unsupported lifecycle need and preserve task state.

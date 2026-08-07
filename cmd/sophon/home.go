@@ -11,10 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	commandercontrol "parallel-intellect/internal/commander"
-	"parallel-intellect/internal/db"
-	"parallel-intellect/internal/domain"
-	"parallel-intellect/internal/herdr"
+	commandercontrol "sophon/internal/commander"
+	"sophon/internal/db"
+	"sophon/internal/domain"
+	"sophon/internal/herdr"
 )
 
 func homeCommand(ctx context.Context, args []string) error {
@@ -35,7 +35,7 @@ func homeCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	if _, running := daemonPID(paths); !running {
-		fmt.Println("Warning: pintellectd is not running; wake routing is unavailable. Start it with: pintellect daemon start")
+		fmt.Println("Warning: sophond is not running; wake routing is unavailable. Start it with: sophon daemon start")
 	}
 
 	operatorSession, err := detectHerdrSession(ctx, *herdrBinary, strings.TrimSpace(*herdrSession), os.Getenv)
@@ -224,7 +224,7 @@ func detectHerdrSession(ctx context.Context, binary, explicit string, getenv fun
 		return running[0].Name, nil
 	}
 	if len(running) == 0 {
-		return "", errors.New("no running Herdr session was detected; run pintellect home from inside Herdr")
+		return "", errors.New("no running Herdr session was detected; run sophon home from inside Herdr")
 	}
 	names := make([]string, 0, len(running))
 	for _, session := range running {

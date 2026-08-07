@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"parallel-intellect/internal/domain"
+	"sophon/internal/domain"
 )
 
 // InFlightStabilizationWindow prevents recovery from treating a recently

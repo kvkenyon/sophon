@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"parallel-intellect/internal/domain"
+	"sophon/internal/domain"
 )
 
 type State string

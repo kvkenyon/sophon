@@ -1,6 +1,6 @@
 ---
 name: project-management
-description: Agent-only procedure for adding, creating, registering, initializing, or removing a Parallel Intellect project with explicit destination, delivery posture, consent, and unlanded-work protection.
+description: Agent-only procedure for adding, creating, registering, initializing, or removing a Sophon project with explicit destination, delivery posture, consent, and unlanded-work protection.
 user-invocable: false
 metadata:
   internal: true
@@ -16,7 +16,7 @@ Do not overwrite, repurpose, or silently duplicate an existing project.
 
 ## Preconditions
 
-Inspect authoritative registered projects with `await intellect.projects()` or `pintellect project list --json`.
+Inspect authoritative registered projects with `await sophon.projects()` or `sophon project list --json`.
 Resolve the source, project name, destination, delivery posture, and operator authority before mutation.
 Keep a newly created local artifact and its registry record consistent.
 On partial failure, roll back only artifacts created by that operation and only when the rollback is demonstrably safe.
@@ -33,8 +33,8 @@ Delivery rigor and routine decision authority are separate.
 
 ## Add an existing local project
 
-Confirm the local source and resolved delivery posture, then use `pintellect project add .` from the intended project only after proving it is the exact operator-authorized source and not already registered.
-Inspect the resulting record with `pintellect project inspect NAME --json`.
+Confirm the local source and resolved delivery posture, then use `sophon project add .` from the intended project only after proving it is the exact operator-authorized source and not already registered.
+Inspect the resulting record with `sophon project inspect NAME --json`.
 Do not treat registration as authority to change the project's files or create a remote.
 
 ## Clone, create, and initialize

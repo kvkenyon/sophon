@@ -76,7 +76,7 @@ func TestCommandAdapterStartsCodexAndDeliversBriefAsInitialPrompt(t *testing.T) 
 		t.Fatalf("session = %+v", session)
 	}
 	want := [][]string{
-		{"workspace", "create", "--cwd", "/worktrees/task", "--label", "pintellect", "--no-focus", "--session", "fm-lab-contract"},
+		{"workspace", "create", "--cwd", "/worktrees/task", "--label", "sophon", "--no-focus", "--session", "fm-lab-contract"},
 		{"tab", "rename", "w1:t1", "pi-fix-contract-launch-tskcontr-a2", "--session", "fm-lab-contract"},
 		{"pane", "run", "w1:p1", "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust", "--session", "fm-lab-contract"},
 		{"pane", "get", "w1:p1", "--session", "fm-lab-contract"},
@@ -136,7 +136,7 @@ func TestHerdrRuntimeConformanceStartsClaudeAndPiWithLaunchProfiles(t *testing.T
 				t.Fatalf("session = %+v", session)
 			}
 			want := [][]string{
-				{"workspace", "create", "--cwd", request.WorktreePath, "--label", "pintellect", "--no-focus", "--session", "fm-lab-contract"},
+				{"workspace", "create", "--cwd", request.WorktreePath, "--label", "sophon", "--no-focus", "--session", "fm-lab-contract"},
 				{"tab", "rename", "w1:t1", session.AgentName, "--session", "fm-lab-contract"},
 				{"pane", "run", "w1:p1", test.launchCommand, "--session", "fm-lab-contract"},
 				{"pane", "get", "w1:p1", "--session", "fm-lab-contract"},
@@ -623,14 +623,14 @@ func (r labRunner) Run(ctx context.Context, args ...string) ([]byte, []byte, err
 }
 
 func TestRealHerdrObservationSmoke(t *testing.T) {
-	if os.Getenv("PARALLEL_INTELLECT_HERDR_SMOKE") != "1" {
-		t.Skip("set PARALLEL_INTELLECT_HERDR_SMOKE=1 to exercise Herdr in an isolated lab session")
+	if os.Getenv("SOPHON_HERDR_SMOKE") != "1" {
+		t.Skip("set SOPHON_HERDR_SMOKE=1 to exercise Herdr in an isolated lab session")
 	}
 	helper := os.Getenv("HERDR_LAB_HELPER")
 	if helper == "" {
 		helper = "/Users/kevin/github/kvkenyon/research/firstmate/bin/fm-herdr-lab.sh"
 	}
-	nameOutput, err := exec.Command(helper, "name", "parallel-intellect-m3-vertical-slice").Output()
+	nameOutput, err := exec.Command(helper, "name", "sophon-m3-vertical-slice").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -675,8 +675,8 @@ func TestRealHerdrObservationSmoke(t *testing.T) {
 }
 
 func TestRealHerdrPersistentWorkerSmoke(t *testing.T) {
-	if os.Getenv("PARALLEL_INTELLECT_HERDR_SMOKE") != "1" {
-		t.Skip("set PARALLEL_INTELLECT_HERDR_SMOKE=1 to exercise Herdr in an isolated lab session")
+	if os.Getenv("SOPHON_HERDR_SMOKE") != "1" {
+		t.Skip("set SOPHON_HERDR_SMOKE=1 to exercise Herdr in an isolated lab session")
 	}
 	helper := os.Getenv("HERDR_LAB_HELPER")
 	if helper == "" {
@@ -684,7 +684,7 @@ func TestRealHerdrPersistentWorkerSmoke(t *testing.T) {
 	}
 	sessionName := strings.TrimSpace(os.Getenv("HERDR_LAB_SESSION"))
 	if sessionName == "" {
-		nameOutput, err := exec.Command(helper, "name", "parallel-intellect-m4-persistent-workers").Output()
+		nameOutput, err := exec.Command(helper, "name", "sophon-m4-persistent-workers").Output()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -752,7 +752,7 @@ func TestRealHerdrPersistentWorkerSmoke(t *testing.T) {
 		t.Logf("live wake completed working -> idle but secondary marker %s is absent: %v\nvisible pane:\n%s",
 			liveMarker, err, capturePane(t, runner, session.PaneID))
 	}
-	if os.Getenv("PARALLEL_INTELLECT_HERDR_SMOKE_LIVE_ONLY") == "1" {
+	if os.Getenv("SOPHON_HERDR_SMOKE_LIVE_ONLY") == "1" {
 		return
 	}
 
@@ -797,8 +797,8 @@ func TestRealHerdrPersistentWorkerSmoke(t *testing.T) {
 }
 
 func TestRealHerdrClaudePiConformance(t *testing.T) {
-	if os.Getenv("PARALLEL_INTELLECT_HERDR_SMOKE") != "1" {
-		t.Skip("set PARALLEL_INTELLECT_HERDR_SMOKE=1 to exercise Claude and Pi in an isolated lab session")
+	if os.Getenv("SOPHON_HERDR_SMOKE") != "1" {
+		t.Skip("set SOPHON_HERDR_SMOKE=1 to exercise Claude and Pi in an isolated lab session")
 	}
 	helper := os.Getenv("HERDR_LAB_HELPER")
 	if helper == "" {
@@ -806,7 +806,7 @@ func TestRealHerdrClaudePiConformance(t *testing.T) {
 	}
 	sessionName := strings.TrimSpace(os.Getenv("HERDR_LAB_SESSION"))
 	if sessionName == "" {
-		nameOutput, err := exec.Command(helper, "name", "parallel-intellect-m5-claude-pi-workers").Output()
+		nameOutput, err := exec.Command(helper, "name", "sophon-m5-claude-pi-workers").Output()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -871,7 +871,7 @@ export default function (pi: any) {
 	waitForHerdrState(t, adapter, claude, StateIdle, 3*time.Minute)
 	waitForPaneText(t, runner, claude.PaneID, "CLAUDE_M5_START_OK", time.Minute)
 
-	piModel := strings.TrimSpace(os.Getenv("PARALLEL_INTELLECT_PI_MODEL"))
+	piModel := strings.TrimSpace(os.Getenv("SOPHON_PI_MODEL"))
 	if piModel == "" {
 		piModel = "kimi-coding/k3-256k"
 	}

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"parallel-intellect/internal/herdr"
+	"sophon/internal/herdr"
 )
 
 type fakeTerminal struct {
