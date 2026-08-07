@@ -185,6 +185,39 @@ func TestCLIMissionListBucketsAndJSON(t *testing.T) {
 	}
 }
 
+func TestCLIMissionBudgetUpdatesAndClearsWithJSON(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.CreateProject(ctx, "mission_budget_project", db.CreateProjectInput{Name: "mission-budget", Path: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mission, err := store.CreateMission(ctx, "mission_budget_mission", db.CreateMissionInput{ProjectID: project, Title: "Budget", Objective: "update", Budget: domain.MissionBudget{MaxTaskAttempts: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output := runCLI(t, "mission", "budget", string(mission.ID), "--max-wall-clock", "4h", "--max-task-attempts", "0", "--max-concurrent-tasks", "3", "--max-validation-runs", "4", "--command-id", "cmd_cli_budget", "--db", dbPath, "--json")
+	var result db.MissionBudgetUpdate
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("decode budget JSON: %v: %s", err, output)
+	}
+	if result.Mission.Budget.MaxWallClock != 4*time.Hour || result.Mission.Budget.MaxTaskAttempts != 0 || result.Mission.Budget.MaxConcurrentTasks != 3 || result.Mission.Budget.MaxValidationRuns != 4 {
+		t.Fatalf("budget=%+v", result.Mission.Budget)
+	}
+	repeated := runCLI(t, "mission", "budget", string(mission.ID), "--max-wall-clock", "4h", "--max-task-attempts", "0", "--max-concurrent-tasks", "3", "--max-validation-runs", "4", "--command-id", "cmd_cli_budget", "--db", dbPath, "--json")
+	var again db.MissionBudgetUpdate
+	if err := json.Unmarshal(repeated, &again); err != nil || again.Mission.Version != result.Mission.Version {
+		t.Fatalf("repeat=%s result=%+v err=%v", repeated, again, err)
+	}
+}
+
 func TestWaitReturnsWhenNewMissionEventLands(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "state.db")

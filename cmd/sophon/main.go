@@ -111,6 +111,9 @@ func mission(ctx context.Context, args []string) error {
 	if len(args) >= 1 && args[0] == "create" {
 		return missionCreate(ctx, args[1:])
 	}
+	if len(args) >= 2 && args[0] == "budget" {
+		return missionBudget(ctx, domain.MissionID(args[1]), args[2:])
+	}
 	if len(args) >= 2 && args[0] == "timeline" {
 		return timeline(ctx, "mission", args[1], args[2:])
 	}
@@ -120,7 +123,7 @@ func mission(ctx context.Context, args []string) error {
 	if len(args) >= 2 && args[0] == "cancel" {
 		return missionCancel(ctx, domain.MissionID(args[1]), args[2:])
 	}
-	return errors.New("expected: sophon mission list|create|timeline|digest|cancel")
+	return errors.New("expected: sophon mission list|create|budget|timeline|digest|cancel")
 }
 
 type missionListItem struct {
@@ -231,6 +234,94 @@ func missionCancel(ctx context.Context, missionID domain.MissionID, args []strin
 	}
 	fmt.Printf("Mission %s cancelled\n", cancelled.ID)
 	return nil
+}
+
+func missionBudget(ctx context.Context, missionID domain.MissionID, args []string) error {
+	flags := flag.NewFlagSet("mission budget", flag.ContinueOnError)
+	dbPath := flags.String("db", "", "SQLite database path")
+	jsonOutput := flags.Bool("json", false, "emit JSON")
+	maxWallClock := flags.Duration("max-wall-clock", 0, "maximum mission wall-clock duration (0 is unlimited)")
+	maxAttempts := flags.Int("max-task-attempts", 0, "maximum attempts per task (0 is unlimited)")
+	maxConcurrent := flags.Int("max-concurrent-tasks", 0, "maximum concurrently active tasks (0 is unlimited)")
+	maxValidation := flags.Int("max-validation-runs", 0, "maximum validation rounds per task (0 is unlimited)")
+	maxTokens := flags.Int64("max-tokens", 0, "maximum mission tokens (0 is unlimited)")
+	maxCost := flags.String("max-cost", "", "maximum mission cost (0 is unlimited)")
+	expectedVersion := flags.Int64("expected-version", 0, "mission version to update (0 uses the current version)")
+	commandValue := flags.String("command-id", "", "idempotency command ID")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("mission budget does not accept positional arguments")
+	}
+	provided := map[string]bool{}
+	flags.Visit(func(item *flag.Flag) { provided[item.Name] = true })
+	if !(provided["max-wall-clock"] || provided["max-task-attempts"] || provided["max-concurrent-tasks"] || provided["max-validation-runs"] || provided["max-tokens"] || provided["max-cost"]) {
+		return errors.New("mission budget requires at least one budget flag")
+	}
+	store, err := openStore(ctx, *dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	mission, err := store.Mission(ctx, missionID)
+	if err != nil {
+		return err
+	}
+	budget := mission.Budget
+	if provided["max-wall-clock"] {
+		budget.MaxWallClock = *maxWallClock
+	}
+	if provided["max-task-attempts"] {
+		budget.MaxTaskAttempts = *maxAttempts
+	}
+	if provided["max-concurrent-tasks"] {
+		budget.MaxConcurrentTasks = *maxConcurrent
+	}
+	if provided["max-validation-runs"] {
+		budget.MaxValidationRuns = *maxValidation
+	}
+	if provided["max-tokens"] {
+		if *maxTokens == 0 {
+			budget.MaxTokens = nil
+		} else {
+			value := *maxTokens
+			budget.MaxTokens = &value
+		}
+	}
+	if provided["max-cost"] {
+		if *maxCost == "" || *maxCost == "0" {
+			budget.MaxCost = nil
+		} else {
+			value := *maxCost
+			budget.MaxCost = &value
+		}
+	}
+	command, err := suppliedCommandID(*commandValue)
+	if err != nil {
+		return err
+	}
+	updated, err := store.UpdateMissionBudget(ctx, command, db.UpdateMissionBudgetInput{MissionID: missionID, ExpectedVersion: *expectedVersion, Budget: budget, Actor: "operator"})
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return encode(updated)
+	}
+	fmt.Printf("Mission %s budget updated", updated.Mission.ID)
+	if len(updated.RecoverableTaskIDs) != 0 {
+		fmt.Printf("; retry is now legal for: %s", strings.Join(taskIDStrings(updated.RecoverableTaskIDs), ", "))
+	}
+	fmt.Fprintln(os.Stdout)
+	return nil
+}
+
+func taskIDStrings(ids []domain.TaskID) []string {
+	values := make([]string, len(ids))
+	for index, taskID := range ids {
+		values[index] = string(taskID)
+	}
+	return values
 }
 
 func missionDigest(ctx context.Context, missionID domain.MissionID, args []string) error {
@@ -854,6 +945,7 @@ func usage() {
   sophon project inspect NAME [--db PATH] [--json]
   sophon mission create --project PATH --title TITLE --objective OBJECTIVE [--acceptance TEXT]
   sophon mission list [--db PATH] [--json]
+  sophon mission budget ID --max-wall-clock DURATION|--max-task-attempts N|--max-concurrent-tasks N|--max-validation-runs N [--command-id ID] [--db PATH] [--json]
   sophon mission cancel ID [--db PATH] [--json]
   sophon task create MISSION --title TITLE --objective OBJECTIVE [--acceptance TEXT]
   sophon task start TASK [--herdr-session NAME] [--db PATH]

@@ -189,6 +189,77 @@ func TestMissionBudgetDimensionsExpireToNeedsAttention(t *testing.T) {
 	})
 }
 
+func TestUpdateMissionBudgetUpdatesClearsAndUnblocksRetry(t *testing.T) {
+	store, mission := intelligenceMission(t, domain.MissionBudget{MaxWallClock: time.Hour, MaxConcurrentTasks: 1, MaxTaskAttempts: 1, MaxValidationRuns: 1})
+	defer store.Close()
+	updates := []struct {
+		name  string
+		apply func(*domain.MissionBudget)
+		check func(domain.MissionBudget) bool
+	}{
+		{"wall clock", func(b *domain.MissionBudget) { b.MaxWallClock = 2 * time.Hour }, func(b domain.MissionBudget) bool { return b.MaxWallClock == 2*time.Hour }},
+		{"concurrency", func(b *domain.MissionBudget) { b.MaxConcurrentTasks = 2 }, func(b domain.MissionBudget) bool { return b.MaxConcurrentTasks == 2 }},
+		{"attempts", func(b *domain.MissionBudget) { b.MaxTaskAttempts = 2 }, func(b domain.MissionBudget) bool { return b.MaxTaskAttempts == 2 }},
+		{"validation", func(b *domain.MissionBudget) { b.MaxValidationRuns = 2 }, func(b domain.MissionBudget) bool { return b.MaxValidationRuns == 2 }},
+		{"tokens", func(b *domain.MissionBudget) { value := int64(100); b.MaxTokens = &value }, func(b domain.MissionBudget) bool { return b.MaxTokens != nil && *b.MaxTokens == 100 }},
+		{"cost", func(b *domain.MissionBudget) { value := "1.25"; b.MaxCost = &value }, func(b domain.MissionBudget) bool { return b.MaxCost != nil && *b.MaxCost == "1.25" }},
+	}
+	for _, update := range updates {
+		budget := mission.Budget
+		update.apply(&budget)
+		result, err := store.UpdateMissionBudget(context.Background(), domain.CommandID("cmd_budget_"+strings.ReplaceAll(update.name, " ", "_")), UpdateMissionBudgetInput{MissionID: mission.ID, ExpectedVersion: mission.Version, Budget: budget, Actor: "operator"})
+		if err != nil || !update.check(result.Mission.Budget) {
+			t.Fatalf("update %s result=%+v err=%v", update.name, result, err)
+		}
+		mission = result.Mission
+	}
+	task := intelligenceTask(t, store, mission.ID, "retry after clear")
+	task = transitionTask(t, store, task, domain.TaskFailed, "budget_retry_failed")
+	budget := mission.Budget
+	budget.MaxTaskAttempts = 1
+	missionUpdate, err := store.UpdateMissionBudget(context.Background(), "cmd_budget_restore_attempt_cap", UpdateMissionBudgetInput{MissionID: mission.ID, ExpectedVersion: mission.Version, Budget: budget, Actor: "operator"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mission = missionUpdate.Mission
+	exhausted, err := store.RetryTask(context.Background(), "cmd_budget_retry_exhaust", RetryTaskInput{TaskID: task.ID, ExpectedVersion: task.Version, Actor: "commander"})
+	if !errors.Is(err, ErrAttemptBudget) || exhausted.State != domain.TaskNeedsAttention {
+		t.Fatalf("exhausted=%+v err=%v", exhausted, err)
+	}
+	clear := mission.Budget
+	clear.MaxWallClock = 0
+	clear.MaxConcurrentTasks = 0
+	clear.MaxTaskAttempts = 0
+	clear.MaxValidationRuns = 0
+	clear.MaxTokens = nil
+	clear.MaxCost = nil
+	input := UpdateMissionBudgetInput{MissionID: mission.ID, ExpectedVersion: mission.Version, Budget: clear, Actor: "operator"}
+	updated, err := store.UpdateMissionBudget(context.Background(), "cmd_budget_clear", input)
+	if err != nil || updated.Mission.Budget.MaxWallClock != 0 || updated.Mission.Budget.MaxConcurrentTasks != 0 || updated.Mission.Budget.MaxTaskAttempts != 0 || updated.Mission.Budget.MaxValidationRuns != 0 || updated.Mission.Budget.MaxTokens != nil || updated.Mission.Budget.MaxCost != nil || len(updated.RecoverableTaskIDs) != 1 || updated.RecoverableTaskIDs[0] != task.ID {
+		t.Fatalf("clear=%+v err=%v", updated, err)
+	}
+	repeated, err := store.UpdateMissionBudget(context.Background(), "cmd_budget_clear", input)
+	if err != nil || repeated.Mission.Version != updated.Mission.Version || len(repeated.RecoverableTaskIDs) != 1 {
+		t.Fatalf("idempotent repeat=%+v err=%v", repeated, err)
+	}
+	if _, err := store.RetryTask(context.Background(), "cmd_budget_retry_legal", RetryTaskInput{TaskID: task.ID, ExpectedVersion: exhausted.Version, Actor: "commander"}); err != nil {
+		t.Fatalf("retry after clear: %v", err)
+	}
+	events, err := store.MissionEvents(context.Background(), mission.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, event := range events {
+		if event.Type == "mission.budget.updated" {
+			count++
+		}
+	}
+	if count != len(updates)+2 {
+		t.Fatalf("budget update events=%d, want %d", count, len(updates)+2)
+	}
+}
+
 func TestWorkerBudgetDimensionsExpireToNeedsAttention(t *testing.T) {
 	for _, test := range []struct {
 		name, dimension  string
