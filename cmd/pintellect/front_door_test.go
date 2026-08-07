@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,64 +14,80 @@ import (
 	"parallel-intellect/internal/knowledge"
 )
 
-func TestCLIHomeGuidesMissionCreationWhenEmpty(t *testing.T) {
-	output := string(runCLI(t, "home", "--db", filepath.Join(t.TempDir(), "empty.db")))
-	for _, fragment := range []string{"Needs Your Attention", "Recently Completed", "Underway", "Up Next", "pintellect mission create --project PATH"} {
-		if !strings.Contains(output, fragment) {
-			t.Errorf("home output lacks %q:\n%s", fragment, output)
-		}
-	}
-}
-
-func TestHomeCommanderStartConfirmation(t *testing.T) {
-	for name, test := range map[string]struct {
-		input string
-		want  bool
+func TestDetectHerdrSessionMatrix(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		sessions string
+		env      map[string]string
+		want     string
+		wantErr  string
 	}{
-		"default yes":  {input: "\n", want: true},
-		"explicit yes": {input: "yes\n", want: true},
-		"decline":      {input: "no\n", want: false},
+		{name: "environment", sessions: `{"sessions":[{"name":"one","running":true},{"name":"two","running":true}]}`, env: map[string]string{"HERDR_SESSION": "two"}, want: "two"},
+		{name: "single running", sessions: `{"sessions":[{"name":"only","running":true},{"name":"old","running":false}]}`, want: "only"},
+		{name: "ambiguous", sessions: `{"sessions":[{"name":"one","running":true},{"name":"two","running":true}]}`, wantErr: "multiple sessions are running"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			approved, err := confirmCommanderStart(strings.NewReader(test.input), io.Discard, "codex")
-			if err != nil || approved != test.want {
-				t.Fatalf("approved=%v err=%v", approved, err)
+		t.Run(test.name, func(t *testing.T) {
+			binary := filepath.Join(t.TempDir(), "fake-herdr")
+			writeCLIFile(t, binary, fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %q\n", test.sessions), 0o700)
+			got, err := detectHerdrSession(context.Background(), binary, "", func(key string) string { return test.env[key] })
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("session=%q err=%v", got, err)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("session=%q err=%v", got, err)
 			}
 		})
 	}
-	if _, err := confirmCommanderStart(strings.NewReader(""), io.Discard, "codex"); err == nil || !strings.Contains(err.Error(), "--yes") {
-		t.Fatalf("noninteractive confirmation error=%v", err)
+}
+
+func TestProjectRootFromCWD(t *testing.T) {
+	root := t.TempDir()
+	runCLIGit(t, root, "init")
+	nested := filepath.Join(root, "nested", "directory")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(nested); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(original) })
+	got, err := projectRootFromCWD(context.Background())
+	want, evalErr := filepath.EvalSymlinks(root)
+	if err != nil || evalErr != nil || got != want {
+		t.Fatalf("root=%q err=%v want=%q eval_err=%v", got, err, want, evalErr)
 	}
 }
 
-func TestCLIHomePrintsSnapshotStartsAndAttachesFromOutsideProject(t *testing.T) {
+func TestProjectRootFromCWDRejectsNonRepositoryPlainly(t *testing.T) {
+	original, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(original) })
+	if _, err := projectRootFromCWD(context.Background()); err == nil || !strings.Contains(err.Error(), "not inside a Git repository") {
+		t.Fatalf("non-repository error=%v", err)
+	}
+}
+
+func TestCLIHomeFromRepositoryStartsIntakeAndReattachesIdempotently(t *testing.T) {
 	root := t.TempDir()
 	projectPath := filepath.Join(root, "project")
+	if err := os.MkdirAll(projectPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runCLIGit(t, projectPath, "init")
 	writeCLIFile(t, filepath.Join(projectPath, "prompts", "commander", "AGENTS.md"), "PROJECT COMMANDER PROMPT\n", 0o600)
 	dbPath := filepath.Join(root, "pintellect.db")
-	store, err := db.Open(context.Background(), dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	projectID, err := store.CreateProject(context.Background(), "home_project", db.CreateProjectInput{Name: "home", Path: projectPath})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mission, err := store.CreateMission(context.Background(), "home_mission", db.CreateMissionInput{
-		ProjectID: projectID, Title: "Front door", Objective: "Start one conversational commander",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.CreateTask(context.Background(), "home_task", db.CreateTaskInput{
-		MissionID: mission.ID, Kind: domain.TaskImplementation, Title: "Queued work",
-		Objective: "Appear in home", DeliveryMode: domain.DeliveryBranch,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
 
 	callLog := filepath.Join(root, "herdr.calls")
 	herdrBinary := filepath.Join(root, "fake-herdr-home")
@@ -80,12 +95,14 @@ func TestCLIHomePrintsSnapshotStartsAndAttachesFromOutsideProject(t *testing.T) 
 set -eu
 printf '%%s\n' "$*" >> %q
 case "$1 $2" in
+	"session list") printf '{"sessions":[{"name":"fm-lab-home","running":true,"socket_path":"/tmp/lab.sock"}]}\n' ;;
   "workspace create") printf '{"result":{"workspace":{"workspace_id":"hw1"},"tab":{"tab_id":"hw1:t1"},"root_pane":{"pane_id":"hw1:p1"}}}\n' ;;
   "pane run"|"agent rename") printf '{"result":{"ok":true}}\n' ;;
   "pane read") printf 'OpenAI Codex\n' ;;
   "pane get") printf '{"result":{"pane":{"pane_id":"hw1:p1"}}}\n' ;;
   "agent get") printf '{"result":{"agent":{"agent":"codex","pane_id":"hw1:p1","agent_status":"idle","state_change_seq":1,"agent_session":{"value":"home-codex-session"}}}}\n' ;;
   "agent prompt") printf '{"result":{"agent":{"agent":"codex","pane_id":"hw1:p1","agent_session":{"value":"home-codex-session"}},"ok":true}}\n' ;;
+	"agent focus") printf '{"result":{"ok":true}}\n' ;;
   "agent attach") printf 'attached home commander\n' ;;
   *) exit 2 ;;
 esac
@@ -96,57 +113,60 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	outside := filepath.Join(root, "outside")
-	if err := os.Mkdir(outside, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(outside); err != nil {
+	if err := os.Chdir(projectPath); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(originalWorkingDir) })
+	t.Setenv("HERDR_SESSION", "fm-lab-home")
+	t.Setenv("HERDR_SOCKET_PATH", "")
+	t.Setenv("HERDR_CLIENT_SOCKET_PATH", "")
 
-	output := string(runCLI(t, "home", "--mission", string(mission.ID), "--db", dbPath, "--yes",
-		"--herdr", herdrBinary, "--herdr-session", "fm-lab-home"))
-	statusAt, attachAt := strings.Index(output, "Mission: Front door"), strings.Index(output, "Attaching:")
-	if statusAt < 0 || attachAt < 0 || statusAt >= attachAt || !strings.Contains(output, "Up Next") ||
-		!strings.Contains(output, "attached home commander") {
-		t.Fatalf("home output did not snapshot then attach:\n%s", output)
+	output := string(runCLI(t, "home", "--db", dbPath, "--herdr", herdrBinary))
+	if !strings.Contains(output, "intake mode") || !strings.Contains(output, "attached home commander") {
+		t.Fatalf("first home output:\n%s", output)
+	}
+	output = string(runCLI(t, "home", "--db", dbPath, "--herdr", herdrBinary))
+	if !strings.Contains(output, "attached home commander") || strings.Contains(output, "intake mode") {
+		t.Fatalf("second home output:\n%s", output)
 	}
 	calls, err := os.ReadFile(callLog)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(calls), "agent attach hw1:p1 --session fm-lab-home") {
-		t.Fatalf("home attach call missing session guard:\n%s", calls)
+	if strings.Count(string(calls), "workspace create") != 1 ||
+		strings.Count(string(calls), "agent attach hw1:p1 --session fm-lab-home") != 2 ||
+		strings.Count(string(calls), "agent focus hw1:p1 --session fm-lab-home") != 2 {
+		t.Fatalf("home should create once, focus and attach twice:\n%s", calls)
 	}
-	store, err = db.Open(context.Background(), dbPath)
+	store, err := db.Open(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
-	session, err := store.CommanderSession(context.Background(), mission.ID)
-	if err != nil || session.HerdrSessionName != "fm-lab-home" || session.AgentSessionID != "home-codex-session" {
-		t.Fatalf("home commander=%+v err=%v", session, err)
+	projects, err := store.Projects(context.Background())
+	physicalProject, evalErr := filepath.EvalSymlinks(projectPath)
+	if err != nil || evalErr != nil || len(projects) != 1 || projects[0].Path != physicalProject {
+		t.Fatalf("projects=%+v err=%v", projects, err)
+	}
+	session, err := store.ProjectCommanderSession(context.Background(), projects[0].ID)
+	if err != nil || session.MissionID != "" || session.HerdrSessionName != "fm-lab-home" {
+		t.Fatalf("intake commander=%+v err=%v", session, err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	output = string(runCLI(t, "home", "--mission", string(mission.ID), "--db", dbPath, "--herdr", herdrBinary))
-	if !strings.Contains(output, "Attaching:") || strings.Contains(output, "Commander started:") {
-		t.Fatalf("existing commander home path=%s", output)
-	}
-	calls, err = os.ReadFile(callLog)
-	if err != nil {
+	var mission domain.Mission
+	if err := json.Unmarshal(runCLI(t, "mission", "create", "--project", projects[0].Path, "--title", "Natural intake", "--objective", "Execute the described work", "--acceptance", "The result is verified", "--db", dbPath), &mission); err != nil {
 		t.Fatal(err)
-	}
-	if strings.Count(string(calls), "workspace create") != 1 || strings.Count(string(calls), "agent attach hw1:p1 --session fm-lab-home") != 2 {
-		t.Fatalf("home should start once and attach twice:\n%s", calls)
 	}
 	store, err = db.Open(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	bound, err := store.ProjectCommanderSession(context.Background(), projects[0].ID)
+	if err != nil || bound.ID != session.ID || bound.MissionID != mission.ID || mission.CommanderSessionID != session.ID {
+		t.Fatalf("bound commander=%+v mission=%+v err=%v", bound, mission, err)
+	}
 }
 
 func TestCLIKnowledgeLifecyclePreservesProposalProvenance(t *testing.T) {

@@ -24,14 +24,35 @@ func (r *Reconciler) Reconcile(ctx context.Context, missionID domain.MissionID) 
 	if err != nil {
 		return domain.CommanderSession{}, err
 	}
-	if persisted.State == domain.CommanderSessionStopped || persisted.State == domain.CommanderSessionFailed {
-		return persisted, nil
-	}
 	snapshot, err := r.Store.CommanderLaunchContext(ctx, missionID)
 	if err != nil {
 		return domain.CommanderSession{}, err
 	}
-	session := runtimeSession(persisted, snapshot.ProjectPath)
+	return r.reconcile(ctx, persisted, snapshot.ProjectPath)
+}
+
+// ReconcileProject applies the same M4/M7 husk-resume policy before home
+// attaches to a project-scoped intake commander.
+func (r *Reconciler) ReconcileProject(ctx context.Context, projectID domain.ProjectID) (domain.CommanderSession, error) {
+	if r == nil || r.Store == nil || r.Runtime == nil {
+		return domain.CommanderSession{}, errors.New("commander reconciler is not fully configured")
+	}
+	persisted, err := r.Store.ProjectCommanderSession(ctx, projectID)
+	if err != nil {
+		return domain.CommanderSession{}, err
+	}
+	project, err := r.Store.Project(ctx, string(projectID))
+	if err != nil {
+		return domain.CommanderSession{}, err
+	}
+	return r.reconcile(ctx, persisted, project.Path)
+}
+
+func (r *Reconciler) reconcile(ctx context.Context, persisted domain.CommanderSession, projectPath string) (domain.CommanderSession, error) {
+	if persisted.State == domain.CommanderSessionStopped || persisted.State == domain.CommanderSessionFailed {
+		return persisted, nil
+	}
+	session := runtimeSession(persisted, projectPath)
 	observed, err := r.Runtime.State(ctx, session)
 	if err != nil {
 		return domain.CommanderSession{}, err
@@ -65,7 +86,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, missionID domain.MissionID) 
 		return domain.CommanderSession{}, err
 	}
 	return r.Store.ObserveCommanderSession(ctx, commandID, db.ObserveCommanderSessionInput{
-		SessionID: persisted.ID, MissionID: missionID, ExpectedState: persisted.State,
+		SessionID: persisted.ID, ProjectID: persisted.ProjectID, MissionID: persisted.MissionID, ExpectedState: persisted.State,
 		ExpectedVersion: persisted.Version, ObservedState: state, FailureReason: reason,
 		Placement: placement, Actor: "reconciler",
 	})

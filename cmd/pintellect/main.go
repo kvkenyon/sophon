@@ -707,7 +707,7 @@ func criteriaValues(values []string) []domain.Criterion {
 func usage() {
 	fmt.Fprintln(os.Stderr, `Usage:
   pintellect init [--db PATH]
-  pintellect home [--mission ID] [--db PATH] [--yes]
+  pintellect home [--agent codex|claude] [--db PATH]
   pintellect status --mission ID [--db PATH] [--json]
   pintellect project add PATH [--name NAME] [--db PATH] [--json]
   pintellect project list [--db PATH] [--json]

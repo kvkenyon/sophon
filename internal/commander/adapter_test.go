@@ -36,13 +36,13 @@ func TestHerdrAdapterCommanderSurface(t *testing.T) {
 		t.Run(string(runtime), func(t *testing.T) {
 			terminal := &fakeTerminal{state: herdr.StateRunning}
 			adapter := HerdrAdapter{Terminal: terminal}
-			session, err := adapter.Start(context.Background(), StartConfig{SessionID: "csn_1", MissionID: "msn_1",
+			session, err := adapter.Start(context.Background(), StartConfig{SessionID: "csn_1", ProjectID: "prj_1", MissionID: "msn_1",
 				Runtime: runtime, WorkingDir: "/project", Prompt: "mission context", Model: "model",
 				PiExtensionPath: "/state/pi.ts"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if terminal.startRequest.Runtime != runtime || terminal.startRequest.AgentName != "pi-commander-msn_1" {
+			if terminal.startRequest.Runtime != runtime || terminal.startRequest.AgentName != "pi-commander-prj_1" {
 				t.Fatalf("start request = %+v", terminal.startRequest)
 			}
 			for name, operation := range map[string]func(context.Context, Session, string) (Session, error){

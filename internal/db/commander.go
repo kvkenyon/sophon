@@ -59,33 +59,60 @@ func (s *Store) CommanderLaunchContext(ctx context.Context, missionID domain.Mis
 }
 
 type RecordCommanderSessionInput struct {
+	ProjectID domain.ProjectID        `json:"project_id,omitempty"`
 	MissionID domain.MissionID        `json:"mission_id"`
 	Session   domain.CommanderSession `json:"session"`
 	Actor     string                  `json:"actor"`
 }
 
 func (s *Store) RecordCommanderSession(ctx context.Context, commandID domain.CommandID, in RecordCommanderSessionInput) (domain.CommanderSession, error) {
-	if in.MissionID == "" || strings.TrimSpace(in.Actor) == "" || in.Session.ID == "" ||
+	if (in.MissionID == "" && in.ProjectID == "") || strings.TrimSpace(in.Actor) == "" || in.Session.ID == "" ||
 		in.Session.Runtime == "" || in.Session.HerdrSessionName == "" || in.Session.HerdrWorkspaceID == "" ||
 		in.Session.HerdrTabID == "" || in.Session.HerdrPaneID == "" || in.Session.HerdrAgentName == "" ||
 		in.Session.AgentSessionID == "" {
 		return domain.CommanderSession{}, errors.New("complete commander session identity is required")
 	}
 	return runCommand(ctx, s, commandID, "commander.session.record", in, func(tx *sql.Tx) (domain.CommanderSession, error) {
-		mission, err := scanMission(tx.QueryRowContext(ctx, missionSelect+" WHERE id = ?", in.MissionID))
-		if err != nil {
-			return domain.CommanderSession{}, err
+		projectID := in.ProjectID
+		var mission domain.Mission
+		if in.MissionID != "" {
+			var err error
+			mission, err = scanMission(tx.QueryRowContext(ctx, missionSelect+" WHERE id = ?", in.MissionID))
+			if err != nil {
+				return domain.CommanderSession{}, err
+			}
+			if mission.CommanderSessionID != "" {
+				return domain.CommanderSession{}, errors.New("mission already has a commander session")
+			}
+			if projectID != "" && projectID != mission.ProjectID {
+				return domain.CommanderSession{}, errors.New("commander project does not own mission")
+			}
+			projectID = mission.ProjectID
+		} else {
+			var exists int
+			if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM projects WHERE id = ?", projectID).Scan(&exists); err != nil {
+				return domain.CommanderSession{}, fmt.Errorf("load commander project: %w", err)
+			}
+			if exists != 1 {
+				return domain.CommanderSession{}, ErrNotFound
+			}
 		}
-		if mission.CommanderSessionID != "" {
-			return domain.CommanderSession{}, errors.New("mission already has a commander session")
+		var existing int
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM commander_sessions WHERE project_id = ?", projectID).Scan(&existing); err != nil {
+			return domain.CommanderSession{}, fmt.Errorf("inspect project commander: %w", err)
+		}
+		if existing != 0 {
+			return domain.CommanderSession{}, errors.New("project already has a commander session")
 		}
 		var sequence int64
-		if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(sequence), 0) FROM events WHERE mission_id = ?", in.MissionID).Scan(&sequence); err != nil {
-			return domain.CommanderSession{}, fmt.Errorf("load commander event cursor: %w", err)
+		if in.MissionID != "" {
+			if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(sequence), 0) FROM events WHERE mission_id = ?", in.MissionID).Scan(&sequence); err != nil {
+				return domain.CommanderSession{}, fmt.Errorf("load commander event cursor: %w", err)
+			}
 		}
 		now := time.Now().UTC()
 		session := in.Session
-		session.MissionID, session.ProjectID = mission.ID, mission.ProjectID
+		session.MissionID, session.ProjectID = mission.ID, projectID
 		session.State, session.Version = domain.CommanderSessionRunning, 1
 		session.Budget = normalizeCommanderBudget(session.Budget)
 		session.TurnCount = 1
@@ -97,24 +124,30 @@ func (s *Store) RecordCommanderSession(ctx context.Context, commandID domain.Com
 			agent_session_id, model, pi_extension_path, last_event_sequence, created_at, updated_at,
 			max_turns, max_duration_ns, turn_count
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			session.ID, session.ProjectID, session.MissionID, session.Runtime, session.State, session.Version,
+			session.ID, session.ProjectID, nullableString(string(session.MissionID)), session.Runtime, session.State, session.Version,
 			session.HerdrSessionName, session.HerdrWorkspaceID, session.HerdrTabID, session.HerdrPaneID,
 			session.HerdrAgentName, session.AgentSessionID, nullableString(session.Model),
 			nullableString(session.PiExtensionPath), session.LastEventSequence, formatTime(now), formatTime(now),
 			session.Budget.MaxTurns, int64(session.Budget.MaxDuration), session.TurnCount); err != nil {
 			return domain.CommanderSession{}, fmt.Errorf("insert commander session: %w", err)
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE missions SET commander_session_id = ?, version = version + 1
-			WHERE id = ? AND commander_session_id IS NULL AND version = ?`, session.ID, mission.ID, mission.Version)
-		if err != nil {
-			return domain.CommanderSession{}, fmt.Errorf("bind commander mission: %w", err)
+		if in.MissionID != "" {
+			result, err := tx.ExecContext(ctx, `UPDATE missions SET commander_session_id = ?, version = version + 1
+				WHERE id = ? AND commander_session_id IS NULL AND version = ?`, session.ID, mission.ID, mission.Version)
+			if err != nil {
+				return domain.CommanderSession{}, fmt.Errorf("bind commander mission: %w", err)
+			}
+			if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+				return domain.CommanderSession{}, errors.New("stale commander mission binding")
+			}
 		}
-		if rows, err := result.RowsAffected(); err != nil || rows != 1 {
-			return domain.CommanderSession{}, errors.New("stale commander mission binding")
+		var missionID *domain.MissionID
+		if session.MissionID != "" {
+			missionID = &session.MissionID
 		}
-		if err := appendEvent(ctx, tx, eventInput{MissionID: &mission.ID, Actor: in.Actor,
+		if err := appendEvent(ctx, tx, eventInput{MissionID: missionID, Actor: in.Actor,
 			Type: "commander.started", CommandID: &commandID, Payload: map[string]any{
-				"commander_session_id": session.ID, "runtime": session.Runtime,
+				"commander_session_id": session.ID, "project_id": session.ProjectID, "runtime": session.Runtime,
 				"herdr_session_name": session.HerdrSessionName, "herdr_workspace_id": session.HerdrWorkspaceID,
 				"herdr_tab_id": session.HerdrTabID, "herdr_pane_id": session.HerdrPaneID,
 			}}); err != nil {
@@ -122,6 +155,23 @@ func (s *Store) RecordCommanderSession(ctx context.Context, commandID domain.Com
 		}
 		return session, nil
 	})
+}
+
+// ProjectCommanderSession returns the one persistent commander placement for
+// a project, whether it is in conversational intake or bound to a mission.
+func (s *Store) ProjectCommanderSession(ctx context.Context, projectID domain.ProjectID) (domain.CommanderSession, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM commander_sessions WHERE project_id = ?", projectID).Scan(&count); err != nil {
+		return domain.CommanderSession{}, fmt.Errorf("count project commanders: %w", err)
+	}
+	if count > 1 {
+		return domain.CommanderSession{}, errors.New("project has multiple commander sessions")
+	}
+	session, err := scanCommanderSession(s.db.QueryRowContext(ctx, commanderSessionSelect+" WHERE project_id = ?", projectID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.CommanderSession{}, ErrNotFound
+	}
+	return session, err
 }
 
 func (s *Store) CommanderSession(ctx context.Context, missionID domain.MissionID) (domain.CommanderSession, error) {
@@ -207,6 +257,7 @@ type CommanderSessionPlacement struct {
 
 type ObserveCommanderSessionInput struct {
 	SessionID       domain.SessionID             `json:"session_id"`
+	ProjectID       domain.ProjectID             `json:"project_id,omitempty"`
 	MissionID       domain.MissionID             `json:"mission_id"`
 	ExpectedState   domain.CommanderSessionState `json:"expected_state"`
 	ExpectedVersion int64                        `json:"expected_version"`
@@ -217,8 +268,8 @@ type ObserveCommanderSessionInput struct {
 }
 
 func (s *Store) ObserveCommanderSession(ctx context.Context, commandID domain.CommandID, in ObserveCommanderSessionInput) (domain.CommanderSession, error) {
-	if in.SessionID == "" || in.MissionID == "" || in.ExpectedVersion < 1 || strings.TrimSpace(in.Actor) == "" {
-		return domain.CommanderSession{}, errors.New("session, mission, version, and actor are required")
+	if in.SessionID == "" || (in.ProjectID == "" && in.MissionID == "") || in.ExpectedVersion < 1 || strings.TrimSpace(in.Actor) == "" {
+		return domain.CommanderSession{}, errors.New("session, project or mission, version, and actor are required")
 	}
 	if in.ExpectedState != in.ObservedState {
 		if err := commanderpolicy.ValidateTransition(in.ExpectedState, in.ObservedState); err != nil {
@@ -233,7 +284,9 @@ func (s *Store) ObserveCommanderSession(ctx context.Context, commandID domain.Co
 		if err != nil {
 			return domain.CommanderSession{}, err
 		}
-		if current.MissionID != in.MissionID || current.State != in.ExpectedState || current.Version != in.ExpectedVersion {
+		if (in.ProjectID != "" && current.ProjectID != in.ProjectID) ||
+			(in.MissionID != "" && current.MissionID != in.MissionID) ||
+			current.State != in.ExpectedState || current.Version != in.ExpectedVersion {
 			return domain.CommanderSession{}, errors.New("stale commander-session observation")
 		}
 		workspace, tab, pane := current.HerdrWorkspaceID, current.HerdrTabID, current.HerdrPaneID
@@ -247,9 +300,9 @@ func (s *Store) ObserveCommanderSession(ctx context.Context, commandID domain.Co
 		result, err := tx.ExecContext(ctx, `UPDATE commander_sessions SET state = ?, version = version + 1,
 			updated_at = ?, last_observed_at = ?, herdr_workspace_id = ?, herdr_tab_id = ?, herdr_pane_id = ?,
 			failure_reason = ?, stopped_at = CASE WHEN ? = 'stopped' THEN ? ELSE stopped_at END
-			WHERE id = ? AND mission_id = ? AND state = ? AND version = ?`, in.ObservedState, formatTime(now),
+			WHERE id = ? AND project_id = ? AND state = ? AND version = ?`, in.ObservedState, formatTime(now),
 			formatTime(now), workspace, tab, pane, nullableString(in.FailureReason), in.ObservedState, formatTime(now),
-			in.SessionID, in.MissionID, in.ExpectedState, in.ExpectedVersion)
+			in.SessionID, current.ProjectID, in.ExpectedState, in.ExpectedVersion)
 		if err != nil {
 			return domain.CommanderSession{}, err
 		}
@@ -261,7 +314,11 @@ func (s *Store) ObserveCommanderSession(ctx context.Context, commandID domain.Co
 			return domain.CommanderSession{}, err
 		}
 		if in.ExpectedState != in.ObservedState || in.Placement != nil {
-			if err := appendEvent(ctx, tx, eventInput{MissionID: &in.MissionID, Actor: in.Actor,
+			var missionID *domain.MissionID
+			if current.MissionID != "" {
+				missionID = &current.MissionID
+			}
+			if err := appendEvent(ctx, tx, eventInput{MissionID: missionID, Actor: in.Actor,
 				Type: "commander.session." + string(in.ObservedState), CommandID: &commandID,
 				Payload: map[string]any{"commander_session_id": in.SessionID, "from": in.ExpectedState,
 					"to": in.ObservedState, "herdr_pane_id": updated.HerdrPaneID, "reason": in.FailureReason}}); err != nil {

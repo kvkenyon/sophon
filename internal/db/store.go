@@ -70,6 +70,25 @@ func (s *Store) CreateMission(ctx context.Context, commandID domain.CommandID, i
 		return domain.Mission{}, errors.New("project, title, and objective are required")
 	}
 	return runCommand(ctx, s, commandID, "mission.create", in, func(tx *sql.Tx) (domain.Mission, error) {
+		commanderSessionID := in.CommanderSessionID
+		if commanderSessionID == "" {
+			err := tx.QueryRowContext(ctx, `SELECT id FROM commander_sessions
+				WHERE project_id = ? AND mission_id IS NULL ORDER BY created_at LIMIT 1`, in.ProjectID).
+				Scan(&commanderSessionID)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return domain.Mission{}, fmt.Errorf("load project intake commander: %w", err)
+			}
+		} else {
+			var projectID domain.ProjectID
+			var missionID sql.NullString
+			if err := tx.QueryRowContext(ctx, "SELECT project_id, mission_id FROM commander_sessions WHERE id = ?", commanderSessionID).
+				Scan(&projectID, &missionID); err != nil {
+				return domain.Mission{}, mapNotFound("load mission commander", err)
+			}
+			if projectID != in.ProjectID || missionID.Valid {
+				return domain.Mission{}, errors.New("commander is not the project's intake session")
+			}
+		}
 		rawID, err := id.New("msn")
 		if err != nil {
 			return domain.Mission{}, err
@@ -81,7 +100,7 @@ func (s *Store) CreateMission(ctx context.Context, commandID domain.CommandID, i
 		now := time.Now().UTC()
 		mission := domain.Mission{
 			ID: domain.MissionID(rawID), ProjectID: in.ProjectID,
-			CommanderSessionID: in.CommanderSessionID, Title: in.Title, Objective: in.Objective,
+			CommanderSessionID: commanderSessionID, Title: in.Title, Objective: in.Objective,
 			AcceptanceCriteria: in.AcceptanceCriteria, State: domain.MissionActive,
 			Version: 1, Budget: in.Budget, CreatedAt: now,
 		}
@@ -102,6 +121,22 @@ func (s *Store) CreateMission(ctx context.Context, commandID domain.CommandID, i
 			Payload: map[string]any{"state": mission.State, "version": mission.Version},
 		}); err != nil {
 			return domain.Mission{}, err
+		}
+		if commanderSessionID != "" {
+			var sequence int64
+			if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(sequence), 0) FROM events WHERE mission_id = ?", mission.ID).Scan(&sequence); err != nil {
+				return domain.Mission{}, fmt.Errorf("load mission creation cursor: %w", err)
+			}
+			result, err := tx.ExecContext(ctx, `UPDATE commander_sessions
+				SET mission_id = ?, last_event_sequence = ?, version = version + 1, updated_at = ?
+				WHERE id = ? AND project_id = ? AND mission_id IS NULL`, mission.ID, sequence,
+				formatTime(now), commanderSessionID, mission.ProjectID)
+			if err != nil {
+				return domain.Mission{}, fmt.Errorf("bind intake commander to mission: %w", err)
+			}
+			if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+				return domain.Mission{}, errors.New("stale intake commander binding")
+			}
 		}
 		if _, err := regenerateMissionDigestTx(ctx, tx, mission.ID, "control-plane", "mission.created", &commandID); err != nil {
 			return domain.Mission{}, err

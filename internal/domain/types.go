@@ -207,9 +207,11 @@ const (
 	CommanderSessionStopped        CommanderSessionState = "stopped"
 )
 
-// CommanderSession is the durable binding between one mission and one
-// resumable interactive agent. Herdr pane identity is operational placement;
-// AgentSessionID is the logical runtime identity used after a daemon restart.
+// CommanderSession is the durable binding between one project and one
+// resumable interactive agent. MissionID is empty during conversational
+// intake and is bound when that commander creates the mission. Herdr pane
+// identity is operational placement; AgentSessionID is the logical runtime
+// identity used after a daemon restart.
 type CommanderSession struct {
 	ID                SessionID             `json:"id"`
 	MissionID         MissionID             `json:"mission_id"`

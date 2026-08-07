@@ -21,6 +21,7 @@ const (
 
 type StartConfig struct {
 	SessionID       domain.SessionID
+	ProjectID       domain.ProjectID
 	MissionID       domain.MissionID
 	Runtime         herdr.Runtime
 	WorkingDir      string
@@ -31,6 +32,7 @@ type StartConfig struct {
 
 type Session struct {
 	ID        domain.SessionID
+	ProjectID domain.ProjectID
 	MissionID domain.MissionID
 	Runtime   herdr.Runtime
 	Herdr     herdr.Session
@@ -62,8 +64,8 @@ func (a HerdrAdapter) Start(ctx context.Context, config StartConfig) (Session, e
 	if a.Terminal == nil {
 		return Session{}, errors.New("commander Herdr terminal is required")
 	}
-	if config.SessionID == "" || config.MissionID == "" || strings.TrimSpace(config.WorkingDir) == "" || strings.TrimSpace(config.Prompt) == "" {
-		return Session{}, errors.New("commander session, mission, working directory, and prompt are required")
+	if config.SessionID == "" || config.ProjectID == "" || strings.TrimSpace(config.WorkingDir) == "" || strings.TrimSpace(config.Prompt) == "" {
+		return Session{}, errors.New("commander session, project, working directory, and prompt are required")
 	}
 	switch config.Runtime {
 	case herdr.RuntimeCodex, herdr.RuntimeClaude, herdr.RuntimePi:
@@ -71,14 +73,14 @@ func (a HerdrAdapter) Start(ctx context.Context, config StartConfig) (Session, e
 		return Session{}, fmt.Errorf("unsupported commander runtime %q", config.Runtime)
 	}
 	runtimeSession, err := a.Terminal.Start(ctx, herdr.StartRequest{
-		AgentName: "pi-commander-" + string(config.MissionID), Attempt: 1,
+		AgentName: "pi-commander-" + string(config.ProjectID), Attempt: 1,
 		WorktreePath: config.WorkingDir, Brief: config.Prompt, Runtime: config.Runtime,
 		Model: config.Model, PiExtensionPath: config.PiExtensionPath,
 	})
 	if err != nil {
 		return Session{}, err
 	}
-	return Session{ID: config.SessionID, MissionID: config.MissionID, Runtime: config.Runtime, Herdr: runtimeSession}, nil
+	return Session{ID: config.SessionID, ProjectID: config.ProjectID, MissionID: config.MissionID, Runtime: config.Runtime, Herdr: runtimeSession}, nil
 }
 
 func (a HerdrAdapter) Prompt(ctx context.Context, session Session, message string) (Session, error) {
@@ -148,7 +150,7 @@ func (a HerdrAdapter) Abort(ctx context.Context, session Session) error {
 
 func runtimeSession(session domain.CommanderSession, workingDir string) Session {
 	runtime := herdr.Runtime(session.Runtime)
-	return Session{ID: session.ID, MissionID: session.MissionID, Runtime: runtime, Herdr: herdr.Session{
+	return Session{ID: session.ID, ProjectID: session.ProjectID, MissionID: session.MissionID, Runtime: runtime, Herdr: herdr.Session{
 		Runtime: runtime, AgentName: session.HerdrAgentName, AgentSessionID: session.AgentSessionID,
 		SessionName: session.HerdrSessionName, WorkspaceID: session.HerdrWorkspaceID,
 		TabID: session.HerdrTabID, PaneID: session.HerdrPaneID, WorktreePath: workingDir,

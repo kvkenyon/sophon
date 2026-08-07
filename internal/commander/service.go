@@ -26,6 +26,14 @@ type StartRequest struct {
 	Budget          domain.CommanderBudget
 }
 
+type ProjectStartRequest struct {
+	ProjectID    domain.ProjectID
+	Runtime      herdr.Runtime
+	Model        string
+	DatabasePath string
+	Budget       domain.CommanderBudget
+}
+
 type StartResult struct {
 	Session domain.CommanderSession `json:"commander_session"`
 	Prompt  string                  `json:"-"`
@@ -42,6 +50,11 @@ func (s *Starter) Start(ctx context.Context, in StartRequest) (StartResult, erro
 	if snapshot.Mission.CommanderSessionID != "" {
 		return StartResult{}, errors.New("mission already has a commander session")
 	}
+	if _, err := s.Store.ProjectCommanderSession(ctx, snapshot.Mission.ProjectID); err == nil {
+		return StartResult{}, errors.New("project already has a commander session")
+	} else if !errors.Is(err, db.ErrNotFound) {
+		return StartResult{}, err
+	}
 	prompt, err := s.Prompts.Compose(snapshot)
 	if err != nil {
 		return StartResult{}, err
@@ -51,7 +64,8 @@ func (s *Starter) Start(ctx context.Context, in StartRequest) (StartResult, erro
 		return StartResult{}, err
 	}
 	runtimeSession, err := s.Runtime.Start(ctx, StartConfig{
-		SessionID: domain.SessionID(rawSessionID), MissionID: in.MissionID, Runtime: in.Runtime,
+		SessionID: domain.SessionID(rawSessionID), ProjectID: snapshot.Mission.ProjectID,
+		MissionID: in.MissionID, Runtime: in.Runtime,
 		WorkingDir: snapshot.ProjectPath, Prompt: prompt, Model: in.Model, PiExtensionPath: in.PiExtensionPath,
 	})
 	if err != nil {
@@ -72,6 +86,54 @@ func (s *Starter) Start(ctx context.Context, in StartRequest) (StartResult, erro
 	})
 	if err != nil {
 		return StartResult{}, fmt.Errorf("persist commander session: %w", err)
+	}
+	return StartResult{Session: recorded, Prompt: prompt}, nil
+}
+
+// StartProject launches a persistent commander directly into conversational
+// intake. A mission is deliberately absent until the operator describes work.
+func (s *Starter) StartProject(ctx context.Context, in ProjectStartRequest) (StartResult, error) {
+	if s == nil || s.Store == nil || s.Runtime == nil || in.ProjectID == "" {
+		return StartResult{}, errors.New("project commander starter is not fully configured")
+	}
+	project, err := s.Store.Project(ctx, string(in.ProjectID))
+	if err != nil {
+		return StartResult{}, err
+	}
+	if _, err := s.Store.ProjectCommanderSession(ctx, in.ProjectID); err == nil {
+		return StartResult{}, errors.New("project already has a commander session")
+	} else if !errors.Is(err, db.ErrNotFound) {
+		return StartResult{}, err
+	}
+	prompt, err := s.Prompts.ComposeIntake(project, in.DatabasePath)
+	if err != nil {
+		return StartResult{}, err
+	}
+	rawSessionID, err := id.New("csn")
+	if err != nil {
+		return StartResult{}, err
+	}
+	runtimeSession, err := s.Runtime.Start(ctx, StartConfig{
+		SessionID: domain.SessionID(rawSessionID), ProjectID: in.ProjectID, Runtime: in.Runtime,
+		WorkingDir: project.Path, Prompt: prompt, Model: in.Model,
+	})
+	if err != nil {
+		return StartResult{}, fmt.Errorf("launch intake commander: %w", err)
+	}
+	commandID, err := newCommandID()
+	if err != nil {
+		return StartResult{}, err
+	}
+	recorded, err := s.Store.RecordCommanderSession(ctx, commandID, db.RecordCommanderSessionInput{
+		ProjectID: in.ProjectID, Actor: "operator", Session: domain.CommanderSession{
+			ID: runtimeSession.ID, Runtime: string(in.Runtime), HerdrSessionName: runtimeSession.Herdr.SessionName,
+			HerdrWorkspaceID: runtimeSession.Herdr.WorkspaceID, HerdrTabID: runtimeSession.Herdr.TabID,
+			HerdrPaneID: runtimeSession.Herdr.PaneID, HerdrAgentName: runtimeSession.Herdr.AgentName,
+			AgentSessionID: runtimeSession.Herdr.AgentSessionID, Model: in.Model, Budget: in.Budget,
+		},
+	})
+	if err != nil {
+		return StartResult{}, fmt.Errorf("persist intake commander session: %w", err)
 	}
 	return StartResult{Session: recorded, Prompt: prompt}, nil
 }

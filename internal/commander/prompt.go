@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"parallel-intellect/internal/db"
+	"parallel-intellect/internal/domain"
 )
 
 type PromptComposer struct {
@@ -21,7 +22,82 @@ type PromptComposer struct {
 }
 
 func (c PromptComposer) Compose(snapshot db.CommanderLaunchContext) (string, error) {
-	dir, err := c.resolveDir(snapshot.ProjectPath)
+	baseline, err := c.promptSet(snapshot.ProjectPath)
+	if err != nil {
+		return "", err
+	}
+	var body strings.Builder
+	body.WriteString(baseline)
+	encoded, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("encode commander mission snapshot: %w", err)
+	}
+	fmt.Fprintf(&body, `
+
+# Bound mission
+
+Mode: mission resume
+Mission ID: %s
+Project: %s
+Project root: %s
+
+## Objective
+
+%s
+
+## Acceptance criteria
+`, snapshot.Mission.ID, snapshot.ProjectName, snapshot.ProjectPath, snapshot.Mission.Objective)
+	if len(snapshot.Mission.AcceptanceCriteria) == 0 {
+		body.WriteString("\n- No explicit acceptance criteria were recorded.\n")
+	} else {
+		for _, criterion := range snapshot.Mission.AcceptanceCriteria {
+			fmt.Fprintf(&body, "\n- %s", criterion.Description)
+		}
+		body.WriteByte('\n')
+	}
+	fmt.Fprintf(&body, "\n## Current mission state snapshot\n\n```json\n%s\n```\n", encoded)
+	return strings.TrimSpace(body.String()) + "\n", nil
+}
+
+// ComposeIntake builds the same durable commander baseline without inventing
+// a placeholder mission. The running agent binds itself by creating a real
+// mission after the operator describes the work conversationally.
+func (c PromptComposer) ComposeIntake(project domain.Project, databasePath string) (string, error) {
+	baseline, err := c.promptSet(project.Path)
+	if err != nil {
+		return "", err
+	}
+	var body strings.Builder
+	body.WriteString(baseline)
+	dbArgument := ""
+	if strings.TrimSpace(databasePath) != "" {
+		dbArgument = fmt.Sprintf(" --db %q", databasePath)
+	}
+	fmt.Fprintf(&body, `
+
+# Bound project intake
+
+Mode: intake (there is no mission yet)
+Project: %s
+Project ID: %s
+Project root: %s
+
+Greet the operator briefly and ask what we are working on. After the operator
+describes the task in natural language, infer a concise title, a concrete
+objective, and sensible acceptance criteria. Then run:
+
+    pintellect mission create --project %q --title <title> --objective <objective> --acceptance <criterion>%s
+
+Use repeated --acceptance arguments when useful. Read the returned mission ID,
+treat it as your bound mission, and proceed to execute it through the existing
+commander APIs. The operator must never be asked to run mission create. Do not
+create a speculative mission before receiving the operator's task description.
+`, project.Name, project.ID, project.Path, project.Path, dbArgument)
+	return strings.TrimSpace(body.String()) + "\n", nil
+}
+
+func (c PromptComposer) promptSet(projectPath string) (string, error) {
+	dir, err := c.resolveDir(projectPath)
 	if err != nil {
 		return "", err
 	}
@@ -52,33 +128,7 @@ func (c PromptComposer) Compose(snapshot db.CommanderLaunchContext) (string, err
 		}
 		fmt.Fprintf(&body, "\n\n<!-- commander prompt: %s -->\n%s", filepath.ToSlash(path), content)
 	}
-	encoded, err := json.MarshalIndent(snapshot, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("encode commander mission snapshot: %w", err)
-	}
-	fmt.Fprintf(&body, `
-
-# Bound mission
-
-Mission ID: %s
-Project: %s
-
-## Objective
-
-%s
-
-## Acceptance criteria
-`, snapshot.Mission.ID, snapshot.ProjectName, snapshot.Mission.Objective)
-	if len(snapshot.Mission.AcceptanceCriteria) == 0 {
-		body.WriteString("\n- No explicit acceptance criteria were recorded.\n")
-	} else {
-		for _, criterion := range snapshot.Mission.AcceptanceCriteria {
-			fmt.Fprintf(&body, "\n- %s", criterion.Description)
-		}
-		body.WriteByte('\n')
-	}
-	fmt.Fprintf(&body, "\n## Current mission state snapshot\n\n```json\n%s\n```\n", encoded)
-	return strings.TrimSpace(body.String()) + "\n", nil
+	return body.String(), nil
 }
 
 func (c PromptComposer) resolveDir(projectPath string) (string, error) {
