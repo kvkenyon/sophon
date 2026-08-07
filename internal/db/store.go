@@ -446,9 +446,11 @@ type taskQuerier interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-const taskSelect = `SELECT id, mission_id, parent_task_id, base_task_id, base_sha, kind, title, objective, acceptance_criteria_json,
+const taskSelectMany = `SELECT id, mission_id, parent_task_id, base_task_id, base_sha, kind, title, objective, acceptance_criteria_json,
 	state, version, priority, worker_agent, delivery_mode, current_attempt, created_at, updated_at, completed_at
-	FROM tasks WHERE id = ?`
+	FROM tasks`
+
+const taskSelect = taskSelectMany + ` WHERE id = ?`
 
 func getTaskTx(ctx context.Context, tx *sql.Tx, taskID domain.TaskID) (domain.Task, error) {
 	return scanTask(tx.QueryRowContext(ctx, taskSelect, taskID))

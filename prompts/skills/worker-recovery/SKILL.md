@@ -16,7 +16,7 @@ Load `agent-adapters` before any runtime-specific intervention.
 ## Reconcile before intervention
 
 Treat worker-session loss as a presence fact, not proof that task work or validation disappeared.
-Query the current task, attempt, lease, worker-session, validation, and delivery state through the Python commander API.
+Query the current task, attempt, lease, worker-session, validation, and delivery state through structured CLI APIs. Inspect worker-session state with `pintellect worker inspect TASK --attempt N --json`; use the task and mission timelines only for durable event evidence.
 An authoritative validation or delivery operation tied to the current head remains authoritative even when the worker session is lost.
 Handle its current state rather than creating a duplicate owner.
 
@@ -31,11 +31,11 @@ If ownership or worktree availability cannot be reconciled, leave state intact a
 ## Escalation order
 
 1. Inspect targeted structured state and the runtime's bounded current evidence.
-2. If the worker is waiting on a question its brief answers, send one concise clarification with `await intellect.message_worker(task_id, message)`.
-3. If it is confused or looping, use the verified adapter's least disruptive interruption and send one corrective message.
-4. If it is genuinely lost or remains unresponsive, request the control plane's supported recovery for the same task and attempt.
-   `TODO(spec-gap)`: V1 exposes `retry_task` for a new attempt but does not specify a commander API for relaunching the same attempt; do not substitute an invented runtime command.
-5. Use `await intellect.retry_task(task_id)` only when structured reconciliation and policy establish that a new attempt is required.
+2. If the worker is waiting on a question its brief answers, send one concise clarification through the verified runtime adapter.
+3. If it is confused or looping, use the verified adapter's least disruptive supported intervention and send one corrective message.
+4. If it is genuinely lost or remains unresponsive, inspect its durable worker-session state before considering a new attempt.
+   `TODO(spec-gap)`: V1 exposes `pintellect task retry TASK --db PATH` for a new attempt but does not specify a commander API for relaunching the same attempt; do not substitute an invented runtime command.
+5. Use `pintellect task retry TASK --db PATH` only when structured reconciliation and policy establish that a new attempt is required.
    A retry receives its own lease and completion fence; a stale attempt can never complete it.
 6. After a second failed controlled recovery, stop retrying automatically and report the plain failure, evidence, preserved work, and consequence.
 

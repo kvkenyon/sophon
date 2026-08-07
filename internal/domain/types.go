@@ -15,6 +15,15 @@ type (
 	ArtifactID string
 )
 
+// Project is a registered local repository. Registry mutations are owned by
+// the Store; callers use this projection for read-only inspection.
+type Project struct {
+	ID        ProjectID `json:"id"`
+	Name      string    `json:"name"`
+	Path      string    `json:"path"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type TreehouseLeaseState string
 
 const (

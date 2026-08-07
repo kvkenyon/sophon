@@ -14,9 +14,53 @@ import (
 
 func signalCommand(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("expected: pintellect signal list|inspect|resolve")
+		return errors.New("expected: pintellect signal raise|list|inspect|resolve")
 	}
 	switch args[0] {
+	case "raise":
+		flags := flag.NewFlagSet("signal raise", flag.ContinueOnError)
+		path := flags.String("db", "", "SQLite database path")
+		jsonOutput := flags.Bool("json", false, "emit JSON")
+		missionID := flags.String("mission", "", "mission ID")
+		taskID := flags.String("task", "", "optional task ID")
+		kind := flags.String("kind", string(signals.SignalDecision), "signal kind")
+		question := flags.String("question", "", "operator question")
+		contextText := flags.String("context", "", "supporting context")
+		recommendation := flags.String("recommendation", "", "recommended answer")
+		commandID := flags.String("command-id", "", "idempotency key")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 {
+			return errors.New("signal raise does not accept positional arguments")
+		}
+		store, err := db.Open(ctx, *path)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		command := domain.CommandID(*commandID)
+		if command == "" {
+			raw, err := id.New("cmd")
+			if err != nil {
+				return err
+			}
+			command = domain.CommandID(raw)
+		}
+		var task *domain.TaskID
+		if *taskID != "" {
+			value := domain.TaskID(*taskID)
+			task = &value
+		}
+		item, err := store.CreateSignal(ctx, command, db.CreateSignalInput{MissionID: domain.MissionID(*missionID), TaskID: task, Kind: signals.SignalKind(*kind), Question: *question, Context: *contextText, Recommendation: *recommendation, Actor: "commander"})
+		if err != nil {
+			return err
+		}
+		if *jsonOutput {
+			return encode(item)
+		}
+		fmt.Printf("%s\t%s\t%s\n", item.ID, item.Status, item.Question)
+		return nil
 	case "list":
 		flags := flag.NewFlagSet("signal list", flag.ContinueOnError)
 		path := flags.String("db", "", "SQLite database path")

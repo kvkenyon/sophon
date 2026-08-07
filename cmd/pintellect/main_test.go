@@ -16,8 +16,106 @@ import (
 	"parallel-intellect/internal/delivery"
 	"parallel-intellect/internal/domain"
 	"parallel-intellect/internal/signals"
+	statusview "parallel-intellect/internal/status"
 	"parallel-intellect/internal/worker"
 )
+
+func TestCLIStatusSnapshotSectionsAndJSON(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID, err := store.CreateProject(ctx, "status_project", db.CreateProjectInput{Name: "status", Path: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mission, err := store.CreateMission(ctx, "status_mission", db.CreateMissionInput{ProjectID: projectID, Title: "Status", Objective: "exercise snapshot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeTask := func(name string) domain.Task {
+		task, err := store.CreateTask(ctx, domain.CommandID("status_task_"+name), db.CreateTaskInput{MissionID: mission.ID, Kind: domain.TaskImplementation, Title: name, Objective: name, DeliveryMode: domain.DeliveryBranch})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return task
+	}
+	transition := func(task domain.Task, to domain.TaskState) domain.Task {
+		updated, err := store.TransitionTask(ctx, domain.CommandID("status_transition_"+string(task.ID)+"_"+string(to)), db.TransitionTaskInput{TaskID: task.ID, Attempt: task.CurrentAttempt, ExpectedState: task.State, ExpectedVersion: task.Version, To: to, Actor: "commander"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return updated
+	}
+	blocked := makeTask("blocked")
+	blocked = transition(blocked, domain.TaskProvisioning)
+	blocked = transition(blocked, domain.TaskStarting)
+	blocked = transition(blocked, domain.TaskRunning)
+	_ = transition(blocked, domain.TaskBlocked)
+	completed := makeTask("completed")
+	completed = transition(completed, domain.TaskProvisioning)
+	completed = transition(completed, domain.TaskStarting)
+	completed = transition(completed, domain.TaskRunning)
+	completed = transition(completed, domain.TaskCollecting)
+	_ = transition(completed, domain.TaskReady)
+	underway := makeTask("underway")
+	_ = transition(underway, domain.TaskProvisioning)
+	queued := makeTask("queued")
+	if _, err := store.CreateSignal(ctx, "status_signal", db.CreateSignalInput{MissionID: mission.ID, TaskID: &queued.ID, Kind: signals.SignalDecision, Question: "Choose a path", Actor: "commander"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var snapshot statusview.Snapshot
+	if err := json.Unmarshal(runCLI(t, "status", "--mission", string(mission.ID), "--db", dbPath, "--json"), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Mission == nil || snapshot.Mission.ID != mission.ID {
+		t.Fatalf("mission = %+v", snapshot.Mission)
+	}
+	if len(snapshot.NeedsYourAttention.Tasks) != 1 || snapshot.NeedsYourAttention.Tasks[0].Title != "blocked" || len(snapshot.NeedsYourAttention.Signals) != 1 {
+		t.Fatalf("attention = %+v", snapshot.NeedsYourAttention)
+	}
+	if len(snapshot.RecentlyCompleted) != 1 || snapshot.RecentlyCompleted[0].Title != "completed" {
+		t.Fatalf("completed = %+v", snapshot.RecentlyCompleted)
+	}
+	if len(snapshot.Underway) != 1 || snapshot.Underway[0].Title != "underway" {
+		t.Fatalf("underway = %+v", snapshot.Underway)
+	}
+	if len(snapshot.UpNext) != 1 || snapshot.UpNext[0].Title != "queued" {
+		t.Fatalf("up next = %+v", snapshot.UpNext)
+	}
+	var shape map[string]json.RawMessage
+	if err := json.Unmarshal(runCLI(t, "status", "--mission", string(mission.ID), "--db", dbPath, "--json"), &shape); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"needs_your_attention", "recently_completed", "underway", "up_next"} {
+		if _, ok := shape[key]; !ok {
+			t.Errorf("JSON lacks %q: %s", key, shape)
+		}
+	}
+	human := string(runCLI(t, "status", "--mission", string(mission.ID), "--db", dbPath))
+	for _, section := range []string{"Needs Your Attention", "Recently Completed", "Underway", "Up Next"} {
+		if !strings.Contains(human, section) {
+			t.Errorf("human status lacks %q: %s", section, human)
+		}
+	}
+}
+
+func TestCLIStatusEmptyMission(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	var snapshot statusview.Snapshot
+	if err := json.Unmarshal(runCLI(t, "status", "--db", dbPath, "--json"), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Mission != nil || len(snapshot.NeedsYourAttention.Tasks) != 0 || len(snapshot.NeedsYourAttention.Signals) != 0 || len(snapshot.RecentlyCompleted) != 0 || len(snapshot.Underway) != 0 || len(snapshot.UpNext) != 0 {
+		t.Fatalf("empty snapshot = %+v", snapshot)
+	}
+}
 
 func TestCLISignalListInspectAndResolveJSON(t *testing.T) {
 	ctx := context.Background()

@@ -17,6 +17,7 @@ import (
 	gitcontrol "parallel-intellect/internal/git"
 	"parallel-intellect/internal/herdr"
 	"parallel-intellect/internal/id"
+	statusview "parallel-intellect/internal/status"
 	"parallel-intellect/internal/treehouse"
 	validationcore "parallel-intellect/internal/validation"
 	"parallel-intellect/internal/worker"
@@ -44,6 +45,10 @@ func run(ctx context.Context, args []string) error {
 		return initialize(ctx, args[1:])
 	case "mission":
 		return mission(ctx, args[1:])
+	case "project":
+		return project(ctx, args[1:])
+	case "status":
+		return statusCommand(ctx, args[1:])
 	case "task":
 		return task(ctx, args[1:])
 	case "worker":
@@ -81,6 +86,74 @@ func mission(ctx context.Context, args []string) error {
 		return timeline(ctx, "mission", args[1], args[2:])
 	}
 	return errors.New("expected: pintellect mission create|timeline")
+}
+
+func statusCommand(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("status", flag.ContinueOnError)
+	dbPath := flags.String("db", "", "SQLite database path")
+	missionID := flags.String("mission", "", "mission ID")
+	jsonOutput := flags.Bool("json", false, "emit JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("status does not accept positional arguments")
+	}
+	store, err := openStore(ctx, *dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	var snapshot statusview.Snapshot
+	if strings.TrimSpace(*missionID) == "" {
+		missions, err := store.Missions(ctx)
+		if err != nil {
+			return err
+		}
+		switch len(missions) {
+		case 0:
+			snapshot = statusview.Empty()
+		case 1:
+			snapshot, err = statusview.Load(ctx, store, missions[0].ID)
+		default:
+			return errors.New("status requires --mission ID when multiple missions exist")
+		}
+	} else {
+		snapshot, err = statusview.Load(ctx, store, domain.MissionID(*missionID))
+	}
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return encode(snapshot)
+	}
+	printStatus(snapshot)
+	return nil
+}
+
+func printStatus(snapshot statusview.Snapshot) {
+	if snapshot.Mission != nil {
+		fmt.Printf("Mission: %s (%s)\n", snapshot.Mission.Title, snapshot.Mission.ID)
+	}
+	fmt.Println("Needs Your Attention")
+	for _, task := range snapshot.NeedsYourAttention.Tasks {
+		fmt.Printf("  task  %s [%s] %s\n", task.ID, task.State, task.Title)
+	}
+	for _, signal := range snapshot.NeedsYourAttention.Signals {
+		fmt.Printf("  signal %s [%s] %s\n", signal.ID, signal.Kind, signal.Question)
+	}
+	fmt.Println("Recently Completed")
+	for _, task := range snapshot.RecentlyCompleted {
+		fmt.Printf("  %s [%s] %s\n", task.ID, task.State, task.Title)
+	}
+	fmt.Println("Underway")
+	for _, task := range snapshot.Underway {
+		fmt.Printf("  %s [%s] %s\n", task.ID, task.State, task.Title)
+	}
+	fmt.Println("Up Next")
+	for _, task := range snapshot.UpNext {
+		fmt.Printf("  %s [%s] %s\n", task.ID, task.State, task.Title)
+	}
 }
 
 func missionCreate(ctx context.Context, args []string) error {
@@ -432,10 +505,47 @@ func taskValidate(ctx context.Context, taskID domain.TaskID, args []string) erro
 }
 
 func workerCommand(ctx context.Context, args []string) error {
+	if len(args) >= 2 && args[0] == "inspect" {
+		return workerInspect(ctx, domain.TaskID(args[1]), args[2:])
+	}
 	if len(args) >= 2 && args[0] == "complete" {
 		return workerComplete(ctx, domain.TaskID(args[1]), args[2:])
 	}
-	return errors.New("expected: pintellect worker complete TASK --attempt N --head-sha SHA --result FILE")
+	return errors.New("expected: pintellect worker inspect TASK [--attempt N] [--db PATH] [--json]|complete TASK --attempt N --head-sha SHA --result FILE")
+}
+
+func workerInspect(ctx context.Context, taskID domain.TaskID, args []string) error {
+	flags := flag.NewFlagSet("worker inspect", flag.ContinueOnError)
+	dbPath := flags.String("db", "", "SQLite database path")
+	attempt := flags.Int("attempt", 0, "task attempt (defaults to current)")
+	jsonOutput := flags.Bool("json", false, "emit JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("worker inspect does not accept positional arguments")
+	}
+	store, err := openStore(ctx, *dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if *attempt == 0 {
+		task, err := store.Task(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		*attempt = task.CurrentAttempt
+	}
+	session, err := store.WorkerSession(ctx, taskID, *attempt)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return encode(session)
+	}
+	fmt.Printf("%s\t%s\t%s\t%s\n", session.ID, session.State, session.HerdrPaneID, session.AgentSessionID)
+	return nil
 }
 
 func workerComplete(ctx context.Context, taskID domain.TaskID, args []string) error {
@@ -561,6 +671,10 @@ func criteriaValues(values []string) []domain.Criterion {
 func usage() {
 	fmt.Fprintln(os.Stderr, `Usage:
   pintellect init [--db PATH]
+	  pintellect status --mission ID [--db PATH] [--json]
+	  pintellect project add PATH [--name NAME] [--db PATH] [--json]
+	  pintellect project list [--db PATH] [--json]
+	  pintellect project inspect NAME [--db PATH] [--json]
   pintellect mission create --project PATH --title TITLE --objective OBJECTIVE [--acceptance TEXT]
   pintellect task create MISSION --title TITLE --objective OBJECTIVE [--acceptance TEXT]
   pintellect task start TASK [--herdr-session NAME] [--db PATH]
@@ -570,7 +684,9 @@ func usage() {
   pintellect task deliver TASK [--command-id ID] [--base BRANCH] [--db PATH]
   pintellect task release TASK [--command-id ID] [--db PATH]
   pintellect worker complete TASK --attempt N --head-sha SHA --result FILE [--db PATH]
+	  pintellect worker inspect TASK [--attempt N] [--db PATH] [--json]
   pintellect task|mission timeline ID [--db PATH] [--json]
+  pintellect signal raise --mission ID --question TEXT [--task ID] [--kind KIND] [--context TEXT] [--recommendation TEXT] [--command-id ID] [--db PATH] [--json]
   pintellect signal list [--mission ID] [--status STATUS] [--db PATH] [--json]
   pintellect signal inspect <id> [--db PATH] [--json]
   pintellect signal resolve <id> --answer ANSWER [--command-id ID] [--db PATH] [--json]
