@@ -12,6 +12,7 @@ import (
 
 	"parallel-intellect/internal/db"
 	"parallel-intellect/internal/domain"
+	runtimeprompts "parallel-intellect/prompts"
 )
 
 type PromptComposer struct {
@@ -97,17 +98,23 @@ create a speculative mission before receiving the operator's task description.
 }
 
 func (c PromptComposer) promptSet(projectPath string) (string, error) {
-	dir, err := c.resolveDir(projectPath)
+	if dir, err := c.resolveDir(projectPath); err == nil {
+		return readPromptSet(os.DirFS(dir), ".")
+	} else if strings.TrimSpace(c.Dir) != "" {
+		return "", err
+	}
+	promptFS, root, err := runtimeprompts.Set("commander")
 	if err != nil {
 		return "", err
 	}
+	return readPromptSet(promptFS, root)
+}
+
+func readPromptSet(promptFS fs.FS, root string) (string, error) {
 	var paths []string
-	if err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+	if err := fs.WalkDir(promptFS, root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return nil
 		}
 		if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), ".md") {
 			paths = append(paths, path)
@@ -122,7 +129,7 @@ func (c PromptComposer) promptSet(projectPath string) (string, error) {
 	sort.Strings(paths)
 	var body strings.Builder
 	for _, path := range paths {
-		content, err := os.ReadFile(path)
+		content, err := fs.ReadFile(promptFS, path)
 		if err != nil {
 			return "", fmt.Errorf("read commander prompt %s: %w", path, err)
 		}
@@ -134,7 +141,7 @@ func (c PromptComposer) promptSet(projectPath string) (string, error) {
 func (c PromptComposer) resolveDir(projectPath string) (string, error) {
 	relative := strings.TrimSpace(c.Dir)
 	if relative == "" {
-		relative = filepath.Join("prompts", "commander")
+		return "", os.ErrNotExist
 	}
 	if filepath.IsAbs(relative) {
 		return relative, nil
@@ -155,5 +162,5 @@ func (c PromptComposer) resolveDir(projectPath string) (string, error) {
 			return "", fmt.Errorf("inspect commander prompt set %s: %w", candidate, err)
 		}
 	}
-	return "", fmt.Errorf("commander prompt set not found relative to registered project or binary install directory (checked %s)", strings.Join(candidates, ", "))
+	return "", fmt.Errorf("commander prompt set not found in explicit override (checked %s)", strings.Join(candidates, ", "))
 }

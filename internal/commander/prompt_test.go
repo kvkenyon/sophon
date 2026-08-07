@@ -10,22 +10,16 @@ import (
 	"parallel-intellect/internal/domain"
 )
 
-func TestPromptComposerResolvesProjectThenInstallDirNeverCWD(t *testing.T) {
+func TestPromptComposerUsesEmbeddedPromptsOutsideRepository(t *testing.T) {
+	t.Setenv("PINTELLECT_PROMPT_DIR", "")
 	root := t.TempDir()
 	project := filepath.Join(root, "project")
-	install := filepath.Join(root, "install")
 	outside := filepath.Join(root, "outside")
-	for path, content := range map[string]string{
-		filepath.Join(project, "prompts", "commander", "AGENTS.md"): "PROJECT PROMPT",
-		filepath.Join(install, "prompts", "commander", "AGENTS.md"): "INSTALL PROMPT",
-		filepath.Join(outside, "prompts", "commander", "AGENTS.md"): "CWD PROMPT",
-	} {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
 	}
 	original, err := os.Getwd()
 	if err != nil {
@@ -40,22 +34,38 @@ func TestPromptComposerResolvesProjectThenInstallDirNeverCWD(t *testing.T) {
 		ProjectPath: project, ProjectName: "project",
 		Mission: domain.Mission{ID: "msn_prompt", Objective: "resolve prompts"},
 	}
-	composed, err := (PromptComposer{InstallDir: install}).Compose(snapshot)
+	composed, err := (PromptComposer{}).Compose(snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(composed, "PROJECT PROMPT") || strings.Contains(composed, "INSTALL PROMPT") || strings.Contains(composed, "CWD PROMPT") {
-		t.Fatalf("project prompt resolution:\n%s", composed)
+	if !strings.Contains(composed, "# Parallel Intellect commander") {
+		t.Fatalf("embedded prompt missing:\n%s", composed)
 	}
-	if err := os.RemoveAll(filepath.Join(project, "prompts")); err != nil {
+	if strings.Contains(composed, "CWD PROMPT") {
+		t.Fatalf("read prompt from current directory:\n%s", composed)
+	}
+}
+
+func TestPromptComposerPrefersEnvironmentOverride(t *testing.T) {
+	root := t.TempDir()
+	promptRoot := filepath.Join(root, "prompts")
+	commanderDir := filepath.Join(promptRoot, "commander")
+	if err := os.MkdirAll(commanderDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	composed, err = (PromptComposer{InstallDir: install}).Compose(snapshot)
+	if err := os.WriteFile(filepath.Join(commanderDir, "AGENTS.md"), []byte("OVERRIDE COMMANDER PROMPT"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PINTELLECT_PROMPT_DIR", promptRoot)
+	composed, err := (PromptComposer{}).Compose(db.CommanderLaunchContext{
+		ProjectPath: filepath.Join(root, "project"), ProjectName: "project",
+		Mission: domain.Mission{ID: "msn_prompt", Objective: "resolve prompts"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(composed, "INSTALL PROMPT") || strings.Contains(composed, "CWD PROMPT") {
-		t.Fatalf("install prompt resolution:\n%s", composed)
+	if !strings.Contains(composed, "OVERRIDE COMMANDER PROMPT") || strings.Contains(composed, "# Parallel Intellect commander") {
+		t.Fatalf("environment override was not preferred:\n%s", composed)
 	}
 }
 

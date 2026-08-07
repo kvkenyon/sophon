@@ -4,12 +4,13 @@ package worker
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"parallel-intellect/internal/domain"
-	workerprompts "parallel-intellect/prompts/workers"
+	runtimeprompts "parallel-intellect/prompts"
 )
 
 type BriefInput struct {
@@ -74,10 +75,14 @@ func (g BriefGenerator) Render(in BriefInput) (string, error) {
 		validations = []string{"Run the repository's focused tests for changed behavior.", "Run the repository's required build and test commands."}
 	}
 
+	common, implementation, err := workerPromptOverlays()
+	if err != nil {
+		return "", err
+	}
 	var body strings.Builder
-	body.WriteString(strings.TrimSpace(workerprompts.Common))
+	body.WriteString(common)
 	body.WriteString("\n\n")
-	body.WriteString(strings.TrimSpace(workerprompts.Implementation))
+	body.WriteString(implementation)
 	body.WriteString("\n\n# Codex runtime overlay\n\n")
 	body.WriteString("Use Codex autonomously for this one implementation attempt. Treat this complete prompt as the generated brief; do not wait for a human.\n")
 	body.WriteString("\n# Generated task brief\n\n")
@@ -137,6 +142,22 @@ func (g BriefGenerator) Render(in BriefInput) (string, error) {
 		return "", fmt.Errorf("publish task brief: %w", err)
 	}
 	return path, nil
+}
+
+func workerPromptOverlays() (string, string, error) {
+	promptFS, root, err := runtimeprompts.Set("workers")
+	if err != nil {
+		return "", "", err
+	}
+	common, err := fs.ReadFile(promptFS, filepath.ToSlash(filepath.Join(root, "common.md")))
+	if err != nil {
+		return "", "", fmt.Errorf("read common worker prompt: %w", err)
+	}
+	implementation, err := fs.ReadFile(promptFS, filepath.ToSlash(filepath.Join(root, "implementation.md")))
+	if err != nil {
+		return "", "", fmt.Errorf("read implementation worker prompt: %w", err)
+	}
+	return strings.TrimSpace(string(common)), strings.TrimSpace(string(implementation)), nil
 }
 
 func cleanLine(value string) string {

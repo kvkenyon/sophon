@@ -45,6 +45,8 @@ pintellect home --db /path/to/pintellect.db
 
 When more than one mission exists, add `--mission MSN_ID`. If the mission has no commander yet, `home` offers to start Codex; use `--yes` to accept that default without a prompt. Governed learning candidates can be reviewed with `pintellect knowledge list`, then advanced explicitly with `knowledge promote`, `knowledge reject`, or `knowledge supersede`.
 
+Runtime prompt sets are compiled into the binaries, so they work from any current directory. During development, set `PINTELLECT_PROMPT_DIR` to a checkout's `prompts/` directory to use live-edited commander, worker, and skill prompt files instead.
+
 ## Reliability testing
 
 The default test suite remains hermetic:
