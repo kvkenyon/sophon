@@ -1,3 +1,5 @@
+// Command sophon is the operator and commander entrypoint to the filesystem
+// protocol: every command is one short-lived invocation over internal/flow.
 package main
 
 import (
@@ -9,18 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
-	"sophon/internal/db"
-	"sophon/internal/delivery"
+	"sophon/internal/datahome"
 	"sophon/internal/domain"
-	gitcontrol "sophon/internal/git"
+	"sophon/internal/flow"
 	"sophon/internal/herdr"
 	"sophon/internal/id"
-	statusview "sophon/internal/status"
-	"sophon/internal/treehouse"
-	validationcore "sophon/internal/validation"
-	"sophon/internal/worker"
+	"sophon/internal/store"
+	runtimeprompts "sophon/prompts"
 )
 
 const version = "0.3.0-m3"
@@ -41,30 +39,28 @@ func run(ctx context.Context, args []string) error {
 	case "version":
 		fmt.Println(version)
 		return nil
-	case "init":
-		return initialize(ctx, args[1:])
 	case "mission":
-		return mission(ctx, args[1:])
-	case "daemon":
-		return daemonCommand(ctx, args[1:])
-	case "project":
-		return project(ctx, args[1:])
-	case "status":
-		return statusCommand(ctx, args[1:])
-	case "wait":
-		return waitCommand(ctx, args[1:])
-	case "home":
-		return homeCommand(ctx, args[1:])
-	case "knowledge":
-		return knowledgeCommand(ctx, args[1:])
+		return missionCommand(ctx, args[1:])
 	case "task":
-		return task(ctx, args[1:])
+		return taskCommand(ctx, args[1:])
+	case "spawn":
+		return spawnCommand(ctx, args[1:])
 	case "worker":
 		return workerCommand(ctx, args[1:])
-	case "signal":
-		return signalCommand(ctx, args[1:])
-	case "commander":
-		return commanderCommand(ctx, args[1:])
+	case "verify-complete":
+		return verifyCompleteCommand(ctx, args[1:])
+	case "validate":
+		return validateCommand(ctx, args[1:])
+	case "deliver":
+		return deliverCommand(ctx, args[1:])
+	case "release":
+		return releaseCommand(ctx, args[1:])
+	case "status":
+		return statusCommand(ctx, args[1:])
+	case "send":
+		return sendCommand(ctx, args[1:])
+	case "prompt":
+		return promptCommand(ctx, args[1:])
 	default:
 		usage()
 		return fmt.Errorf("unknown command %q", args[0])
@@ -89,827 +85,355 @@ func exitCode(err error) int {
 	return 1
 }
 
-func initialize(ctx context.Context, args []string) error {
-	flags := flag.NewFlagSet("init", flag.ContinueOnError)
-	path := flags.String("db", "", "SQLite database path")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	store, err := openStore(ctx, *path)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	fmt.Println(*path)
-	return nil
+// toolConfig carries the external binary/session flags. Only commands that
+// touch an external boundary bind the flags they need.
+type toolConfig struct {
+	herdr        string
+	treehouse    string
+	git          string
+	ghAxi        string
+	herdrSession string
 }
 
-func mission(ctx context.Context, args []string) error {
-	if len(args) >= 1 && args[0] == "list" {
-		return missionList(ctx, args[1:])
+func defaultTools() toolConfig {
+	session := strings.TrimSpace(os.Getenv("HERDR_SESSION"))
+	if session == "" {
+		session = "default"
 	}
+	return toolConfig{herdr: "herdr", treehouse: "treehouse", git: "git", ghAxi: "gh-axi", herdrSession: session}
+}
+
+func (t *toolConfig) bind(flags *flag.FlagSet, names ...string) {
+	for _, name := range names {
+		switch name {
+		case "herdr":
+			flags.StringVar(&t.herdr, "herdr", t.herdr, "Herdr CLI binary")
+		case "treehouse":
+			flags.StringVar(&t.treehouse, "treehouse", t.treehouse, "Treehouse CLI binary")
+		case "git":
+			flags.StringVar(&t.git, "git", t.git, "Git binary")
+		case "gh-axi":
+			flags.StringVar(&t.ghAxi, "gh-axi", t.ghAxi, "gh-axi binary")
+		case "herdr-session":
+			flags.StringVar(&t.herdrSession, "herdr-session", t.herdrSession, "Herdr session name (env HERDR_SESSION)")
+		}
+	}
+}
+
+func (t toolConfig) flow() *flow.Flow {
+	panes := herdr.NewCommandAdapter(t.herdr, t.herdrSession, "sophon")
+	return flow.New(flow.ProductionDeps(t.git, t.treehouse, t.ghAxi, panes))
+}
+
+// parseFlags parses interspersed flags and positionals: the standard flag
+// package stops at the first positional, but the documented command forms
+// place flags after the task ID. Positionals are returned in order.
+func parseFlags(flags *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	rest := args
+	for len(rest) > 0 {
+		if err := flags.Parse(rest); err != nil {
+			return nil, err
+		}
+		rest = flags.Args()
+		if len(rest) > 0 {
+			positional = append(positional, rest[0])
+			rest = rest[1:]
+		}
+	}
+	return positional, nil
+}
+
+func missionCommand(ctx context.Context, args []string) error {
 	if len(args) >= 1 && args[0] == "create" {
 		return missionCreate(ctx, args[1:])
 	}
-	if len(args) >= 2 && args[0] == "budget" {
-		return missionBudget(ctx, domain.MissionID(args[1]), args[2:])
+	if len(args) >= 1 && args[0] == "list" {
+		return missionList(ctx, args[1:])
 	}
-	if len(args) >= 2 && args[0] == "timeline" {
-		return timeline(ctx, "mission", args[1], args[2:])
-	}
-	if len(args) >= 2 && args[0] == "digest" {
-		return missionDigest(ctx, domain.MissionID(args[1]), args[2:])
-	}
-	if len(args) >= 2 && args[0] == "cancel" {
-		return missionCancel(ctx, domain.MissionID(args[1]), args[2:])
-	}
-	return errors.New("expected: sophon mission list|create|budget|timeline|digest|cancel")
-}
-
-type missionListItem struct {
-	ID          domain.MissionID    `json:"id"`
-	Title       string              `json:"title"`
-	State       domain.MissionState `json:"state"`
-	TaskCounts  taskBucketCounts    `json:"task_counts"`
-	OpenSignals int                 `json:"open_signals"`
-	CreatedAt   time.Time           `json:"created_at"`
-}
-
-type taskBucketCounts struct {
-	Active    int `json:"active"`
-	Done      int `json:"done"`
-	Attention int `json:"attention"`
-}
-
-func missionList(ctx context.Context, args []string) error {
-	flags := flag.NewFlagSet("mission list", flag.ContinueOnError)
-	dbPath := flags.String("db", "", "SQLite database path")
-	jsonOutput := flags.Bool("json", false, "emit JSON")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New("mission list does not accept positional arguments")
-	}
-	store, err := openStore(ctx, *dbPath)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	missions, err := store.Missions(ctx)
-	if err != nil {
-		return err
-	}
-	items := make([]missionListItem, 0, len(missions))
-	for _, item := range missions {
-		tasks, err := store.Tasks(ctx, item.ID)
-		if err != nil {
-			return err
-		}
-		open, err := store.Signals(ctx, db.ListSignalsFilter{MissionID: item.ID, Status: "open"})
-		if err != nil {
-			return err
-		}
-		view := missionListItem{ID: item.ID, Title: item.Title, State: item.State, OpenSignals: len(open), CreatedAt: item.CreatedAt}
-		for _, task := range tasks {
-			addTaskBucket(&view.TaskCounts, task.State)
-		}
-		items = append(items, view)
-	}
-	if *jsonOutput {
-		return encode(items)
-	}
-	fmt.Println("ID\tTITLE\tSTATE\tACTIVE\tDONE\tATTENTION\tOPEN SIGNALS\tCREATED")
-	for _, item := range items {
-		fmt.Printf("%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\n", item.ID, item.Title, item.State, item.TaskCounts.Active, item.TaskCounts.Done, item.TaskCounts.Attention, item.OpenSignals, item.CreatedAt.Format("2006-01-02"))
-	}
-	return nil
-}
-
-func addTaskBucket(counts *taskBucketCounts, state domain.TaskState) {
-	switch state {
-	case domain.TaskBlocked, domain.TaskNeedsAttention, domain.TaskFailed, domain.TaskDeliveryBlocked:
-		counts.Attention++
-	case domain.TaskReady, domain.TaskReportReady, domain.TaskDelivered, domain.TaskDeliveredBranch, domain.TaskCancelled:
-		counts.Done++
-	default:
-		counts.Active++
-	}
-}
-
-func missionCancel(ctx context.Context, missionID domain.MissionID, args []string) error {
-	flags := flag.NewFlagSet("mission cancel", flag.ContinueOnError)
-	dbPath := flags.String("db", "", "SQLite database path")
-	jsonOutput := flags.Bool("json", false, "emit JSON")
-	treehouseBinary := flags.String("treehouse", "treehouse", "Treehouse CLI binary")
-	herdrBinary := flags.String("herdr", "herdr", "Herdr CLI binary")
-	herdrSession := flags.String("herdr-session", "default", "explicit Herdr session name")
-	herdrWorkspace := flags.String("herdr-workspace-label", "sophon", "Herdr workspace presentation label")
-	commandValue := flags.String("command-id", "", "idempotency command ID")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New("mission cancel does not accept positional arguments")
-	}
-	if strings.TrimSpace(*herdrSession) == "" {
-		return errors.New("mission cancel requires an explicit --herdr-session")
-	}
-	store, err := openStore(ctx, *dbPath)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	command, err := suppliedCommandID(*commandValue)
-	if err != nil {
-		return err
-	}
-	canceller := worker.Canceller{Store: store, Treehouse: treehouse.NewService(store, treehouse.NewCommandClient(*treehouseBinary), gitcontrol.NewClient()), Herdr: herdr.NewCommandAdapter(*herdrBinary, *herdrSession, *herdrWorkspace)}
-	cancelled, err := (&worker.MissionCanceller{Store: store, Tasks: &canceller}).Cancel(ctx, missionID, command)
-	if err != nil {
-		return err
-	}
-	if *jsonOutput {
-		return encode(cancelled)
-	}
-	fmt.Printf("Mission %s cancelled\n", cancelled.ID)
-	return nil
-}
-
-func missionBudget(ctx context.Context, missionID domain.MissionID, args []string) error {
-	flags := flag.NewFlagSet("mission budget", flag.ContinueOnError)
-	dbPath := flags.String("db", "", "SQLite database path")
-	jsonOutput := flags.Bool("json", false, "emit JSON")
-	maxWallClock := flags.Duration("max-wall-clock", 0, "maximum mission wall-clock duration (0 is unlimited)")
-	maxAttempts := flags.Int("max-task-attempts", 0, "maximum attempts per task (0 is unlimited)")
-	maxConcurrent := flags.Int("max-concurrent-tasks", 0, "maximum concurrently active tasks (0 is unlimited)")
-	maxValidation := flags.Int("max-validation-runs", 0, "maximum validation rounds per task (0 is unlimited)")
-	maxTokens := flags.Int64("max-tokens", 0, "maximum mission tokens (0 is unlimited)")
-	maxCost := flags.String("max-cost", "", "maximum mission cost (0 is unlimited)")
-	expectedVersion := flags.Int64("expected-version", 0, "mission version to update (0 uses the current version)")
-	commandValue := flags.String("command-id", "", "idempotency command ID")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New("mission budget does not accept positional arguments")
-	}
-	provided := map[string]bool{}
-	flags.Visit(func(item *flag.Flag) { provided[item.Name] = true })
-	if !(provided["max-wall-clock"] || provided["max-task-attempts"] || provided["max-concurrent-tasks"] || provided["max-validation-runs"] || provided["max-tokens"] || provided["max-cost"]) {
-		return errors.New("mission budget requires at least one budget flag")
-	}
-	store, err := openStore(ctx, *dbPath)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	mission, err := store.Mission(ctx, missionID)
-	if err != nil {
-		return err
-	}
-	budget := mission.Budget
-	if provided["max-wall-clock"] {
-		budget.MaxWallClock = *maxWallClock
-	}
-	if provided["max-task-attempts"] {
-		budget.MaxTaskAttempts = *maxAttempts
-	}
-	if provided["max-concurrent-tasks"] {
-		budget.MaxConcurrentTasks = *maxConcurrent
-	}
-	if provided["max-validation-runs"] {
-		budget.MaxValidationRuns = *maxValidation
-	}
-	if provided["max-tokens"] {
-		if *maxTokens == 0 {
-			budget.MaxTokens = nil
-		} else {
-			value := *maxTokens
-			budget.MaxTokens = &value
-		}
-	}
-	if provided["max-cost"] {
-		if *maxCost == "" || *maxCost == "0" {
-			budget.MaxCost = nil
-		} else {
-			value := *maxCost
-			budget.MaxCost = &value
-		}
-	}
-	command, err := suppliedCommandID(*commandValue)
-	if err != nil {
-		return err
-	}
-	updated, err := store.UpdateMissionBudget(ctx, command, db.UpdateMissionBudgetInput{MissionID: missionID, ExpectedVersion: *expectedVersion, Budget: budget, Actor: "operator"})
-	if err != nil {
-		return err
-	}
-	if *jsonOutput {
-		return encode(updated)
-	}
-	fmt.Printf("Mission %s budget updated", updated.Mission.ID)
-	if len(updated.RecoverableTaskIDs) != 0 {
-		fmt.Printf("; retry is now legal for: %s", strings.Join(taskIDStrings(updated.RecoverableTaskIDs), ", "))
-	}
-	fmt.Fprintln(os.Stdout)
-	return nil
-}
-
-func taskIDStrings(ids []domain.TaskID) []string {
-	values := make([]string, len(ids))
-	for index, taskID := range ids {
-		values[index] = string(taskID)
-	}
-	return values
-}
-
-func missionDigest(ctx context.Context, missionID domain.MissionID, args []string) error {
-	flags := flag.NewFlagSet("mission digest", flag.ContinueOnError)
-	dbPath := flags.String("db", "", "SQLite database path")
-	jsonOutput := flags.Bool("json", false, "emit artifact metadata and content as JSON")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New("mission digest does not accept positional arguments")
-	}
-	store, err := openStore(ctx, *dbPath)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	command, err := commandID()
-	if err != nil {
-		return err
-	}
-	artifact, err := store.RegenerateMissionDigest(ctx, command, db.RegenerateMissionDigestInput{
-		MissionID: missionID, Actor: "operator", Reason: "explicit command",
-	})
-	if err != nil {
-		return err
-	}
-	if *jsonOutput {
-		return encode(artifact)
-	}
-	_, err = os.Stdout.Write([]byte(artifact.Content))
-	return err
-}
-
-func statusCommand(ctx context.Context, args []string) error {
-	flags := flag.NewFlagSet("status", flag.ContinueOnError)
-	dbPath := flags.String("db", "", "SQLite database path")
-	missionID := flags.String("mission", "", "mission ID")
-	jsonOutput := flags.Bool("json", false, "emit JSON")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New("status does not accept positional arguments")
-	}
-	store, err := openStore(ctx, *dbPath)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	var snapshot statusview.Snapshot
-	if strings.TrimSpace(*missionID) == "" {
-		missions, err := store.Missions(ctx)
-		if err != nil {
-			return err
-		}
-		switch len(missions) {
-		case 0:
-			snapshot = statusview.Empty()
-		case 1:
-			snapshot, err = statusview.Load(ctx, store, missions[0].ID)
-		default:
-			return errors.New("status requires --mission ID when multiple missions exist")
-		}
-	} else {
-		snapshot, err = statusview.Load(ctx, store, domain.MissionID(*missionID))
-	}
-	if err != nil {
-		return err
-	}
-	if *jsonOutput {
-		return encode(snapshot)
-	}
-	printStatus(snapshot)
-	return nil
-}
-
-func printStatus(snapshot statusview.Snapshot) {
-	if snapshot.Mission != nil {
-		fmt.Printf("Mission: %s (%s)\n", snapshot.Mission.Title, snapshot.Mission.ID)
-	}
-	fmt.Println("Needs Your Attention")
-	for _, task := range snapshot.NeedsYourAttention.Tasks {
-		fmt.Printf("  task  %s [%s] %s\n", task.ID, task.State, task.Title)
-	}
-	for _, signal := range snapshot.NeedsYourAttention.Signals {
-		fmt.Printf("  signal %s [%s] %s\n", signal.ID, signal.Kind, signal.Question)
-	}
-	fmt.Println("Recently Completed")
-	for _, task := range snapshot.RecentlyCompleted {
-		fmt.Printf("  %s [%s] %s\n", task.ID, task.State, task.Title)
-	}
-	fmt.Println("Underway")
-	for _, task := range snapshot.Underway {
-		fmt.Printf("  %s [%s] %s\n", task.ID, task.State, task.Title)
-	}
-	fmt.Println("Up Next")
-	for _, task := range snapshot.UpNext {
-		fmt.Printf("  %s [%s] %s\n", task.ID, task.State, task.Title)
-	}
+	return &exitError{2, errors.New("expected: sophon mission create|list")}
 }
 
 func missionCreate(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("mission create", flag.ContinueOnError)
-	dbPath := flags.String("db", "", "SQLite database path")
-	projectPath := flags.String("project", "", "registered project path")
-	projectName := flags.String("project-name", "", "registered project name")
+	project := flags.String("project", "", "project repository path")
 	title := flags.String("title", "", "mission title")
 	objective := flags.String("objective", "", "mission objective")
-	operatorMessage := flags.String("operator-message", "", "verbatim operator intake direction")
-	maxAttempts := flags.Int("max-task-attempts", 0, "maximum attempts per task (0 is unlimited)")
-	maxDuration := flags.Duration("max-duration", 0, "maximum mission wall-clock duration (0 is unlimited)")
-	maxConcurrent := flags.Int("max-concurrent-tasks", 0, "maximum concurrently active tasks (0 is unlimited)")
-	maxValidation := flags.Int("max-validation-rounds", 0, "maximum validation rounds per task (0 is unlimited)")
-	var criteria stringList
-	flags.Var(&criteria, "acceptance", "acceptance criterion (repeatable)")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if *projectPath == "" {
-		return errors.New("mission create requires --project")
-	}
-	absoluteProject, err := filepath.Abs(*projectPath)
-	if err != nil {
-		return fmt.Errorf("resolve project path: %w", err)
-	}
-	name := strings.TrimSpace(*projectName)
-	if name == "" {
-		name = filepath.Base(absoluteProject)
-	}
-	store, err := openStore(ctx, *dbPath)
+	positional, err := parseFlags(flags, args)
 	if err != nil {
 		return err
 	}
-	defer store.Close()
-	projectID, err := store.ProjectByPath(ctx, absoluteProject)
-	if errors.Is(err, db.ErrNotFound) {
-		projectCommand, commandErr := commandID()
-		if commandErr != nil {
-			return commandErr
-		}
-		projectID, err = store.CreateProject(ctx, projectCommand, db.CreateProjectInput{Name: name, Path: absoluteProject})
+	if len(positional) != 0 {
+		return errors.New("mission create does not accept positional arguments")
 	}
-	if err != nil {
-		return err
-	}
-	missionCommand, err := commandID()
-	if err != nil {
-		return err
-	}
-	created, err := store.CreateMission(ctx, missionCommand, db.CreateMissionInput{
-		ProjectID: projectID, Title: *title, Objective: *objective, OperatorMessage: *operatorMessage, AcceptanceCriteria: criteriaValues(criteria),
-		Budget: domain.MissionBudget{MaxWallClock: *maxDuration, MaxConcurrentTasks: *maxConcurrent,
-			MaxTaskAttempts: *maxAttempts, MaxValidationRuns: *maxValidation},
-	})
+	created, err := flow.New(flow.Deps{}).CreateMission(ctx, *project, *title, *objective)
 	if err != nil {
 		return err
 	}
 	return encode(created)
 }
 
-func task(ctx context.Context, args []string) error {
-	if len(args) >= 2 && args[0] == "create" {
-		return taskCreate(ctx, domain.MissionID(args[1]), args[2:])
-	}
-	if len(args) >= 2 && args[0] == "start" {
-		return taskStart(ctx, domain.TaskID(args[1]), args[2:])
-	}
-	if len(args) >= 2 && args[0] == "retry" {
-		return taskRetry(ctx, domain.TaskID(args[1]), args[2:])
-	}
-	if len(args) >= 2 && args[0] == "cancel" {
-		return taskCancel(ctx, domain.TaskID(args[1]), args[2:])
-	}
-	if len(args) >= 2 && args[0] == "validate" {
-		return taskValidate(ctx, domain.TaskID(args[1]), args[2:])
-	}
-	if len(args) >= 2 && args[0] == "deliver" {
-		return taskDeliver(ctx, domain.TaskID(args[1]), args[2:])
-	}
-	if len(args) >= 2 && args[0] == "release" {
-		return taskRelease(ctx, domain.TaskID(args[1]), args[2:])
-	}
-	if len(args) >= 2 && args[0] == "timeline" {
-		return timeline(ctx, "task", args[1], args[2:])
-	}
-	return errors.New("expected: sophon task create MISSION|start TASK|retry TASK|cancel TASK|validate TASK|deliver TASK|release TASK|timeline TASK")
-}
-
-func taskDeliver(ctx context.Context, taskID domain.TaskID, args []string) error {
-	flags := flag.NewFlagSet("task deliver", flag.ContinueOnError)
-	dbPath := flags.String("db", "", "SQLite database path")
-	gitBinary := flags.String("git", "git", "Git binary")
-	ghBinary := flags.String("gh-axi", "gh-axi", "gh-axi binary")
-	gateBinary := flags.String("no-mistakes", "no-mistakes", "no-mistakes CLI binary")
-	base := flags.String("base", "", "pull request base branch")
-	commandValue := flags.String("command-id", "", "idempotency command ID")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	store, err := openStore(ctx, *dbPath)
+func missionList(_ context.Context, args []string) error {
+	flags := flag.NewFlagSet("mission list", flag.ContinueOnError)
+	jsonOutput := flags.Bool("json", false, "emit JSON")
+	positional, err := parseFlags(flags, args)
 	if err != nil {
 		return err
 	}
-	defer store.Close()
-	command, err := suppliedCommandID(*commandValue)
+	if len(positional) != 0 {
+		return errors.New("mission list does not accept positional arguments")
+	}
+	missions, err := store.ListMissions()
 	if err != nil {
 		return err
 	}
-	service := delivery.Service{
-		Store:  store,
-		Git:    delivery.CommandGit{Binary: *gitBinary},
-		Remote: delivery.CommandRemote{GitBinary: *gitBinary, GHBinary: *ghBinary},
-		Gate:   delivery.CommandGate{Binary: *gateBinary},
-	}
-	result, err := service.Deliver(ctx, delivery.Request{
-		TaskID: taskID, CommandID: command, Base: *base, Actor: "operator",
-	})
-	if errors.Is(err, delivery.ErrGateFailed) {
-		if encodeErr := encode(result); encodeErr != nil {
-			return encodeErr
+	if *jsonOutput {
+		if missions == nil {
+			missions = []store.Mission{}
 		}
+		return encode(missions)
 	}
-	if err != nil {
-		return err
+	fmt.Println("ID\tTITLE\tPROJECT\tCREATED")
+	for _, mission := range missions {
+		fmt.Printf("%s\t%s\t%s\t%s\n", mission.ID, mission.Title, mission.ProjectPath, mission.CreatedAt.Format("2006-01-02"))
 	}
-	return encode(result)
+	return nil
 }
 
-func taskRelease(ctx context.Context, taskID domain.TaskID, args []string) error {
-	flags := flag.NewFlagSet("task release", flag.ContinueOnError)
-	dbPath := flags.String("db", "", "SQLite database path")
-	treehouseBinary := flags.String("treehouse", "treehouse", "Treehouse CLI binary")
-	gitBinary := flags.String("git", "git", "Git binary")
-	commandValue := flags.String("command-id", "", "idempotency command ID")
-	if err := flags.Parse(args); err != nil {
-		return err
+func taskCommand(ctx context.Context, args []string) error {
+	if len(args) >= 1 && args[0] == "create" {
+		return taskCreate(ctx, args[1:])
 	}
-	store, err := openStore(ctx, *dbPath)
+	return &exitError{2, errors.New("expected: sophon task create")}
+}
+
+func taskCreate(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("task create", flag.ContinueOnError)
+	missionID := flags.String("mission", "", "mission ID")
+	title := flags.String("title", "", "task title")
+	kind := flags.String("kind", string(domain.TaskImplementation), "task kind")
+	delivery := flags.String("delivery", string(domain.DeliveryBranch), "delivery mode (branch|pr)")
+	validate := flags.String("validate", "", "required validation command")
+	positional, err := parseFlags(flags, args)
 	if err != nil {
 		return err
 	}
-	defer store.Close()
-	command, err := suppliedCommandID(*commandValue)
+	if len(positional) != 0 {
+		return errors.New("task create does not accept positional arguments")
+	}
+	created, err := flow.New(flow.Deps{}).CreateTask(ctx, *missionID, *title,
+		domain.TaskKind(*kind), domain.DeliveryMode(*delivery), *validate)
 	if err != nil {
 		return err
 	}
-	leaseService := treehouse.NewService(store, treehouse.NewCommandClient(*treehouseBinary), &gitcontrol.Client{Binary: *gitBinary})
-	service := delivery.Service{Store: store, Leases: leaseService}
-	released, err := service.Release(ctx, taskID, command, "operator")
+	return encode(created)
+}
+
+func spawnCommand(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("spawn", flag.ContinueOnError)
+	retry := flags.Bool("retry", false, "fence the current attempt and spawn the next")
+	tools.bind(flags, "herdr", "treehouse", "git", "herdr-session")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("spawn requires exactly one task ID")
+	}
+	spawned, err := tools.flow().Spawn(ctx, positional[0], *retry)
+	if err != nil {
+		return err
+	}
+	return encode(spawned)
+}
+
+func workerCommand(ctx context.Context, args []string) error {
+	if len(args) >= 1 && args[0] == "complete" {
+		return workerComplete(ctx, args[1:])
+	}
+	return &exitError{2, errors.New("expected: sophon worker complete TASK --attempt N --head-sha SHA --result FILE")}
+}
+
+func workerComplete(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("worker complete", flag.ContinueOnError)
+	attempt := flags.Int("attempt", 0, "task attempt")
+	headSHA := flags.String("head-sha", "", "immutable completed head SHA")
+	resultPath := flags.String("result", "", "structured result JSON path inside the attempt directory")
+	tools.bind(flags, "git")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("worker complete requires exactly one task ID")
+	}
+	digest, err := tools.flow().PublishResult(ctx, positional[0], *attempt, *headSHA, *resultPath)
+	if err != nil {
+		return err
+	}
+	return encode(map[string]any{"task_id": positional[0], "attempt": *attempt, "result_sha256": digest})
+}
+
+func verifyCompleteCommand(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("verify-complete", flag.ContinueOnError)
+	tools.bind(flags, "git", "treehouse")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("verify-complete requires exactly one task ID")
+	}
+	outcome, err := tools.flow().VerifyComplete(ctx, positional[0])
+	if err != nil {
+		return err
+	}
+	return encode(outcome)
+}
+
+func validateCommand(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("validate", flag.ContinueOnError)
+	tools.bind(flags, "git")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("validate requires exactly one task ID")
+	}
+	record, err := tools.flow().Validate(ctx, positional[0])
+	if err != nil {
+		return err
+	}
+	if err := encode(record); err != nil {
+		return err
+	}
+	if !record.Passed {
+		return errors.New("validation failed")
+	}
+	return nil
+}
+
+func deliverCommand(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("deliver", flag.ContinueOnError)
+	confirmed := flags.Bool("confirmed", false, "operator confirmation for the delivery effect")
+	tools.bind(flags, "git", "gh-axi")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("deliver requires exactly one task ID")
+	}
+	delivered, err := tools.flow().Deliver(ctx, positional[0], *confirmed)
+	if err != nil {
+		return err
+	}
+	return encode(delivered)
+}
+
+func releaseCommand(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("release", flag.ContinueOnError)
+	tools.bind(flags, "treehouse")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("release requires exactly one task ID")
+	}
+	released, err := tools.flow().ReleaseLease(ctx, positional[0])
 	if err != nil {
 		return err
 	}
 	return encode(released)
 }
 
-func taskRetry(ctx context.Context, taskID domain.TaskID, args []string) error {
-	flags := flag.NewFlagSet("task retry", flag.ContinueOnError)
-	dbPath := flags.String("db", "", "SQLite database path")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	store, err := openStore(ctx, *dbPath)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	current, err := store.Task(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	command, err := commandID()
-	if err != nil {
-		return err
-	}
-	retried, err := store.RetryTask(ctx, command, db.RetryTaskInput{TaskID: taskID, ExpectedVersion: current.Version, Actor: "operator"})
-	if err != nil {
-		return err
-	}
-	return encode(retried)
-}
-
-func taskCancel(ctx context.Context, taskID domain.TaskID, args []string) error {
-	flags := flag.NewFlagSet("task cancel", flag.ContinueOnError)
-	dbPath := flags.String("db", "", "SQLite database path")
-	treehouseBinary := flags.String("treehouse", "treehouse", "Treehouse CLI binary")
-	herdrBinary := flags.String("herdr", "herdr", "Herdr CLI binary")
-	herdrSession := flags.String("herdr-session", "default", "explicit Herdr session name")
-	herdrWorkspace := flags.String("herdr-workspace-label", "sophon", "Herdr workspace presentation label")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if strings.TrimSpace(*herdrSession) == "" {
-		return errors.New("task cancel requires an explicit --herdr-session")
-	}
-	store, err := openStore(ctx, *dbPath)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	command, err := commandID()
-	if err != nil {
-		return err
-	}
-	canceller := worker.Canceller{Store: store, Treehouse: treehouse.NewService(store, treehouse.NewCommandClient(*treehouseBinary), gitcontrol.NewClient()), Herdr: herdr.NewCommandAdapter(*herdrBinary, *herdrSession, *herdrWorkspace)}
-	cancelled, err := canceller.Cancel(ctx, taskID, command)
-	if err != nil {
-		return err
-	}
-	return encode(cancelled)
-}
-
-func taskCreate(ctx context.Context, missionID domain.MissionID, args []string) error {
-	flags := flag.NewFlagSet("task create", flag.ContinueOnError)
-	dbPath := flags.String("db", "", "SQLite database path")
-	title := flags.String("title", "", "task title")
-	objective := flags.String("objective", "", "task objective")
-	delivery := flags.String("delivery", string(domain.DeliveryBranch), "delivery mode")
-	workerAgent := flags.String("agent", "codex", "worker runtime")
-	priority := flags.Int("priority", 0, "task priority")
-	var criteria stringList
-	flags.Var(&criteria, "acceptance", "acceptance criterion (repeatable)")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if *workerAgent != "codex" {
-		return errors.New("milestone 3 task create supports only --agent codex")
-	}
-	if len(criteria) == 0 {
-		return errors.New("task create requires at least one --acceptance criterion")
-	}
-	store, err := openStore(ctx, *dbPath)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	command, err := commandID()
-	if err != nil {
-		return err
-	}
-	created, err := store.CreateTask(ctx, command, db.CreateTaskInput{
-		MissionID: missionID, Kind: domain.TaskImplementation, Title: *title, Objective: *objective,
-		AcceptanceCriteria: criteriaValues(criteria), Priority: *priority, WorkerAgent: *workerAgent,
-		DeliveryMode: domain.DeliveryMode(*delivery),
-	})
-	if err != nil {
-		return err
-	}
-	return encode(created)
-}
-
-func taskStart(ctx context.Context, taskID domain.TaskID, args []string) error {
-	flags := flag.NewFlagSet("task start", flag.ContinueOnError)
-	dbPath := flags.String("db", "", "SQLite database path")
-	treehouseBinary := flags.String("treehouse", "treehouse", "Treehouse CLI binary")
-	herdrBinary := flags.String("herdr", "herdr", "Herdr CLI binary")
-	herdrSession := flags.String("herdr-session", "default", "explicit Herdr session name")
-	herdrWorkspace := flags.String("herdr-workspace-label", "sophon", "Herdr workspace presentation label")
-	taskFiles := flags.String("task-files", "", "task artifact base directory")
-	maxWorkerRuntime := flags.Duration("max-worker-runtime", 0, "maximum worker runtime (0 is unlimited)")
-	maxWorkerRestarts := flags.Int("max-worker-restarts", 0, "maximum worker restarts (0 is unlimited)")
-	maxFixRounds := flags.Int("max-fix-rounds", 0, "maximum worker fix rounds (0 is unlimited)")
-	var validation stringList
-	flags.Var(&validation, "validate", "required validation command or instruction (repeatable)")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if strings.TrimSpace(*herdrSession) == "" {
-		return errors.New("task start requires an explicit --herdr-session")
-	}
-	store, err := openStore(ctx, *dbPath)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	treehouseService := treehouse.NewService(store, treehouse.NewCommandClient(*treehouseBinary), gitcontrol.NewClient())
-	starter := worker.Starter{
-		Store: store, Treehouse: treehouseService,
-		Herdr:  herdr.NewCommandAdapter(*herdrBinary, *herdrSession, *herdrWorkspace),
-		Briefs: worker.BriefGenerator{BaseDir: *taskFiles}, Validation: validation,
-		Budget: domain.WorkerBudget{MaxRuntime: *maxWorkerRuntime, MaxRestarts: *maxWorkerRestarts,
-			MaxFixRounds: *maxFixRounds},
-	}
-	started, err := starter.Start(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	return encode(started)
-}
-
-func taskValidate(ctx context.Context, taskID domain.TaskID, args []string) error {
-	flags := flag.NewFlagSet("task validate", flag.ContinueOnError)
-	dbPath := flags.String("db", "", "SQLite database path")
-	gitBinary := flags.String("git", "git", "Git binary")
-	validatorVersion := flags.String("validator-version", "command-v1", "version of the command validator")
-	var unitTests, typechecks, lints, projectValidations stringList
-	flags.Var(&unitTests, "unit-test", "unit-test command (repeatable)")
-	flags.Var(&typechecks, "typecheck", "typecheck command (repeatable)")
-	flags.Var(&lints, "lint", "lint command (repeatable)")
-	flags.Var(&projectValidations, "project-validation", "project validation command (repeatable)")
-	flags.Var(&projectValidations, "validate", "project validation command (repeatable)")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	type validatorConfig struct {
-		Kind     validationcore.Kind `json:"kind"`
-		Commands []string            `json:"commands"`
-	}
-	configured := []validatorConfig{
-		{validationcore.UnitTests, unitTests},
-		{validationcore.Typecheck, typechecks},
-		{validationcore.Lint, lints},
-		{validationcore.ProjectValidation, projectValidations},
-	}
-	validators := make([]validationcore.Validator, 0,
-		len(unitTests)+len(typechecks)+len(lints)+len(projectValidations))
-	for _, group := range configured {
-		for _, command := range group.Commands {
-			if strings.TrimSpace(command) == "" {
-				return fmt.Errorf("%s validator command cannot be empty", group.Kind)
-			}
-			validators = append(validators, validationcore.ShellValidator(group.Kind, *validatorVersion, command))
-		}
-	}
-	if len(validators) == 0 {
-		return errors.New("task validate requires at least one validation command")
-	}
-	config, err := json.Marshal(configured)
-	if err != nil {
-		return fmt.Errorf("encode validation config: %w", err)
-	}
-	store, err := openStore(ctx, *dbPath)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	command, err := commandID()
-	if err != nil {
-		return err
-	}
-	pipeline := validationcore.Pipeline{
-		Store:       store,
-		Workspace:   validationcore.GitFingerprinter{Binary: *gitBinary},
-		Environment: validationcore.ProcessEnvironment{},
-	}
-	report, err := pipeline.ValidateTask(ctx, validationcore.Request{
-		TaskID: taskID, CommandID: command, Validators: validators, Config: config, Actor: "commander",
-	})
-	if err != nil {
-		return err
-	}
-	if err := encode(report); err != nil {
-		return err
-	}
-	if !report.Passed {
-		return errors.New("validation failed")
-	}
-	return nil
-}
-
-func workerCommand(ctx context.Context, args []string) error {
-	if len(args) >= 2 && args[0] == "inspect" {
-		return workerInspect(ctx, domain.TaskID(args[1]), args[2:])
-	}
-	if len(args) >= 2 && args[0] == "complete" {
-		return workerComplete(ctx, domain.TaskID(args[1]), args[2:])
-	}
-	return errors.New("expected: sophon worker inspect TASK [--attempt N] [--db PATH] [--json]|complete TASK --attempt N --head-sha SHA --result FILE")
-}
-
-func workerInspect(ctx context.Context, taskID domain.TaskID, args []string) error {
-	flags := flag.NewFlagSet("worker inspect", flag.ContinueOnError)
-	dbPath := flags.String("db", "", "SQLite database path")
-	attempt := flags.Int("attempt", 0, "task attempt (defaults to current)")
+func statusCommand(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("status", flag.ContinueOnError)
 	jsonOutput := flags.Bool("json", false, "emit JSON")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New("worker inspect does not accept positional arguments")
-	}
-	store, err := openStore(ctx, *dbPath)
+	tools.bind(flags, "herdr", "herdr-session")
+	positional, err := parseFlags(flags, args)
 	if err != nil {
 		return err
 	}
-	defer store.Close()
-	if *attempt == 0 {
-		task, err := store.Task(ctx, taskID)
-		if err != nil {
-			return err
-		}
-		*attempt = task.CurrentAttempt
+	if len(positional) != 0 {
+		return errors.New("status does not accept positional arguments")
 	}
-	session, err := store.WorkerSession(ctx, taskID, *attempt)
+	report, err := tools.flow().Status(ctx)
 	if err != nil {
 		return err
 	}
 	if *jsonOutput {
-		return encode(session)
+		return encode(report)
 	}
-	fmt.Printf("%s\t%s\t%s\t%s\n", session.ID, session.State, session.HerdrPaneID, session.AgentSessionID)
-	return nil
-}
-
-func workerComplete(ctx context.Context, taskID domain.TaskID, args []string) error {
-	flags := flag.NewFlagSet("worker complete", flag.ContinueOnError)
-	dbPath := flags.String("db", "", "SQLite database path")
-	treehouseBinary := flags.String("treehouse", "treehouse", "Treehouse CLI binary")
-	taskFiles := flags.String("task-files", "", "task artifact base directory")
-	attempt := flags.Int("attempt", 0, "task attempt")
-	headSHA := flags.String("head-sha", "", "immutable completed head SHA")
-	resultPath := flags.String("result", "", "structured result JSON path")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if strings.TrimSpace(*resultPath) == "" {
-		return errors.New("worker complete requires --result")
-	}
-	store, err := openStore(ctx, *dbPath)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	absoluteResult, err := filepath.Abs(*resultPath)
-	if err != nil {
-		return err
-	}
-	command := worker.CompletionCommandID(taskID, *attempt, *headSHA, absoluteResult)
-	completer := worker.Completer{Store: store, Git: gitcontrol.NewClient(),
-		Leases: treehouse.NewCommandClient(*treehouseBinary), TaskFiles: worker.BriefGenerator{BaseDir: *taskFiles}}
-	completed, err := completer.Complete(ctx, worker.CompleteRequest{
-		TaskID: taskID, Attempt: *attempt, HeadSHA: *headSHA, ResultPath: absoluteResult, CommandID: command,
-	})
-	if err != nil {
-		return err
-	}
-	return encode(completed)
-}
-
-func timeline(ctx context.Context, kind, rawID string, args []string) error {
-	flags := flag.NewFlagSet("timeline", flag.ContinueOnError)
-	path := flags.String("db", "", "SQLite database path")
-	jsonOutput := flags.Bool("json", false, "emit JSON")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	store, err := db.Open(ctx, *path)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	var events []domain.Event
-	if kind == "task" {
-		events, err = store.TaskEvents(ctx, domain.TaskID(rawID))
-	} else {
-		events, err = store.MissionEvents(ctx, domain.MissionID(rawID))
-	}
-	if err != nil {
-		return err
-	}
-	if *jsonOutput {
-		return encode(events)
-	}
-	for _, event := range events {
-		fmt.Printf("%d\t%s\t%s\t%s\n", event.Sequence, event.CreatedAt.Format("2006-01-02T15:04:05.000Z07:00"), event.Actor, event.Type)
-	}
-	return nil
-}
-
-func openStore(ctx context.Context, path string) (*db.Store, error) {
-	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return nil, fmt.Errorf("create database directory: %w", err)
+	fmt.Println("MISSION\tTASK\tSTATE\tATTEMPT\tDETAIL")
+	for _, mission := range report.Missions {
+		for _, task := range mission.Tasks {
+			fmt.Printf("%s\t%s\t%s\t%d\t%s\n", mission.Mission.ID, task.Task.ID, task.State, task.Attempt, task.Detail)
 		}
 	}
-	return db.Open(ctx, path)
+	return nil
 }
 
-func commandID() (domain.CommandID, error) {
-	raw, err := id.New("cmd")
-	return domain.CommandID(raw), err
-}
-
-func suppliedCommandID(value string) (domain.CommandID, error) {
-	if strings.TrimSpace(value) != "" {
-		return domain.CommandID(value), nil
+func sendCommand(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("send", flag.ContinueOnError)
+	tools.bind(flags, "herdr", "herdr-session")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
 	}
-	return commandID()
+	if len(positional) != 2 {
+		return errors.New("send requires a task ID and a message")
+	}
+	if err := tools.flow().Send(ctx, positional[0], positional[1]); err != nil {
+		return err
+	}
+	return encode(map[string]any{"task_id": positional[0], "sent": true})
+}
+
+func promptCommand(ctx context.Context, args []string) error {
+	if len(args) >= 1 && args[0] == "commander" {
+		return promptCommander(ctx, args[1:])
+	}
+	return &exitError{2, errors.New("expected: sophon prompt commander")}
+}
+
+func promptCommander(_ context.Context, args []string) error {
+	flags := flag.NewFlagSet("prompt commander", flag.ContinueOnError)
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 0 {
+		return errors.New("prompt commander does not accept positional arguments")
+	}
+	home, err := datahome.Dir()
+	if err != nil {
+		return err
+	}
+	promptID, err := id.New("commander-prompt")
+	if err != nil {
+		return err
+	}
+	skillDir := filepath.Join(home, "skills", "commander", promptID)
+	if err := runtimeprompts.MaterializeSkills(skillDir, runtimeprompts.CommanderSkills); err != nil {
+		return fmt.Errorf("materialize commander skills: %w", err)
+	}
+	body, err := runtimeprompts.Compose(skillDir)
+	if err != nil {
+		return err
+	}
+	fmt.Print(body)
+	return nil
 }
 
 func encode(value any) error {
@@ -918,56 +442,19 @@ func encode(value any) error {
 	return encoder.Encode(value)
 }
 
-type stringList []string
-
-func (s *stringList) String() string { return strings.Join(*s, ", ") }
-func (s *stringList) Set(value string) error {
-	*s = append(*s, value)
-	return nil
-}
-
-func criteriaValues(values []string) []domain.Criterion {
-	criteria := make([]domain.Criterion, 0, len(values))
-	for _, value := range values {
-		criteria = append(criteria, domain.Criterion{Description: value})
-	}
-	return criteria
-}
-
 func usage() {
 	fmt.Fprintln(os.Stderr, `Usage:
-  sophon init [--db PATH]
-  sophon home [--agent codex|claude] [--db PATH]
-  sophon status --mission ID [--db PATH] [--json]
-  sophon wait --mission ID [--timeout DURATION] [--after-seq N] [--db PATH]
-  sophon project add PATH [--name NAME] [--db PATH] [--json]
-  sophon project list [--db PATH] [--json]
-  sophon project inspect NAME [--db PATH] [--json]
-  sophon mission create --project PATH --title TITLE --objective OBJECTIVE [--acceptance TEXT]
-  sophon mission list [--db PATH] [--json]
-  sophon mission budget ID --max-wall-clock DURATION|--max-task-attempts N|--max-concurrent-tasks N|--max-validation-runs N [--command-id ID] [--db PATH] [--json]
-  sophon mission cancel ID [--db PATH] [--json]
-  sophon task create MISSION --title TITLE --objective OBJECTIVE [--acceptance TEXT]
-  sophon task start TASK [--herdr-session NAME] [--db PATH]
-  sophon task retry TASK [--db PATH]
-  sophon task cancel TASK [--herdr-session NAME] [--db PATH]
-  sophon task validate TASK --unit-test COMMAND [--typecheck COMMAND] [--lint COMMAND] [--project-validation COMMAND]
-  sophon task deliver TASK [--command-id ID] [--base BRANCH] [--db PATH]
-  sophon task release TASK [--command-id ID] [--db PATH]
-  sophon worker complete TASK --attempt N --head-sha SHA --result FILE [--db PATH]
-  sophon worker inspect TASK [--attempt N] [--db PATH] [--json]
-  sophon task|mission timeline ID [--db PATH] [--json]
-  sophon signal raise --mission ID --question TEXT [--task ID] [--kind KIND] [--context TEXT] [--recommendation TEXT] [--command-id ID] [--db PATH] [--json]
-  sophon signal list [--mission ID] [--status STATUS] [--db PATH] [--json]
-  sophon signal inspect <id> [--db PATH] [--json]
-  sophon signal resolve <id> --answer ANSWER [--command-id ID] [--db PATH] [--json]
-  sophon commander start --agent pi|claude|codex --mission ID [--herdr-session NAME] [--max-turns N] [--max-duration DURATION]
-  sophon commander renew [--session ID] [--mission ID] [--max-turns N] [--max-duration DURATION] [--command-id ID]
-  sophon commander prompt|steer|follow-up MESSAGE [--mission ID]
-  sophon commander attach|status [--mission ID]
-  sophon daemon status|start|stop|restart [--db PATH]
-  sophon knowledge list [--status candidate|active] [--db PATH] [--json]
-  sophon knowledge promote|reject ID [--db PATH]
-  sophon knowledge supersede ID --by REPLACEMENT [--db PATH]
-  sophon version`)
+  sophon version
+  sophon mission create --project PATH --title TITLE --objective OBJECTIVE
+  sophon mission list [--json]
+  sophon task create --mission ID --title TITLE [--kind KIND] [--delivery branch|pr] [--validate COMMAND]
+  sophon spawn TASK [--retry] [--herdr BIN] [--treehouse BIN] [--git BIN] [--herdr-session NAME]
+  sophon worker complete TASK --attempt N --head-sha SHA --result FILE [--git BIN]
+  sophon verify-complete TASK [--git BIN] [--treehouse BIN]
+  sophon validate TASK [--git BIN]
+  sophon deliver TASK --confirmed [--git BIN] [--gh-axi BIN]
+  sophon release TASK [--treehouse BIN]
+  sophon status [--json] [--herdr BIN] [--herdr-session NAME]
+  sophon send TASK MESSAGE [--herdr BIN] [--herdr-session NAME]
+  sophon prompt commander`)
 }

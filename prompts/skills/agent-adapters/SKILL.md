@@ -1,70 +1,42 @@
 ---
 name: agent-adapters
-description: Agent-only reference for selecting, starting, steering, recovering, interrupting, resuming, and verifying Sophon worker runtimes through supported adapters.
+description: Agent-only reference for the Herdr/Codex worker runtime — launch, acceptance checks, steering, and pane observation through the sophon CLI.
 user-invocable: false
 metadata:
   internal: true
 ---
 
-<!-- Provenance: adapted from prompts/upstream/firstmate/skills/harness-adapters/SKILL.md. -->
-
 # Agent adapters
 
-Use this reference before selecting, starting, steering, recovering, interrupting, resuming, or verifying a worker runtime, and before handling a runtime trust or readiness condition.
-V1 worker adapters are Pi, Claude, and Codex.
-Never launch an unverified adapter or silently substitute a different runtime when the selected runtime is part of accepted intent.
+Use this reference before intervening in a worker runtime's pane or questioning whether a runtime accepted its brief.
+Sophon has exactly one worker runtime: a Codex session running in a Herdr pane, launched only by `sophon spawn`.
+There is no runtime selection at task time and no substitute runtime; if the operator's accepted intent names a different runtime, report the unsupported capability instead of approximating one.
 
-## Selection and launch
+## Launch and acceptance
 
-Select the worker explicitly when creating a task with `await sophon.create_task(..., worker=...)`.
-Apply an explicit operator choice first, then any matching configured project or task policy, then the supported default.
-Account for every configured candidate using current adapter support, authentication, capacity, model availability, task fit, and disclosed uncertainty.
-Do not guess provider identity, credential ownership, model support, or reasoning capability from a name.
+`sophon spawn <task-id>` owns lease acquisition, branch creation, brief generation, and pane launch, and publishes the spawn receipt only after the pane starts.
+Never launch a worker by any other path, and never take over its repository.
 
-Use the selected adapter's authoritative current catalog to validate model and reasoning options.
-Unreachable discovery is uncertainty, not proof of support or rejection.
-Concrete catalog rejection blocks that configuration.
-Do not silently lower requested reasoning quality solely to conserve capacity.
+A spawn receipt is not proof the worker is working.
+Verify acceptance through live observation: run `sophon status` and confirm the task derives `running` (or a transient `idle` that returns to `running`).
+Trust prompts, authentication prompts, and other interactive runtime conditions are blockers the pane cannot clear alone; surface them to the operator rather than improvising terminal keystrokes.
 
-`TODO(spec-gap)`: V1 does not define commander-facing model, reasoning-effort, candidate-ranking, or catalog-query fields for worker creation.
-Until it does, pass only supported task fields and let the configured adapter own defaults rather than inventing parameters.
+## Steering and observation
 
-The control plane owns allocation, Treehouse lease identity, task attempt, worktree, runtime session, and generated prompt composition.
-The commander must not launch a worker outside `create_task` or take over its repository.
+Use `sophon send <task-id> <message>` for ordinary task-scoped steering: short, one topic, tied to the current attempt.
+Confirm the steer landed by re-observing through `sophon status`; a send acknowledgement alone is not proof the worker received or acted on it.
 
-## Lifecycle and delivery checks
+Never infer worker state from terminal appearance, wake-line prose, or elapsed time.
+`sophon status` derives the pane observation: `running`, `idle`, `lost`, or `unknown-pane`.
+Idle never means done; only a published result makes the task `ready`.
 
-A successful send or start acknowledgement is not proof that the worker accepted the brief.
-Verify the adapter-specific structured postcondition: correct task and attempt binding, readiness, accepted prompt, and active or valid idle state.
-Trust prompts and other interactive conditions require the verified adapter procedure and the minimum necessary action.
+## Recovery boundary
 
-Use `await sophon.message_worker(task_id, message)` for ordinary task-scoped steering.
-Use `worker-recovery` before disruptive recovery.
-Use `await sophon.retry_task(task_id)` only for a controlled new attempt after lease and ownership reconciliation.
-Use `await sophon.cancel_task(task_id)` only under the task's cancellation authority and preserve unlanded work.
+Use `worker-recovery` before any disruptive intervention.
+`sophon spawn --retry` is the only recovery that creates a new attempt; it fences the old attempt's lease first, and a stale attempt can never complete the new one.
 
-`TODO(spec-gap)`: V1 does not define commander-facing same-attempt interrupt, exit, resume, trust-confirmation, or readiness APIs.
-Do not invent terminal keystrokes or direct process commands; surface the unsupported lifecycle need and preserve task state.
+## Extending runtime support
 
-Validation invocation belongs to the worker's runtime overlay and generated brief.
-Verify that the validation owner remains the same task attempt, the result is tied to the immutable head, and delivery uses the supported control-plane operation.
-Never infer success from terminal appearance or prose.
-
-## Adapter verification contract
-
-Before registering a new adapter, verify end to end:
-
-- executable and version discovery;
-- safe launch shape and task-prompt delivery;
-- supported model and reasoning options;
-- authentication and trust behavior;
-- semantic busy, idle, inactive, lost, and stopped evidence;
-- steering acknowledgement;
-- interrupt, cancellation, exit, resume, and persistence behavior;
-- completion and blocker command availability;
-- lease and attempt binding; and
-- validation ownership and delivery postconditions.
-
-Record the runtime version, exact test surface, evidence, and unsupported facts.
-Prefer protocol or process state to rendered UI strings.
-Fail safely for unsupported adapters instead of approximating another adapter's behavior.
+Runtime behavior is enforced in `internal/herdr` behind one adapter, with live proof gated behind the opt-in Herdr lab (`SOPHON_HERDR_LAB=1` with `HERDR_LAB_HELPER`).
+Before changing what a pane can do, verify the adapter end to end: launch shape and brief delivery, busy/idle/lost observation, steering acknowledgement, and completion-command behavior.
+Record the runtime version, exact test surface, and evidence; prefer protocol or process state to rendered UI strings.

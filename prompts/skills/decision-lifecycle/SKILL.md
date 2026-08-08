@@ -1,57 +1,35 @@
 ---
 name: decision-lifecycle
-description: Agent-only lifecycle for preserving unresolved operator choices discovered in scout reports, reviews, validation, and worker blockers as durable Signals.
+description: Agent-only lifecycle for inventorying unresolved operator choices in worker results and routing the operator's answer into durable task records.
 user-invocable: false
 metadata:
   internal: true
 ---
 
-<!-- Provenance: adapted from prompts/upstream/firstmate/skills/decision-hold-lifecycle/SKILL.md. -->
-
 # Decision lifecycle
 
-Use this skill before treating a scout, review, validation result, worker blocker, or structured report with possible operator choices as fully handled, and when routing the operator's answer.
+Use this skill before treating a worker result, validation failure, or completion review with possible operator choices as fully handled, and when routing the operator's answer.
 
 ## Policy
 
-Every genuine unresolved choice that belongs to the operator must become a durable Signal in the originating mission before the originating activity is considered completely handled.
-The commander performs the semantic inventory because the control plane must not infer decisions from report prose.
-Give each distinct choice a stable, privacy-safe command identity and use `sophon signal raise --mission ID --kind decision --question TEXT --command-id ID --json` idempotently so retries reuse the same Signal while different choices remain distinct.
+Every genuine unresolved choice that belongs to the operator must be surfaced before the originating task is considered completely handled.
+The commander performs the semantic inventory: read the entire attempt result — summary, risks, changed files — not only the worker's headline, and identify each distinct choice.
 
-Inventory the whole artifact or review surface, not only the worker's summary or
-first highlighted finding. Distinct choices get distinct identities; alternate
-wordings of the same choice reuse one identity. The stable identity must derive
-from mission/task ownership and decision substance without embedding secrets,
-credentials, or mutable prose.
-
-Do not create a Signal for a resolved finding, a recommendation that needs no operator choice, or prose that merely sounds decision-like.
-Do not close a Signal merely because its report is complete, its review ended, or its worker became inactive.
-The Signal remains open until the answer is durably recorded and its dependent tasks remain correctly controlled.
-Current status reads structured Signal state and must not compensate by scraping historical prose.
-
-The originating activity is not fully handled until the commander has attested
-the complete inventory for that review pass, including an explicit none result
-when there truly are no unresolved operator choices. Completion of a report,
-worker session, validation run, or visual review cannot substitute for that
-semantic inventory.
+Do not escalate a resolved finding, a recommendation that needs no operator choice, an ordinary implementation detail, or prose that merely sounds decision-like.
+A task is not fully handled while a genuine choice it surfaced remains unanswered, even when its result is published and verified.
 
 ## Operating sequence
 
-1. Read the complete originating artifact and include every relevant review result.
-2. Inventory only genuine unresolved operator choices.
-3. For each choice, create or reuse a Signal with `sophon signal raise`, supplying its mission, optional `--task`, `--kind`, `--question`, `--context`, `--recommendation`, and stable `--command-id`.
-4. Verify that the full inventory is registered before treating the originating activity as handled.
-5. Notify the operator in outcome language with evidence, consequences, and a recommendation.
-6. Keep dependent tasks blocked or unstarted through structured dependencies while the Signal is open.
-7. After the operator answers, inspect the Signal with `sophon signal inspect ID --json`, then record the answer with `sophon signal resolve ID --answer TEXT --command-id ID --json`. Route it to affected workers only through a supported worker API when their current tasks remain valid.
-8. Confirm with `sophon signal inspect ID --json` that the Signal is resolved and dependent work remains durably represented.
-9. Re-read the affected task projection before steering: if the answer changes
-   accepted scope, create a new substantive task; if it invalidates current
-   work, use the supported cancellation or supersession lifecycle; if it is a
-   bounded detail within the existing task, send one exact resolution naming the
-   decision and required outcome.
+1. Read the complete attempt result and the verified evidence.
+2. Inventory only genuine unresolved operator choices; apply the `operator-authority` test to each.
+3. Raise each distinct choice to the operator in one concise, self-contained message (accepted requirement, evidence and conflict, smallest compliant alternative, consequences, recommendation).
+4. Keep dependent work unstarted — queued, not spawned — while the choice is open.
+5. When the operator answers, make the answer durable before work continues:
+   - an answer that changes accepted scope becomes part of the objective of the new substantive task you create for it;
+   - an answer that keeps the live task valid is sent to the worker once, exactly, through `sophon send`, naming the decision and the required outcome;
+   - an answer that invalidates live work settles the current attempt's custody first, then a replacement attempt carries the decision in its new context.
+6. Confirm through `sophon status` that dependent work remains accurately represented and that the next attempt's brief reflects the answer.
 
-Never let chat alone become the decision record.
-Never let the originating worker answer its own Signal.
-Never resolve a Signal merely to unblock completion, and never duplicate a
-Signal because a commander session restarted or an operator answer was repeated.
+Chat alone is not the decision record.
+The answer must be visible in durable intent — a task objective — or in a recorded steering message tied to a still-valid attempt before the originating task is treated as fully handled.
+Never let the originating worker answer its own blocker, and never re-raise an answered choice because a commander session restarted: reconstruct what was already decided from durable records and the conversation's explicit answers.

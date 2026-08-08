@@ -14,22 +14,19 @@ import (
 
 const (
 	OverrideEnv = "SOPHON_PROMPT_DIR"
-	// LegacyOverrideEnv remains readable for one-step upgrades. New values win.
-	LegacyOverrideEnv = "PINTELLECT_PROMPT_DIR"
 )
 
-// CommanderSkills are available to a project commander. WorkerSkills are the
+// CommanderSkills are available to a commander session. WorkerSkills are the
 // deliberately smaller subset that applies to an implementation attempt.
 var (
 	CommanderSkills = []string{
-		"agent-adapters", "bootstrap-diagnostics", "coding-guidelines", "decision-lifecycle",
-		"diagnostic-reasoning", "operator-authority", "project-management", "recap", "status", "worker-recovery",
+		"agent-adapters", "coding-guidelines", "decision-lifecycle",
+		"diagnostic-reasoning", "operator-authority", "recap", "status", "worker-recovery",
 	}
 	WorkerSkills = []string{"coding-guidelines", "decision-lifecycle", "diagnostic-reasoning"}
 )
 
-// Embedded contains the runtime prompt sets. Upstream provenance is deliberately
-// excluded: it is repository documentation rather than binary runtime content.
+// Embedded contains the runtime prompt sets compiled into the binary.
 //
 //go:embed commander workers skills
 var Embedded embed.FS
@@ -106,10 +103,8 @@ func SkillTriggers(dir string, names []string) string {
 		{"an authority or operator-consent question arises", "operator-authority"},
 		{"a recap is requested", "recap"},
 		{"a status or catch-up request is made", "status"},
-		{"project operations are requested", "project-management"},
 		{"you are doing coding work", "coding-guidelines"},
 		{"an agent runtime question arises", "agent-adapters"},
-		{"startup or bootstrap issues arise", "bootstrap-diagnostics"},
 	}
 	var body strings.Builder
 	body.WriteString("\n\n## Session skill load triggers\n\n")
@@ -143,10 +138,7 @@ func skillSet() (fs.FS, string, error) {
 }
 
 func overrideRoot() string {
-	if root := strings.TrimSpace(os.Getenv(OverrideEnv)); root != "" {
-		return root
-	}
-	return strings.TrimSpace(os.Getenv(LegacyOverrideEnv))
+	return strings.TrimSpace(os.Getenv(OverrideEnv))
 }
 
 func knownSkill(name string) bool {

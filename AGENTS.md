@@ -2,19 +2,14 @@
 
 This file is the project's committed home for project-intrinsic agent knowledge: build, test, release, architecture, and sharp-edge notes that should travel with the code.
 
-- The vendored FirstMate behavioral baseline is under `prompts/upstream/firstmate/`; its pinned provenance is `VERSION`, and `docs/rule-classification.md` is the authoritative V1 adaptation map.
-- Use `commander` for the coordinator-agent role in code, schema, CLI, events, and logs; `operator` remains the human role and `prime` remains a runtime name.
-- Task lifecycle policy is authoritative in `internal/task/state_machine.go`; SQLite writes must go through the command-idempotent CAS operations in `internal/db` so projection changes and events commit atomically.
-- The installed Treehouse lease JSON supplies path and lease identity but not Git metadata; `internal/treehouse` derives branch/base SHA through `internal/git` and all returns must retain both conditional lease guards.
-- The one-Codex slice is owned by `internal/worker`; Herdr commands stay behind `internal/herdr.Adapter`, pane ID is the current runtime placement, and completion accepts only the attempt-scoped `~/.sophon/tasks/<task>/<attempt>/result.json` after live lease and Git verification.
-- Worker-session lifecycle policy is separate from task lifecycle in `internal/workersession`; idle never means done. Herdr liveness comes from agent registration, restart husks are replaced create-before-close by resuming the persisted Codex session in a new pane, and structurally missing panes reconcile to `lost` plus task `needs_attention`.
-- Task recovery is implemented by `internal/db` and `internal/worker/cancel.go`: retry fences the old attempt before creating the next queued attempt; cancellation is terminal before best-effort conditional lease return and worker-tab cleanup.
-- Delivery policy and external boundaries live in `internal/delivery`; every attempt is pinned to its recorded branch/head SHA, PR recovery matches repository + branch + SHA, and branch-only release persists its intent before the conditional M2 return.
-- Commander runtime policy lives in `internal/commander`; `sophon home` creates one project-scoped session that binds to a mission after conversational intake, sessions reuse the M5 Herdr profiles and native resume identity, and event-wake cursors advance only after Herdr accepts the structured mission message. Runtime prompts are embedded by `prompts/embed.go`; `SOPHON_PROMPT_DIR` selects a checkout's `prompts/` tree for live development edits.
-- User-state path selection is centralized in `internal/datahome`; preserve its legacy-directory and legacy-filename compatibility when adding state files.
-- Mission intelligence is rooted in `internal/db/digest.go`, `internal/knowledge`, and `internal/db/budget.go`; digests remain regenerable artifacts, critical-policy writes are mechanically fenced, and every autonomous budget reservation must commit its `needs_attention` projection with a `budget.exhausted` event.
-- Startup recovery is coordinated in `internal/recovery`; the opt-in process-kill matrix is `test/crash-injection.sh`, with its real Herdr restart proof gated behind `SOPHON_CRASH_HERDR_LAB=1` and the FirstMate lab helper.
-- Add schema changes as numbered, forward-only files in `migrations/`; run `go test ./...` and `go build ./...` before delivery.
+- `docs/filesystem-protocol.md` is the authoritative design: layout, rules (atomic publication, one mutator, worker write surface, attempt fencing, derived status, external boundaries, authority), and the CLI surface. There is no daemon, database, or managed runtime.
+- `internal/store` owns record schemas, atomic publication, the `state/.lock` mkdir lock, and read-time state derivation (`Derive`); wake lines under `state/` are notifications only and must never be read for truth.
+- `internal/flow` is the command core behind every `sophon` subcommand; `cmd/sophon/main.go` is a thin flag layer over it. Attempt fencing lives in `flow.Spawn` (retry fences the old lease by exact identity, then bumps `current_attempt`); stale-attempt results are refused in `flow.VerifyComplete`.
+- Runtime prompts are embedded by `prompts/embed.go` (`commander`, `workers`, `skills` sets); `SOPHON_PROMPT_DIR` selects a checkout's `prompts/` tree for live development edits. `prompts.Compose` renders the commander prompt; `internal/flow/brief.go` renders worker briefs from the workers set plus the generated task section.
+- Worker completion accepts only the attempt-scoped `result.json` via `sophon worker complete` after strict-schema validation and a live worktree HEAD pin (`internal/flow/complete.go`); delivery requires `--confirmed` and publishes typed intent before the external effect (`internal/flow/deliver.go`).
+- Herdr commands stay behind `internal/herdr.Adapter`; pane ID is the runtime placement. Real-Herdr tests are gated behind `SOPHON_HERDR_LAB=1` with `HERDR_LAB_HELPER`; the ONLY herdr isolation path in tests is the lab helper plus a trailing `--session` argument.
+- The installed Treehouse lease JSON supplies path and lease identity but not Git metadata; `internal/treehouse` derives branch/base SHA through `internal/git`, and all lease returns must retain both conditional identity guards (lease id + holder).
+- Run `go test ./...` and `go build ./...` before delivery.
 
 ## Maintaining this file
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,471 +14,138 @@ import (
 	"testing"
 	"time"
 
-	"sophon/internal/db"
-	"sophon/internal/delivery"
-	"sophon/internal/domain"
-	"sophon/internal/signals"
-	statusview "sophon/internal/status"
-	"sophon/internal/worker"
+	"sophon/internal/flow"
+	"sophon/internal/store"
 )
 
-func TestCLIStatusSnapshotSectionsAndJSON(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "state.db")
-	store, err := db.Open(ctx, dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	projectID, err := store.CreateProject(ctx, "status_project", db.CreateProjectInput{Name: "status", Path: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mission, err := store.CreateMission(ctx, "status_mission", db.CreateMissionInput{ProjectID: projectID, Title: "Status", Objective: "exercise snapshot"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	makeTask := func(name string) domain.Task {
-		task, err := store.CreateTask(ctx, domain.CommandID("status_task_"+name), db.CreateTaskInput{MissionID: mission.ID, Kind: domain.TaskImplementation, Title: name, Objective: name, DeliveryMode: domain.DeliveryBranch})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return task
-	}
-	transition := func(task domain.Task, to domain.TaskState) domain.Task {
-		updated, err := store.TransitionTask(ctx, domain.CommandID("status_transition_"+string(task.ID)+"_"+string(to)), db.TransitionTaskInput{TaskID: task.ID, Attempt: task.CurrentAttempt, ExpectedState: task.State, ExpectedVersion: task.Version, To: to, Actor: "commander"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return updated
-	}
-	blocked := makeTask("blocked")
-	blocked = transition(blocked, domain.TaskProvisioning)
-	blocked = transition(blocked, domain.TaskStarting)
-	blocked = transition(blocked, domain.TaskRunning)
-	_ = transition(blocked, domain.TaskBlocked)
-	completed := makeTask("completed")
-	completed = transition(completed, domain.TaskProvisioning)
-	completed = transition(completed, domain.TaskStarting)
-	completed = transition(completed, domain.TaskRunning)
-	completed = transition(completed, domain.TaskCollecting)
-	_ = transition(completed, domain.TaskReady)
-	underway := makeTask("underway")
-	_ = transition(underway, domain.TaskProvisioning)
-	queued := makeTask("queued")
-	if _, err := store.CreateSignal(ctx, "status_signal", db.CreateSignalInput{MissionID: mission.ID, TaskID: &queued.ID, Kind: signals.SignalDecision, Question: "Choose a path", Actor: "commander"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	var snapshot statusview.Snapshot
-	if err := json.Unmarshal(runCLI(t, "status", "--mission", string(mission.ID), "--db", dbPath, "--json"), &snapshot); err != nil {
-		t.Fatal(err)
-	}
-	if snapshot.Mission == nil || snapshot.Mission.ID != mission.ID {
-		t.Fatalf("mission = %+v", snapshot.Mission)
-	}
-	if len(snapshot.NeedsYourAttention.Tasks) != 1 || snapshot.NeedsYourAttention.Tasks[0].Title != "blocked" || len(snapshot.NeedsYourAttention.Signals) != 1 {
-		t.Fatalf("attention = %+v", snapshot.NeedsYourAttention)
-	}
-	if len(snapshot.RecentlyCompleted) != 1 || snapshot.RecentlyCompleted[0].Title != "completed" {
-		t.Fatalf("completed = %+v", snapshot.RecentlyCompleted)
-	}
-	if len(snapshot.Underway) != 1 || snapshot.Underway[0].Title != "underway" {
-		t.Fatalf("underway = %+v", snapshot.Underway)
-	}
-	if len(snapshot.UpNext) != 1 || snapshot.UpNext[0].Title != "queued" {
-		t.Fatalf("up next = %+v", snapshot.UpNext)
-	}
-	var shape map[string]json.RawMessage
-	if err := json.Unmarshal(runCLI(t, "status", "--mission", string(mission.ID), "--db", dbPath, "--json"), &shape); err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []string{"needs_your_attention", "recently_completed", "underway", "up_next"} {
-		if _, ok := shape[key]; !ok {
-			t.Errorf("JSON lacks %q: %s", key, shape)
-		}
-	}
-	human := string(runCLI(t, "status", "--mission", string(mission.ID), "--db", dbPath))
-	for _, section := range []string{"Needs Your Attention", "Recently Completed", "Underway", "Up Next"} {
-		if !strings.Contains(human, section) {
-			t.Errorf("human status lacks %q: %s", section, human)
-		}
-	}
+// cliFixture wires the hermetic e2e environment: an isolated data home, a
+// real Git project with a real bare origin, and fake treehouse/herdr/gh-axi
+// binaries backed by shell scripts. Git operations run against the real
+// binary; only the delivery repository identity is faked.
+type cliFixture struct {
+	home      string
+	project   string
+	git       string
+	treehouse string
+	herdr     string
+	ghAxi     string
+	ghLog     string
 }
 
-func TestCLIMissionListBucketsAndJSON(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "state.db")
-	store, err := db.Open(ctx, dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	project, err := store.CreateProject(ctx, "mission_list_project", db.CreateProjectInput{Name: "mission-list", Path: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mission, err := store.CreateMission(ctx, "mission_list_one", db.CreateMissionInput{ProjectID: project, Title: "First mission", Objective: "list it"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	other, err := store.CreateMission(ctx, "mission_list_two", db.CreateMissionInput{ProjectID: project, Title: "Second mission", Objective: "also list it"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	makeTask := func(command string, state domain.TaskState) {
-		task, err := store.CreateTask(ctx, domain.CommandID(command), db.CreateTaskInput{MissionID: mission.ID, Kind: domain.TaskImplementation, Title: command, Objective: command, DeliveryMode: domain.DeliveryBranch})
-		if err != nil {
-			t.Fatal(err)
-		}
-		steps := []domain.TaskState{domain.TaskProvisioning, domain.TaskStarting, domain.TaskRunning}
-		if state == domain.TaskReady {
-			steps = append(steps, domain.TaskCollecting)
-		}
-		steps = append(steps, state)
-		for _, next := range steps {
-			if task.State == next {
-				continue
-			}
-			task, err = store.TransitionTask(ctx, domain.CommandID(command+"_"+string(next)), db.TransitionTaskInput{TaskID: task.ID, Attempt: task.CurrentAttempt, ExpectedState: task.State, ExpectedVersion: task.Version, To: next, Actor: "test"})
-			if err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	makeTask("active", domain.TaskRunning)
-	makeTask("attention", domain.TaskBlocked)
-	makeTask("done", domain.TaskReady)
-	if _, err := store.CreateSignal(ctx, "mission_list_signal", db.CreateSignalInput{MissionID: mission.ID, Kind: signals.SignalDecision, Question: "Need answer", Actor: "test"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	jsonOutput := runCLI(t, "mission", "list", "--db", dbPath, "--json")
-	var items []missionListItem
-	if err := json.Unmarshal(jsonOutput, &items); err != nil {
-		t.Fatal(err)
-	}
-	var shape []map[string]json.RawMessage
-	if err := json.Unmarshal(jsonOutput, &shape); err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []string{"id", "title", "state", "task_counts", "open_signals", "created_at"} {
-		if _, ok := shape[0][key]; !ok {
-			t.Errorf("mission list JSON lacks %q: %s", key, jsonOutput)
-		}
-	}
-	if len(items) != 2 {
-		t.Fatalf("missions = %+v", items)
-	}
-	if items[0].ID != mission.ID || items[0].TaskCounts != (taskBucketCounts{Active: 1, Done: 1, Attention: 1}) || items[0].OpenSignals != 1 || items[0].CreatedAt.IsZero() {
-		t.Fatalf("first mission = %+v", items[0])
-	}
-	if items[1].ID != other.ID || items[1].TaskCounts != (taskBucketCounts{}) {
-		t.Fatalf("second mission = %+v", items[1])
-	}
-	human := string(runCLI(t, "mission", "list", "--db", dbPath))
-	if !strings.Contains(human, "ATTENTION") || !strings.Contains(human, "First mission") {
-		t.Fatalf("human list = %s", human)
-	}
-}
-
-func TestCLIMissionBudgetUpdatesAndClearsWithJSON(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "state.db")
-	store, err := db.Open(ctx, dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	project, err := store.CreateProject(ctx, "mission_budget_project", db.CreateProjectInput{Name: "mission-budget", Path: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mission, err := store.CreateMission(ctx, "mission_budget_mission", db.CreateMissionInput{ProjectID: project, Title: "Budget", Objective: "update", Budget: domain.MissionBudget{MaxTaskAttempts: 1}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	output := runCLI(t, "mission", "budget", string(mission.ID), "--max-wall-clock", "4h", "--max-task-attempts", "0", "--max-concurrent-tasks", "3", "--max-validation-runs", "4", "--command-id", "cmd_cli_budget", "--db", dbPath, "--json")
-	var result db.MissionBudgetUpdate
-	if err := json.Unmarshal(output, &result); err != nil {
-		t.Fatalf("decode budget JSON: %v: %s", err, output)
-	}
-	if result.Mission.Budget.MaxWallClock != 4*time.Hour || result.Mission.Budget.MaxTaskAttempts != 0 || result.Mission.Budget.MaxConcurrentTasks != 3 || result.Mission.Budget.MaxValidationRuns != 4 {
-		t.Fatalf("budget=%+v", result.Mission.Budget)
-	}
-	repeated := runCLI(t, "mission", "budget", string(mission.ID), "--max-wall-clock", "4h", "--max-task-attempts", "0", "--max-concurrent-tasks", "3", "--max-validation-runs", "4", "--command-id", "cmd_cli_budget", "--db", dbPath, "--json")
-	var again db.MissionBudgetUpdate
-	if err := json.Unmarshal(repeated, &again); err != nil || again.Mission.Version != result.Mission.Version {
-		t.Fatalf("repeat=%s result=%+v err=%v", repeated, again, err)
-	}
-}
-
-func TestWaitReturnsWhenNewMissionEventLands(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "state.db")
-	store, err := db.Open(ctx, dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	projectID, err := store.CreateProject(ctx, "wait_project", db.CreateProjectInput{Name: "wait", Path: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mission, err := store.CreateMission(ctx, "wait_mission", db.CreateMissionInput{ProjectID: projectID, Title: "Wait", Objective: "wait for event"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	initial, err := store.MissionEvents(ctx, mission.ID)
-	if err != nil || len(initial) == 0 {
-		t.Fatalf("initial mission events = %v, %v", initial, err)
-	}
-
-	type result struct {
-		events []domain.Event
-		err    error
-	}
-	done := make(chan result, 1)
-	go func() {
-		events, err := waitForMissionEvents(ctx, store, mission.ID, initial[len(initial)-1].Sequence, time.Second)
-		done <- result{events: events, err: err}
-	}()
-	time.Sleep(2 * waitPollInterval)
-	if _, err := store.CreateTask(ctx, "wait_task", db.CreateTaskInput{
-		MissionID: mission.ID, Kind: domain.TaskScout, Title: "New event", Objective: "wake waiter", DeliveryMode: domain.DeliveryBranch,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case got := <-done:
-		if got.err != nil {
-			t.Fatal(got.err)
-		}
-		if len(got.events) == 0 || got.events[0].Sequence <= initial[len(initial)-1].Sequence {
-			t.Fatalf("wait returned events = %+v", got.events)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("wait did not return after a new mission event")
-	}
-}
-
-func TestWaitTimeoutUsesExitCodeTwo(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "state.db")
-	store, err := db.Open(context.Background(), dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	err = waitCommand(context.Background(), []string{"--mission", "msn_absent", "--timeout", "5ms", "--db", dbPath})
-	if !errors.Is(err, errWaitTimeout) {
-		t.Fatalf("wait error = %v, want timeout", err)
-	}
-	if got := exitCode(err); got != 2 {
-		t.Fatalf("timeout exit code = %d, want 2", got)
-	}
-}
-
-func TestWaitAfterSequenceExcludesOlderEvents(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "state.db")
-	store, err := db.Open(ctx, dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	projectID, err := store.CreateProject(ctx, "cursor_project", db.CreateProjectInput{Name: "cursor", Path: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mission, err := store.CreateMission(ctx, "cursor_mission", db.CreateMissionInput{ProjectID: projectID, Title: "Cursor", Objective: "test cursor"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	before, err := store.MissionEvents(ctx, mission.ID)
-	if err != nil || len(before) == 0 {
-		t.Fatalf("events before cursor = %v, %v", before, err)
-	}
-	if _, err := store.CreateTask(ctx, "cursor_task", db.CreateTaskInput{
-		MissionID: mission.ID, Kind: domain.TaskScout, Title: "Later", Objective: "new event", DeliveryMode: domain.DeliveryBranch,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	output := runCLI(t, "wait", "--mission", string(mission.ID), "--after-seq", fmt.Sprint(before[len(before)-1].Sequence), "--db", dbPath)
-	if strings.Contains(string(output), "\n  ") {
-		t.Fatalf("wait output is not compact JSON: %q", output)
-	}
-	var got []domain.Event
-	if err := json.Unmarshal(output, &got); err != nil {
-		t.Fatalf("decode wait output: %v: %s", err, output)
-	}
-	if len(got) == 0 || got[0].Sequence <= before[len(before)-1].Sequence {
-		t.Fatalf("events after cursor = %+v", got)
-	}
-	for _, event := range got {
-		if event.Sequence <= before[len(before)-1].Sequence {
-			t.Fatalf("returned pre-cursor event %+v", event)
-		}
-	}
-}
-
-func TestCLIStatusEmptyMission(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "state.db")
-	var snapshot statusview.Snapshot
-	if err := json.Unmarshal(runCLI(t, "status", "--db", dbPath, "--json"), &snapshot); err != nil {
-		t.Fatal(err)
-	}
-	if snapshot.Mission != nil || len(snapshot.NeedsYourAttention.Tasks) != 0 || len(snapshot.NeedsYourAttention.Signals) != 0 || len(snapshot.RecentlyCompleted) != 0 || len(snapshot.Underway) != 0 || len(snapshot.UpNext) != 0 {
-		t.Fatalf("empty snapshot = %+v", snapshot)
-	}
-}
-
-func TestCLIMissionDigestRegeneratesArtifact(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "state.db")
-	store, err := db.Open(context.Background(), dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	project, err := store.CreateProject(context.Background(), "cmd_digest_project", db.CreateProjectInput{Name: "digest", Path: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mission, err := store.CreateMission(context.Background(), "cmd_digest_mission", db.CreateMissionInput{ProjectID: project, Title: "Digest", Objective: "Compact mission context."})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	output := string(runCLI(t, "mission", "digest", string(mission.ID), "--db", dbPath))
-	if !strings.Contains(output, "## Objective") || !strings.Contains(output, "Compact mission context.") {
-		t.Fatalf("digest output=%s", output)
-	}
-	store, err = db.Open(context.Background(), dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	artifact, err := store.LatestMissionDigest(context.Background(), mission.ID)
-	if err != nil || artifact.Kind != "mission.digest" {
-		t.Fatalf("artifact=%+v err=%v", artifact, err)
-	}
-}
-
-func TestCLISignalListInspectAndResolveJSON(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "state.db")
-	store, err := db.Open(ctx, dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	projectID, err := store.CreateProject(ctx, "cmd_cli_signal_project", db.CreateProjectInput{
-		Name: "signals", Path: filepath.Join(t.TempDir(), "signals"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mission, err := store.CreateMission(ctx, "cmd_cli_signal_mission", db.CreateMissionInput{
-		ProjectID: projectID, Title: "Signals", Objective: "Exercise signal CLI",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	created, err := store.CreateSignal(ctx, "cmd_cli_signal_create", db.CreateSignalInput{
-		MissionID: mission.ID, Kind: signals.SignalDecision,
-		Question: "Which path?", Actor: "commander",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	var listed []signals.Signal
-	if err := json.Unmarshal(runCLI(t, "signal", "list", "--db", dbPath, "--json"), &listed); err != nil {
-		t.Fatal(err)
-	}
-	if len(listed) != 1 || listed[0].ID != created.ID {
-		t.Fatalf("listed signals = %+v", listed)
-	}
-	var inspected signals.Signal
-	if err := json.Unmarshal(runCLI(t, "signal", "inspect", string(created.ID), "--db", dbPath, "--json"), &inspected); err != nil {
-		t.Fatal(err)
-	}
-	if inspected.Question != created.Question {
-		t.Fatalf("inspected signal = %+v", inspected)
-	}
-	var resolved signals.Signal
-	if err := json.Unmarshal(runCLI(t, "signal", "resolve", string(created.ID), "--db", dbPath,
-		"--answer", "Take the strict path.", "--json"), &resolved); err != nil {
-		t.Fatal(err)
-	}
-	if resolved.Status != signals.SignalResolved || resolved.Answer == nil || *resolved.Answer != "Take the strict path." {
-		t.Fatalf("resolved signal = %+v", resolved)
-	}
-}
-
-func TestCLIOneCodexWorkerVerticalSliceWithHermeticAdapters(t *testing.T) {
+func newCLIFixture(t *testing.T) *cliFixture {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("SOPHON_DATA_HOME", home)
+	t.Setenv("HERDR_SESSION", "")
+	t.Setenv("SOPHON_PROMPT_DIR", "")
 	root := t.TempDir()
-	repo := filepath.Join(root, "repo")
-	if err := os.Mkdir(repo, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	runCLIGit(t, repo, "init", "-b", "task-slice")
-	runCLIGit(t, repo, "config", "user.name", "Sophon Test")
-	runCLIGit(t, repo, "config", "user.email", "test@example.invalid")
-	writeCLIFile(t, filepath.Join(repo, "base.txt"), "base\n", 0o600)
-	runCLIGit(t, repo, "add", "base.txt")
-	runCLIGit(t, repo, "commit", "-m", "base")
-
-	dbPath := filepath.Join(root, "state.db")
-	taskFiles := filepath.Join(root, "task-files")
-	missionJSON := runCLI(t, "mission", "create", "--db", dbPath, "--project", repo,
-		"--title", "Mission", "--objective", "Exercise the vertical slice")
-	var mission domain.Mission
-	if err := json.Unmarshal(missionJSON, &mission); err != nil {
-		t.Fatal(err)
-	}
-	taskJSON := runCLI(t, "task", "create", string(mission.ID), "--db", dbPath,
-		"--title", "Task", "--objective", "Make one committed change", "--acceptance", "Task reaches ready")
-	var task domain.Task
-	if err := json.Unmarshal(taskJSON, &task); err != nil {
-		t.Fatal(err)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git binary is required for CLI e2e tests")
 	}
 
-	leaseState := filepath.Join(root, "lease-holder")
+	origin := filepath.Join(root, "origin.git")
+	runCLIGit(t, root, "init", "--bare", origin)
+	project := filepath.Join(root, "project")
+	if err := os.Mkdir(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runCLIGit(t, project, "init", "-b", "main")
+	runCLIGit(t, project, "config", "user.name", "Sophon Test")
+	runCLIGit(t, project, "config", "user.email", "test@example.invalid")
+	writeCLIFile(t, filepath.Join(project, "base.txt"), "base\n", 0o600)
+	runCLIGit(t, project, "add", "base.txt")
+	runCLIGit(t, project, "commit", "-m", "base")
+	runCLIGit(t, project, "remote", "add", "origin", origin)
+	runCLIGit(t, project, "push", "-u", "origin", "main")
+
+	// The fake git wrapper delegates everything to the real binary except the
+	// delivery repository identity, which must normalize to host/owner/repo.
+	gitBinary := filepath.Join(root, "fake-git")
+	writeCLIFile(t, gitBinary, fmt.Sprintf(`#!/bin/sh
+case " $* " in
+  *" remote get-url origin "*) printf 'git@github.com:sophon/test.git\n'; exit 0 ;;
+esac
+exec %s "$@"
+`, shellQuote(realGit)), 0o700)
+
+	state := filepath.Join(root, "treehouse-state")
+	worktrees := filepath.Join(root, "worktrees")
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(worktrees, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	treehouseBinary := filepath.Join(root, "fake-treehouse")
-	treehouseScript := fmt.Sprintf(`#!/bin/sh
+	writeCLIFile(t, treehouseBinary, fmt.Sprintf(`#!/bin/sh
 set -eu
-case "$1" in
+state=%s
+wtbase=%s
+realgit=%s
+cmd=${1:-}
+if [ $# -gt 0 ]; then shift; fi
+case "$cmd" in
   get)
-    shift
     holder=""
-    while [ "$#" -gt 0 ]; do
-      if [ "$1" = "--lease-holder" ]; then holder=$2; shift 2; else shift; fi
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --lease-holder) holder=$2; shift 2 ;;
+        *) shift ;;
+      esac
     done
-    printf '%%s' "$holder" > %q
-    printf '{"path":%q,"lease_id":"lease-cli","lease_holder":"%%s","leased_at":"2026-08-06T12:00:00Z"}\n' "$holder"
+    n=$(cat "$state/n" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "$state/n"
+    wt="$wtbase/wt-$n"
+    "$realgit" -C "$PWD" worktree add --detach "$wt" >/dev/null 2>&1
+    printf '%%s\n%%s\n%%s\n' "$wt" "lease-$n" "$holder" > "$state/lease-$n"
+    printf '{"path":"%%s","lease_id":"lease-%%s","lease_holder":"%%s","leased_at":"2026-08-08T00:00:00Z"}\n' "$wt" "$n" "$holder"
     ;;
   status)
-    holder=$(sed -n '1p' %q)
-    printf '[{"name":"slice","path":%q,"status":"leased","lease_id":"lease-cli","lease_holder":"%%s"}]\n' "$holder"
+    printf '['
+    sep=""
+    for f in "$state"/lease-*; do
+      [ -e "$f" ] || continue
+      wt=$(sed -n '1p' "$f")
+      lease=$(sed -n '2p' "$f")
+      holder=$(sed -n '3p' "$f")
+      printf '%%s{"name":"%%s","path":"%%s","status":"leased","lease_id":"%%s","lease_holder":"%%s"}' \
+        "$sep" "$(basename "$wt")" "$wt" "$lease" "$holder"
+      sep=","
+    done
+    printf ']\n'
     ;;
-  return) exit 0 ;;
+  return)
+    lease=""
+    holder=""
+    path=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --if-lease-id) lease=$2; shift 2 ;;
+        --if-lease-holder) holder=$2; shift 2 ;;
+        --force) shift ;;
+        *) path=$1; shift ;;
+      esac
+    done
+    found=0
+    for f in "$state"/lease-*; do
+      [ -e "$f" ] || continue
+      if [ "$(sed -n '1p' "$f")" = "$path" ]; then
+        found=1
+        [ "$(sed -n '2p' "$f")" = "$lease" ] || exit 1
+        [ "$(sed -n '3p' "$f")" = "$holder" ] || exit 1
+        rm -f "$f"
+      fi
+    done
+    [ "$found" = 1 ] || exit 1
+    ;;
   *) exit 2 ;;
 esac
-`, leaseState, repo, leaseState, repo)
-	writeCLIFile(t, treehouseBinary, treehouseScript, 0o700)
+`, shellQuote(state), shellQuote(worktrees), shellQuote(realGit)), 0o700)
 
 	herdrBinary := filepath.Join(root, "fake-herdr")
-	herdrScript := `#!/bin/sh
+	writeCLIFile(t, herdrBinary, `#!/bin/sh
 set -eu
 case "$1 $2" in
   "workspace create") printf '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}\n' ;;
@@ -488,174 +156,497 @@ case "$1 $2" in
   "agent prompt") printf '{"result":{"agent":{"pane_id":"w1:p1","agent_session":{"value":"codex-session-cli"}},"ok":true}}\n' ;;
   *) exit 2 ;;
 esac
-`
-	writeCLIFile(t, herdrBinary, herdrScript, 0o700)
+`, 0o700)
 
-	startedJSON := runCLI(t, "task", "start", string(task.ID), "--db", dbPath,
-		"--treehouse", treehouseBinary, "--herdr", herdrBinary, "--herdr-session", "fm-lab-cli-test",
-		"--task-files", taskFiles, "--validate", "go test ./...")
-	var started worker.StartResult
-	if err := json.Unmarshal(startedJSON, &started); err != nil {
+	ghLog := filepath.Join(root, "gh-axi-calls")
+	prState := filepath.Join(root, "gh-axi-pr")
+	ghBinary := filepath.Join(root, "fake-gh-axi")
+	writeCLIFile(t, ghBinary, fmt.Sprintf(`#!/bin/sh
+set -eu
+log=%s
+prstate=%s
+case "${1:-} ${2:-}" in
+  "pr list")
+    if [ -f "$prstate" ]; then
+      printf 'pull_requests[0]{number,url}\n7,https://github.com/sophon/test/pull/7\n'
+    else
+      printf 'count: 0\n'
+    fi
+    ;;
+  "pr create")
+    echo create >> "$log"
+    if [ -f "$prstate" ]; then
+      exit 1
+    fi
+    touch "$prstate"
+    printf 'number: 7\nurl: https://github.com/sophon/test/pull/7\n'
+    ;;
+  *) exit 2 ;;
+esac
+`, shellQuote(ghLog), shellQuote(prState)), 0o700)
+
+	return &cliFixture{home: home, project: project, git: gitBinary,
+		treehouse: treehouseBinary, herdr: herdrBinary, ghAxi: ghBinary, ghLog: ghLog}
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func (f *cliFixture) createMission(t *testing.T, title string) store.Mission {
+	t.Helper()
+	output := runCLI(t, "mission", "create", "--project", f.project, "--title", title, "--objective", "Exercise the CLI")
+	var mission store.Mission
+	if err := json.Unmarshal(output, &mission); err != nil {
 		t.Fatal(err)
 	}
-	if started.Task.State != domain.TaskRunning || started.WorkerSession.HerdrPaneID != "w1:p1" {
-		t.Fatalf("started slice = %+v", started)
+	if mission.ID == "" {
+		t.Fatalf("created mission = %+v", mission)
 	}
+	return mission
+}
 
-	writeCLIFile(t, filepath.Join(repo, "change.txt"), "change\n", 0o600)
-	runCLIGit(t, repo, "add", "change.txt")
-	runCLIGit(t, repo, "commit", "-m", "change")
-	head := runCLIGit(t, repo, "rev-parse", "HEAD")
-	resultPath := filepath.Join(taskFiles, string(task.ID), "1", "result.json")
-	writeCLIFile(t, resultPath, `{"version":1,"status":"completed","summary":"changed","verification":[{"command":"go test ./...","exit_code":0}],"changed_files":["change.txt"],"risks":[]}`, 0o600)
-	future := time.Now().Add(time.Second)
+func (f *cliFixture) createTask(t *testing.T, missionID string, extra ...string) store.Task {
+	t.Helper()
+	args := append([]string{"task", "create", "--mission", missionID, "--title", "Task"}, extra...)
+	output := runCLI(t, args...)
+	var task store.Task
+	if err := json.Unmarshal(output, &task); err != nil {
+		t.Fatal(err)
+	}
+	if task.ID == "" {
+		t.Fatalf("created task = %+v", task)
+	}
+	return task
+}
+
+func (f *cliFixture) spawnArgs(taskID string, extra ...string) []string {
+	args := []string{"spawn", taskID, "--herdr", f.herdr, "--treehouse", f.treehouse,
+		"--git", f.git, "--herdr-session", "fm-lab-cli-test"}
+	return append(args, extra...)
+}
+
+func (f *cliFixture) spawnTask(t *testing.T, taskID string, extra ...string) store.Spawn {
+	t.Helper()
+	output := runCLI(t, f.spawnArgs(taskID, extra...)...)
+	var spawned store.Spawn
+	if err := json.Unmarshal(output, &spawned); err != nil {
+		t.Fatal(err)
+	}
+	if spawned.Pane.PaneID != "w1:p1" || spawned.LeaseID == "" {
+		t.Fatalf("spawned = %+v", spawned)
+	}
+	return spawned
+}
+
+// completeWorker simulates the worker for one attempt: it commits a change in
+// the attempt worktree, writes the strict result into the attempt directory,
+// and publishes it through `sophon worker complete`.
+func (f *cliFixture) completeWorker(t *testing.T, missionID, taskID string, attempt int) string {
+	t.Helper()
+	spawned, err := store.ReadSpawn(missionID, taskID, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("change-%d.txt", attempt)
+	writeCLIFile(t, filepath.Join(spawned.WorktreePath, name), "change\n", 0o600)
+	runCLIGit(t, spawned.WorktreePath, "add", name)
+	runCLIGit(t, spawned.WorktreePath, "commit", "-m", "change")
+	head := runCLIGit(t, spawned.WorktreePath, "rev-parse", "HEAD")
+	resultPath := store.AttemptPath(f.home, missionID, taskID, attempt, "result.json")
+	writeCLIFile(t, resultPath, `{"version":1,"status":"completed","summary":"changed",`+
+		`"verification":[{"command":"go test ./...","exit_code":0}],"changed_files":["`+name+`"],"risks":[]}`, 0o600)
+	future := time.Now().Add(2 * time.Second)
 	if err := os.Chtimes(resultPath, future, future); err != nil {
 		t.Fatal(err)
 	}
-	readyJSON := runCLI(t, "worker", "complete", string(task.ID), "--db", dbPath,
-		"--treehouse", treehouseBinary, "--task-files", taskFiles, "--attempt", "1",
-		"--head-sha", head, "--result", resultPath)
-	var ready domain.Task
-	if err := json.Unmarshal(readyJSON, &ready); err != nil {
+	output := runCLI(t, "worker", "complete", taskID, "--attempt", fmt.Sprint(attempt),
+		"--head-sha", head, "--result", resultPath, "--git", f.git)
+	var completion struct {
+		ResultSHA256 string `json:"result_sha256"`
+	}
+	if err := json.Unmarshal(output, &completion); err != nil {
 		t.Fatal(err)
 	}
-	if ready.State != domain.TaskReady {
-		t.Fatalf("completed slice task = %+v", ready)
+	if completion.ResultSHA256 == "" {
+		t.Fatalf("worker complete = %s", output)
 	}
-	deliveredJSON := runCLI(t, "task", "deliver", string(task.ID), "--db", dbPath,
-		"--command-id", "cmd_cli_deliver")
-	var delivered delivery.Result
+	return head
+}
+
+func (f *cliFixture) verifyComplete(t *testing.T, taskID string) store.Outcome {
+	t.Helper()
+	output := runCLI(t, "verify-complete", taskID, "--git", f.git, "--treehouse", f.treehouse)
+	var outcome store.Outcome
+	if err := json.Unmarshal(output, &outcome); err != nil {
+		t.Fatal(err)
+	}
+	return outcome
+}
+
+func (f *cliFixture) statusReport(t *testing.T) flow.Report {
+	t.Helper()
+	output := runCLI(t, "status", "--json", "--herdr", f.herdr, "--herdr-session", "fm-lab-cli-test")
+	var report flow.Report
+	if err := json.Unmarshal(output, &report); err != nil {
+		t.Fatal(err)
+	}
+	return report
+}
+
+func (f *cliFixture) taskStatus(t *testing.T, taskID string) store.TaskStatus {
+	t.Helper()
+	report := f.statusReport(t)
+	for _, mission := range report.Missions {
+		for _, task := range mission.Tasks {
+			if task.Task.ID == taskID {
+				return task
+			}
+		}
+	}
+	t.Fatalf("task %s missing from status report %+v", taskID, report)
+	return store.TaskStatus{}
+}
+
+func TestCLIHappyPathMissionToRelease(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "Happy path")
+	task := fixture.createTask(t, mission.ID, "--validate", "test -f change-1.txt")
+
+	spawned := fixture.spawnTask(t, task.ID)
+	if spawned.Attempt != 1 || spawned.Branch == "" {
+		t.Fatalf("spawn = %+v", spawned)
+	}
+	head := fixture.completeWorker(t, mission.ID, task.ID, 1)
+
+	if status := fixture.taskStatus(t, task.ID); status.State != store.StateReady {
+		t.Fatalf("status after completion = %+v", status)
+	}
+	outcome := fixture.verifyComplete(t, task.ID)
+	if !strings.EqualFold(outcome.HeadSHA, head) {
+		t.Fatalf("outcome = %+v, want head %s", outcome, head)
+	}
+	validated := runCLI(t, "validate", task.ID, "--git", fixture.git)
+	var validation store.Validation
+	if err := json.Unmarshal(validated, &validation); err != nil {
+		t.Fatal(err)
+	}
+	if !validation.Passed {
+		t.Fatalf("validation = %+v", validation)
+	}
+	deliveredJSON := runCLI(t, "deliver", task.ID, "--confirmed", "--git", fixture.git, "--gh-axi", fixture.ghAxi)
+	var delivered store.Delivery
 	if err := json.Unmarshal(deliveredJSON, &delivered); err != nil {
 		t.Fatal(err)
 	}
-	if delivered.Task.State != domain.TaskDeliveredBranch || delivered.Delivery.HeadSHA != head {
-		t.Fatalf("delivered branch = %+v", delivered)
+	if delivered.State != store.DeliveryDeliveredBranch || !strings.EqualFold(delivered.HeadSHA, head) {
+		t.Fatalf("delivered = %+v", delivered)
 	}
-	releasedJSON := runCLI(t, "task", "release", string(task.ID), "--db", dbPath,
-		"--treehouse", treehouseBinary, "--command-id", "cmd_cli_release")
-	var released domain.TreehouseLease
+	releasedJSON := runCLI(t, "release", task.ID, "--treehouse", fixture.treehouse)
+	var released store.Release
 	if err := json.Unmarshal(releasedJSON, &released); err != nil {
 		t.Fatal(err)
 	}
-	if released.State != domain.TreehouseLeaseReleased || released.LeaseID != "lease-cli" {
-		t.Fatalf("released branch lease = %+v", released)
+	if released.LeaseID != spawned.LeaseID {
+		t.Fatalf("released = %+v, want lease %s", released, spawned.LeaseID)
 	}
+	status := fixture.taskStatus(t, task.ID)
+	if status.State != store.StateDelivered || status.Detail != string(store.DeliveryDeliveredBranch) {
+		t.Fatalf("final status = %+v", status)
+	}
+	text := string(runCLI(t, "status", "--herdr", fixture.herdr, "--herdr-session", "fm-lab-cli-test"))
+	if !strings.Contains(text, task.ID+"\tdelivered\t1") {
+		t.Fatalf("status text = %q", text)
+	}
+	assertNoDatabaseFiles(t, fixture.home)
 }
 
-func TestCLICommanderStartPromptAttachAndStatus(t *testing.T) {
-	root := t.TempDir()
-	dbPath := filepath.Join(root, "sophon.db")
-	projectPath := filepath.Join(root, "project")
-	promptDir := filepath.Join(root, "prompts", "commander")
-	if err := os.MkdirAll(projectPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeCLIFile(t, filepath.Join(promptDir, "AGENTS.md"), "COMMANDER CLI BASELINE\n", 0o600)
+func TestCLICompletionSurvivesWithoutAnySupervisor(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "Supervisor death")
+	task := fixture.createTask(t, mission.ID)
+	fixture.spawnTask(t, task.ID)
+	fixture.completeWorker(t, mission.ID, task.ID, 1)
 
-	store, err := db.Open(context.Background(), dbPath)
-	if err != nil {
-		t.Fatal(err)
+	// A fresh invocation with no daemon, supervisor, or commander session must
+	// still surface the completed work as ready from records alone.
+	if status := fixture.taskStatus(t, task.ID); status.State != store.StateReady {
+		t.Fatalf("status = %+v, want ready", status)
 	}
-	projectID, err := store.CreateProject(context.Background(), "cmd_cli_commander_project", db.CreateProjectInput{Name: "cli-commander", Path: projectPath})
-	if err != nil {
-		t.Fatal(err)
+	outcome := fixture.verifyComplete(t, task.ID)
+	if outcome.Attempt != 1 {
+		t.Fatalf("outcome = %+v", outcome)
 	}
-	mission, err := store.CreateMission(context.Background(), "cmd_cli_commander_mission", db.CreateMissionInput{
-		ProjectID: projectID, Title: "CLI commander", Objective: "receive mission context",
-		AcceptanceCriteria: []domain.Criterion{{Description: "accept operator steer"}},
-		Budget:             domain.MissionBudget{MaxTaskAttempts: 2},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.Close()
-
-	herdrBinary := filepath.Join(root, "fake-herdr-commander")
-	herdrScript := `#!/bin/sh
-set -eu
-case "$1 $2" in
-  "workspace create") printf '{"result":{"workspace":{"workspace_id":"cw1"},"tab":{"tab_id":"cw1:t1"},"root_pane":{"pane_id":"cw1:p1"}}}\n' ;;
-  "pane run"|"tab rename"|"agent rename") printf '{"result":{"ok":true}}\n' ;;
-  "pane read") printf 'OpenAI Codex\n' ;;
-  "pane get") printf '{"result":{"pane":{"pane_id":"cw1:p1"}}}\n' ;;
-  "agent get") printf '{"result":{"agent":{"agent":"codex","pane_id":"cw1:p1","agent_status":"idle","state_change_seq":1,"agent_session":{"value":"commander-codex-session"}}}}\n' ;;
-  "agent prompt") printf '{"result":{"agent":{"agent":"codex","pane_id":"cw1:p1","agent_session":{"value":"commander-codex-session"}},"ok":true}}\n' ;;
-  *) exit 2 ;;
-esac
-`
-	writeCLIFile(t, herdrBinary, herdrScript, 0o700)
-
-	startedJSON := runCLI(t, "commander", "start", "--agent", "codex", "--mission", string(mission.ID),
-		"--db", dbPath, "--herdr", herdrBinary, "--herdr-session", "fm-lab-cli-commander", "--prompt-dir", promptDir, "--max-turns", "1")
-	var started domain.CommanderSession
-	if err := json.Unmarshal(startedJSON, &started); err != nil {
-		t.Fatal(err)
-	}
-	if started.MissionID != mission.ID || started.AgentSessionID != "commander-codex-session" || started.State != domain.CommanderSessionRunning {
-		t.Fatalf("commander start = %+v", started)
-	}
-	store, err = db.Open(context.Background(), dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	exhausted, err := store.ReserveCommanderTurn(context.Background(), "cmd_cli_commander_exhaust", db.ReserveCommanderTurnInput{MissionID: mission.ID, SessionID: started.ID, ExpectedVersion: started.Version, Actor: "test"})
-	store.Close()
-	if err != nil || exhausted.State != domain.CommanderSessionNeedsAttention {
-		t.Fatalf("exhausted=%+v err=%v", exhausted, err)
-	}
-	renewedJSON := runCLI(t, "commander", "renew", "--mission", string(mission.ID), "--db", dbPath, "--command-id", "cmd_cli_commander_renew")
-	var renewed domain.CommanderSession
-	if err := json.Unmarshal(renewedJSON, &renewed); err != nil || renewed.State != domain.CommanderSessionRunning || renewed.TurnCount != 0 {
-		t.Fatalf("commander renew=%+v err=%v", renewed, err)
-	}
-
-	promptedJSON := runCLI(t, "commander", "prompt", "Please acknowledge the steer", "--mission", string(mission.ID),
-		"--db", dbPath, "--herdr", herdrBinary)
-	var prompted domain.CommanderSession
-	if err := json.Unmarshal(promptedJSON, &prompted); err != nil {
-		t.Fatal(err)
-	}
-	if prompted.ID != started.ID || prompted.Version <= started.Version {
-		t.Fatalf("commander prompt = %+v", prompted)
-	}
-
-	statusJSON := runCLI(t, "commander", "status", "--mission", string(mission.ID), "--db", dbPath, "--json")
-	var status domain.CommanderSession
-	if err := json.Unmarshal(statusJSON, &status); err != nil || status.ID != started.ID {
-		t.Fatalf("commander status = %+v, %v", status, err)
-	}
-	attachJSON := runCLI(t, "commander", "attach", "--mission", string(mission.ID), "--db", dbPath, "--herdr", herdrBinary, "--json")
-	var attach struct {
-		Attach []string `json:"attach"`
-	}
-	if err := json.Unmarshal(attachJSON, &attach); err != nil || len(attach.Attach) < 6 || attach.Attach[len(attach.Attach)-1] != "fm-lab-cli-commander" {
-		t.Fatalf("commander attach = %+v, %v", attach, err)
-	}
-	statusText := string(runCLI(t, "commander", "status", "--mission", string(mission.ID), "--db", dbPath))
-	if !strings.Contains(statusText, string(started.ID)+"\trunning\tfm-lab-cli-commander\tcw1:p1") {
-		t.Fatalf("commander status text = %q", statusText)
-	}
-	attachText := string(runCLI(t, "commander", "attach", "--mission", string(mission.ID), "--db", dbPath, "--herdr", herdrBinary))
-	if !strings.Contains(attachText, herdrBinary+" agent attach cw1:p1 --session fm-lab-cli-commander") {
-		t.Fatalf("commander attach text = %q", attachText)
-	}
+	assertNoDatabaseFiles(t, fixture.home)
 }
 
-func TestCLICommanderValidation(t *testing.T) {
-	for _, args := range [][]string{
-		{"commander", "start", "--agent", "codex", "--mission", "msn_1"},
-		{"commander", "start", "--agent", "unknown", "--mission", "msn_1", "--herdr-session", "lab"},
-		{"commander", "prompt", "--mission", "msn_1"},
-		{"commander", "status", "unexpected"},
-		{"commander", "attach", "unexpected"},
-	} {
-		if err := run(context.Background(), args); err == nil {
-			t.Fatalf("sophon %s unexpectedly succeeded", strings.Join(args, " "))
+func TestCLIStaleAttemptRefusalLeavesCurrentAttemptUntouched(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "Stale attempt")
+	task := fixture.createTask(t, mission.ID)
+	first := fixture.spawnTask(t, task.ID)
+	second := fixture.spawnTask(t, task.ID, "--retry")
+	if second.Attempt != 2 || second.LeaseID == first.LeaseID {
+		t.Fatalf("retry spawn = %+v (first %+v)", second, first)
+	}
+
+	// The fenced attempt's worker finishes late; its result still publishes
+	// into its own attempt directory.
+	fixture.completeWorker(t, mission.ID, task.ID, 1)
+	if _, err := runCLIErr(t, "verify-complete", task.ID, "--git", fixture.git, "--treehouse", fixture.treehouse); err == nil ||
+		!strings.Contains(err.Error(), "fenced non-current attempt") {
+		t.Fatalf("verify-complete against stale result error = %v", err)
+	}
+	if _, err := store.ReadOutcome(mission.ID, task.ID, 2); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("attempt 2 outcome err = %v, want not found", err)
+	}
+	status := fixture.taskStatus(t, task.ID)
+	if status.Attempt != 2 || status.State == store.StateDelivered {
+		t.Fatalf("status after stale refusal = %+v", status)
+	}
+	assertNoDatabaseFiles(t, fixture.home)
+}
+
+func TestCLIPullRequestDeliveryIsIdempotent(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "PR idempotency")
+	task := fixture.createTask(t, mission.ID, "--delivery", "pr")
+	fixture.spawnTask(t, task.ID)
+	fixture.completeWorker(t, mission.ID, task.ID, 1)
+	fixture.verifyComplete(t, task.ID)
+
+	deliver := func() store.Delivery {
+		output := runCLI(t, "deliver", task.ID, "--confirmed", "--git", fixture.git, "--gh-axi", fixture.ghAxi)
+		var delivered store.Delivery
+		if err := json.Unmarshal(output, &delivered); err != nil {
+			t.Fatal(err)
 		}
+		return delivered
+	}
+	first := deliver()
+	if first.State != store.DeliveryDeliveredPR || first.PRURL != "https://github.com/sophon/test/pull/7" || first.PRNumber != 7 {
+		t.Fatalf("first delivery = %+v", first)
+	}
+	second := deliver()
+	if second.PRURL != first.PRURL || second.PRNumber != first.PRNumber || second.State != first.State ||
+		!second.DeliveredAt.Equal(*first.DeliveredAt) {
+		t.Fatalf("re-delivery diverged: first %+v second %+v", first, second)
+	}
+	calls, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(calls), "create"); count != 1 {
+		t.Fatalf("gh-axi pr create calls = %d, want 1", count)
+	}
+	assertNoDatabaseFiles(t, fixture.home)
+}
+
+func TestCLIDeliverRefusals(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "Delivery refusals")
+
+	// Delivery requires explicit operator confirmation.
+	task := fixture.createTask(t, mission.ID)
+	fixture.spawnTask(t, task.ID)
+	fixture.completeWorker(t, mission.ID, task.ID, 1)
+	fixture.verifyComplete(t, task.ID)
+	if _, err := runCLIErr(t, "deliver", task.ID, "--git", fixture.git, "--gh-axi", fixture.ghAxi); err == nil ||
+		!strings.Contains(err.Error(), "--confirmed") {
+		t.Fatalf("unconfirmed deliver error = %v", err)
+	}
+
+	// A configured validation must have a passing receipt before delivery.
+	gated := fixture.createTask(t, mission.ID, "--validate", "exit 1")
+	fixture.spawnTask(t, gated.ID)
+	fixture.completeWorker(t, mission.ID, gated.ID, 1)
+	fixture.verifyComplete(t, gated.ID)
+	if _, err := runCLIErr(t, "deliver", gated.ID, "--confirmed", "--git", fixture.git, "--gh-axi", fixture.ghAxi); err == nil ||
+		!strings.Contains(err.Error(), "validation") {
+		t.Fatalf("deliver without validation error = %v", err)
+	}
+	if _, err := runCLIErr(t, "validate", gated.ID, "--git", fixture.git); err == nil ||
+		!strings.Contains(err.Error(), "validation failed") {
+		t.Fatalf("failing validate error = %v", err)
+	}
+	record, err := store.ReadValidation(mission.ID, gated.ID, 1)
+	if err != nil || record.Passed {
+		t.Fatalf("validation receipt = %+v, %v", record, err)
+	}
+	if _, err := runCLIErr(t, "deliver", gated.ID, "--confirmed", "--git", fixture.git, "--gh-axi", fixture.ghAxi); err == nil ||
+		!strings.Contains(err.Error(), "validation passed") {
+		t.Fatalf("deliver with failed validation error = %v", err)
+	}
+	assertNoDatabaseFiles(t, fixture.home)
+}
+
+func TestCLIStatusIgnoresWakeLines(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "Wake lines")
+	task := fixture.createTask(t, mission.ID)
+	fixture.spawnTask(t, task.ID)
+
+	beforeJSON := runCLI(t, "status", "--json", "--herdr", fixture.herdr, "--herdr-session", "fm-lab-cli-test")
+	beforeText := runCLI(t, "status", "--herdr", fixture.herdr, "--herdr-session", "fm-lab-cli-test")
+	wakePath := store.WakePath(fixture.home, task.ID)
+	garbage, err := os.OpenFile(wakePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := garbage.WriteString("total garbage\nnot-a-state delivered\nduplicate\nduplicate\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := garbage.Close(); err != nil {
+		t.Fatal(err)
+	}
+	afterJSON := runCLI(t, "status", "--json", "--herdr", fixture.herdr, "--herdr-session", "fm-lab-cli-test")
+	afterText := runCLI(t, "status", "--herdr", fixture.herdr, "--herdr-session", "fm-lab-cli-test")
+	if string(beforeJSON) != string(afterJSON) || string(beforeText) != string(afterText) {
+		t.Fatalf("wake lines changed status: json %q -> %q, text %q -> %q", beforeJSON, afterJSON, beforeText, afterText)
+	}
+}
+
+func TestCLICleanStartNeedsNoInit(t *testing.T) {
+	fixture := newCLIFixture(t)
+	status := runCLI(t, "status", "--herdr", fixture.herdr)
+	if strings.TrimSpace(string(status)) != "MISSION\tTASK\tSTATE\tATTEMPT\tDETAIL" {
+		t.Fatalf("empty status = %q", status)
+	}
+	missions := runCLI(t, "mission", "list")
+	if strings.TrimSpace(string(missions)) != "ID\tTITLE\tPROJECT\tCREATED" {
+		t.Fatalf("empty mission list = %q", missions)
+	}
+	var listed []store.Mission
+	if err := json.Unmarshal(runCLI(t, "mission", "list", "--json"), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("empty mission list JSON = %+v", listed)
+	}
+	mission := fixture.createMission(t, "No init step")
+	if mission.ProjectPath != fixture.project {
+		t.Fatalf("mission = %+v", mission)
+	}
+	assertNoDatabaseFiles(t, fixture.home)
+}
+
+func TestCLIPromptCommanderRendersBaseline(t *testing.T) {
+	fixture := newCLIFixture(t)
+	output := string(runCLI(t, "prompt", "commander"))
+	for _, want := range []string{"<!-- commander prompt: commander/AGENTS.md -->", "# Sophon commander", "## Session skill load triggers"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("commander prompt omitted %q", want)
+		}
+	}
+	lower := strings.ToLower(output)
+	for _, forbidden := range []string{"pintellect", "parallel-intellect", "parallel intellect"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("commander prompt contains forbidden branding %q", forbidden)
+		}
+	}
+	// Skills are materialized per invocation under the data home.
+	entries, err := os.ReadDir(filepath.Join(fixture.home, "skills", "commander"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("commander skill sessions = %+v, %v", entries, err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.home, "skills", "commander", entries[0].Name(), "status", "SKILL.md")); err != nil {
+		t.Fatalf("materialized commander skills: %v", err)
+	}
+	assertNoDatabaseFiles(t, fixture.home)
+}
+
+func TestCLIDispatchAndUsageErrors(t *testing.T) {
+	fixture := newCLIFixture(t)
+	if err := run(context.Background(), nil); err != nil {
+		t.Fatalf("bare invocation err = %v", err)
+	}
+	if output := runCLI(t, "version"); strings.TrimSpace(string(output)) != version {
+		t.Fatalf("version = %q", output)
+	}
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"unknown command", []string{"mystery"}, "unknown command"},
+		{"mission subcommand", []string{"mission"}, "expected: sophon mission"},
+		{"task subcommand", []string{"task"}, "expected: sophon task"},
+		{"worker subcommand", []string{"worker"}, "expected: sophon worker"},
+		{"prompt subcommand", []string{"prompt"}, "expected: sophon prompt"},
+		{"mission create missing fields", []string{"mission", "create", "--project", fixture.project}, "required argument is empty"},
+		{"task create unknown mission", []string{"task", "create", "--mission", "mission_missing", "--title", "x"}, "not found"},
+		{"task create bad delivery", []string{"task", "create", "--mission", "mission_missing", "--title", "x", "--delivery", "gate"}, "unknown delivery mode"},
+		{"spawn arity", []string{"spawn", "one", "two"}, "exactly one task ID"},
+		{"worker complete arity", []string{"worker", "complete"}, "exactly one task ID"},
+		{"worker complete missing result", []string{"worker", "complete", "task_x", "--attempt", "1", "--head-sha", "abc"}, "result path are required"},
+		{"verify-complete arity", []string{"verify-complete"}, "exactly one task ID"},
+		{"validate arity", []string{"validate"}, "exactly one task ID"},
+		{"deliver arity", []string{"deliver"}, "exactly one task ID"},
+		{"release arity", []string{"release"}, "exactly one task ID"},
+		{"status positional", []string{"status", "extra"}, "does not accept positional"},
+		{"send arity", []string{"send", "task_x"}, "task ID and a message"},
+		{"mission list positional", []string{"mission", "list", "extra"}, "does not accept positional"},
+	} {
+		if _, err := runCLIErr(t, test.args...); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Errorf("%s: error = %v, want %q", test.name, err, test.want)
+		}
+	}
+	var usageErr *exitError
+	if err := run(context.Background(), []string{"mission"}); !errors.As(err, &usageErr) || usageErr.code != 2 {
+		t.Fatalf("usage exit error = %v", err)
+	}
+	if got := exitCode(fmt.Errorf("plain")); got != 1 {
+		t.Fatalf("plain exit code = %d", got)
+	}
+}
+
+func TestCLIParseFlagsAcceptsInterspersedPositionals(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "Flag order")
+	task := fixture.createTask(t, mission.ID)
+	// Flags before the positionals parse identically to flags after them.
+	spawned := fixture.spawnTask(t, task.ID)
+	if spawned.TaskID != task.ID {
+		t.Fatalf("spawn = %+v", spawned)
+	}
+	if _, err := runCLIErr(t, "spawn", task.ID); err == nil || !strings.Contains(err.Error(), "re-run with retry") {
+		t.Fatalf("second plain spawn error = %v", err)
+	}
+	retry := fixture.spawnTask(t, task.ID, "--retry")
+	if retry.Attempt != 2 {
+		t.Fatalf("retry spawn = %+v", retry)
+	}
+}
+
+func assertNoDatabaseFiles(t *testing.T, home string) {
+	t.Helper()
+	var databases []string
+	if err := filepath.WalkDir(home, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".db") {
+			databases = append(databases, path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(databases) != 0 {
+		t.Fatalf("database files under data home: %v", databases)
 	}
 }
 
 func runCLI(t *testing.T, args ...string) []byte {
+	t.Helper()
+	output, err := runCLIErr(t, args...)
+	if err != nil {
+		t.Fatalf("sophon %s: %v", strings.Join(args, " "), err)
+	}
+	return output
+}
+
+func runCLIErr(t *testing.T, args ...string) ([]byte, error) {
 	t.Helper()
 	reader, writer, err := os.Pipe()
 	if err != nil {
@@ -668,19 +659,16 @@ func runCLI(t *testing.T, args ...string) []byte {
 	os.Stdout = original
 	output, readErr := io.ReadAll(reader)
 	reader.Close()
-	if runErr != nil {
-		t.Fatalf("sophon %s: %v", strings.Join(args, " "), runErr)
-	}
 	if closeErr != nil || readErr != nil {
 		t.Fatalf("capture CLI output: close=%v read=%v", closeErr, readErr)
 	}
-	return output
+	return output, runErr
 }
 
 func runCLIGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	commandArgs := append([]string{"-C", dir}, args...)
-	output, err := exec.Command("git", commandArgs...).CombinedOutput()
+	command := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
 	}
