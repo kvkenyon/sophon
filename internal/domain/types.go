@@ -13,6 +13,7 @@ const (
 type DeliveryMode string
 
 const (
+	DeliveryLocal  DeliveryMode = "local"
 	DeliveryPR     DeliveryMode = "pr"
 	DeliveryBranch DeliveryMode = "branch"
 )

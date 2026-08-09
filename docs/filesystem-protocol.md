@@ -13,14 +13,30 @@ disposable agent session that is the operator's sole point of contact and the
 only planner), and **workers** (isolated agent sessions that execute one
 attempt each).
 
+An ordinary **workspace root** is a separate organization boundary. It has an
+immutable marker and a `projects/` directory, but is never a Git repository,
+worker base, data home, registry service, or lifecycle owner. One commander
+attaches once at the root and coordinates any number of project-confined tasks.
+The global data home remains independently resolved.
+
 ## Layout
 
 ```text
+<workspace-root>/
+  .sophon-workspace.json               # immutable identity, canonical root
+  projects/
+    <project-key>/                      # real direct-child Git repository
+
 ~/.sophon/                              # data home (SOPHON_DATA_HOME overrides)
   missions/<mission-id>/
-    mission.json                        # durable intent: project path, objective
+    mission.json                        # intent + immutable workspace/project identity
     tasks/<task-id>/
-      task.json                         # public contract, review posture + revision/attempt pointers
+      task.json                         # development posture, review + revision/attempt pointers
+      bootstrap/
+        intent.json                     # authority before an empty-root Git mutation
+        receipt.json                    # exact empty initial commit/ref
+      cancellation.json                 # immutable never-started cancellation/replacement
+      delivery-selection.json           # immutable local -> branch/PR selection
       revisions/<n>/
         correction.json                # immutable accepted correction intent (n > 1)
       review-posture/<sequence>.json    # immutable explicit posture escalation history
@@ -53,6 +69,84 @@ attempt each).
     review-bridges/                     # VOLATILE exact kernel-lock owners; never truth
   skills/                               # per-session materialized runtime skills
 ```
+
+The workspace marker is deliberately outside the data-home protocol because it
+describes filesystem scope, not task truth. A workspace mission pins
+`workspace_id`, canonical `workspace_root`, canonical `project_key`, resolved
+absolute `project_path`, and a filesystem/Git identity fingerprint. Historical
+missions containing only an external absolute project path remain readable,
+but new workspace work is confined to a real direct child under `projects/`.
+
+## Workspace and project boundary
+
+`sophon workspace init ROOT` creates or validates only the root, marker, and
+`projects/`. Initialization is idempotent and refuses unrelated root content,
+conflicting or moved markers, unsafe permissions, symlinked roots, nested
+workspace ambiguity, and a non-directory projects entry. It does not run Git,
+create a remote, install anything, or start a commander.
+
+`project create`, `clone`, `add`, `list`, and `inspect` are direct filesystem
+and Git operations, not a project control plane. Keys are canonical lowercase
+names. Every read re-resolves the real path and Git common directory and
+refuses traversal, symlink escape, case collision, duplicate Git identity,
+root-as-project, nested repository identity, rename, or path replacement.
+Adoption is explicit and only for a clean, already-confined direct child;
+Sophon never moves, deletes, symlinks, or rewrites an external repository.
+
+Project selection is commander judgment with a narrow rule: explicit key
+first, a single clear conversational referent second, otherwise ask one
+question. Current working directory is never hidden selection authority.
+Cross-project outcomes are decomposed into separate project-pinned tasks and
+workers; one worker never gets the workspace root as its checkout.
+
+## Proposal, planning, and start
+
+Proposal-only conversation is not represented in this protocol. It stays in
+the commander's conversation unless the operator explicitly asks for a draft
+artifact. In particular, proposal wording creates no mission/task record,
+attempt, lease, Git change, worker, or notification. The commander's embedded
+contract is the sole proposal-versus-execution classifier.
+
+After explicit implementation authorization, mission/task creation publishes
+durable planning only. A task without an exact current `spawn.json` derives
+`planned` and emits the exact `sophon spawn TASK` action. Allocation failure
+does not become `active`, and a repeated start reuses that unspawned attempt.
+An explicitly confirmed cancellation publishes `cancellation.json`; a planned
+revision publishes a replacement task and a cancellation linking the old one.
+Neither record is deletion or mutable status.
+
+## Empty repository bootstrap
+
+Local spawn accepts only an exact conventional empty repository: real project
+directory, ordinary `.git/`, unborn symbolic HEAD, and no other root entry or
+porcelain status including ignored files. Ambient Git routing variables,
+linked/unusual layouts, hooks/worktree configuration, submodules, symlinks,
+untracked or ignored content, or a wrong top-level refuse without mutation.
+
+Under the shared data-home lock Sophon publishes `bootstrap/intent.json` before
+Git mutation. It creates a deterministic empty tree and initial commit and
+uses an absent-ref compare-and-swap on the repository's intended local branch.
+It then proves the exact root/no-parent commit, empty tree, message and symbolic
+ref before publishing `bootstrap/receipt.json` and allocating. Crash recovery
+converges from intent, commit, or receipt; a different branch/head refuses.
+Bootstrap never creates product files, scaffolding, ignore files, remotes,
+public branches, pushes, repositories, or PRs. The worker owns every
+substantive descendant commit.
+
+## Development and delivery
+
+`local` is a first-class task delivery posture and the default when no public
+branch is supplied. It supports allocation, completion, verification,
+validation, exact Read the Code review, and release without a remote. Local
+completion preserves its exact commit and is not delivery.
+
+After a remote is separately configured, `delivery select --confirmed`
+publishes one immutable local-to-`branch`/`pr` selection only after exact-head,
+validation, repository, and public-surface checks. It performs no push or forge
+write. A later `deliver --confirmed` is still required for every delivery
+effect. `project publish --confirmed` is the separate explicit GitHub
+repository/remote operation; no development command calls it or invents an
+origin. Existing branch/PR task records retain their behavior.
 
 ## Rules
 
@@ -90,7 +184,10 @@ attempt each).
    revision reuses its immutable correction base. Stale revision/attempt
    evidence is preserved and refused.
 5. **Derived status.** Task state is computed at read time from the exact
-   current attempt. A valid exact-identity `release.json` → historical
+   current attempt and re-resolved mission project identity. A replacement,
+   rename, or workspace/Git identity mismatch → `project-drift`; a valid
+   never-started `cancellation.json` → `cancelled`; no canonical current
+   `spawn.json` → `planned`; a valid exact-identity `release.json` → historical
    `released`; a valid `report.json` → `attention`; a malformed, mismatched, or
    conflicting canonical completion/report/release artifact →
    `invalid-evidence`; terminal first `delivery.json` → `delivered`; an exact
@@ -100,14 +197,17 @@ attempt each).
    `correction-awaiting-delivery`; drift → `reconciliation`; a merged PR →
    `merged`; otherwise `outcome.json` → `verified`; a schema-valid completed
    `result.json` without outcome → `ready`;
-   otherwise the worker pane is observed live → `running`/`idle`/`lost`.
+   otherwise the worker pane from the exact spawn receipt is observed live →
+   `running`/`idle`/`lost`. Evidence that claims worker execution without a
+   matching spawn receipt is `invalid-evidence`, never active work.
    File presence alone never makes completion ready. Wake lines in
    `state/` are notifications only; absent, duplicated, or contradictory wake
    lines never change derived status. A result completed while no commander
    session exists simply waits on disk and surfaces as `ready` or `attention`
    to the next session — no recovery transition exists. A fenced attempt's
    result, report, or release never affects the current attempt.
-   The same derivation also yields the commander action queue: every `ready`
+   The same derivation also yields the commander action queue: every `planned`
+   task maps to exact `sophon spawn <task-id>`; every `ready`
    or `correction-ready` task maps to an exact `sophon verify-complete
    <task-id>` action and every `verified` or `correction-verified` task whose
    configured validation has no receipt yet maps to an
@@ -116,23 +216,28 @@ attempt each).
    receipt — pass or fail — is terminal for the queue; a failed validation is
    correction routing, never a blind re-run. `attention`, `invalid-evidence`,
    and `released` never emit automated actions.
-   Normal `sophon status` is the operational view: it keeps an exact open PR
-   visible even when its worker copy is released, and omits other released
-   tasks/missions. `sophon status --all` retains the complete revision/attempt
+   Normal `sophon status` is the operational view: it labels each workspace
+   task by project key, keeps an exact open PR visible even when its worker
+   copy is released, and omits cancelled and other released tasks/missions.
+   `sophon status --all` retains the complete revision/attempt/bootstrap/
+   cancellation/selection
    chain and labels released attempts explicitly;
    `delivery_state` distinguishes `not-delivered` from terminal delivery
    receipts without implying release performed delivery. No record is deleted
    or compacted. `sophon mission list` remains durable mission history.
-6. **Volatile commander routing.** `sophon commander attach` records the live
+6. **Volatile commander routing.** `sophon commander attach --scope ROOT`
+   validates the workspace marker and records the live
    commander's exact Herdr session/workspace/tab/pane in
-   `state/commander.json`. The record is liveness and presentation routing
+   `state/commander.json` together with the volatile scope identity. The record
+   is liveness and presentation routing
    only: after `sophon worker complete` durably publishes `result.json` or
    `sophon worker report` durably publishes `report.json`, the
    CLI best-effort submits a fixed Sophon-generated wake (exact task identity
    and commands, with an unambiguous instruction to drain derived
    verification, required validation, and status before replying or waiting)
-   to the registered pane, and `sophon spawn` groups a new worker as a tab in
-   the registered workspace of the same explicit Herdr session. A missing, malformed, stale, dead, or duplicate target is a
+   to the registered pane, and `sophon spawn` groups workers from every pinned
+   child project as independent tabs in the registered workspace of the same
+   explicit Herdr session. A missing, malformed, stale, dead, or duplicate target is a
    bounded diagnostic, never a task failure; spawn then falls back to an
    isolated workspace and the publication still derives from disk. A
    fresh attach replaces only this volatile address — no recovery transition,
@@ -170,7 +275,9 @@ attempt each).
    available for recovery within the same attempt; accepted feedback allocates
    a new revision and worker at the exact reviewed head. When that head was
    already delivered to an open PR, the correction keeps its exact PR identity.
-9. **External boundaries.** The lease boundary uses exact identity guards:
+9. **External boundaries.** Local tasks never consult a forge or require a
+   remote. A delivery selection changes only immutable intent and grants no
+   external effect. The lease boundary uses exact identity guards:
    release is conditional on `(lease_id, holder)` and fences on mismatch. The
    forge boundary keeps generated execution branches private and pushes an
    exact verified SHA to the explicit public delivery branch. Before any push
@@ -198,9 +305,13 @@ attempt each).
    External effects with crash windows publish typed intent before the effect
    and a typed receipt after (`delivery.json`, `release.json`); re-running
    converges from observed reality. There is no generalized command ledger.
-10. **Authority.** A live commander session may verify and validate
-   autonomously. Every delivery effect requires operator confirmation, enforced
-   mechanically: `sophon deliver` refuses without `--confirmed`. With no
+10. **Authority.** Proposal discussion has zero protocol effects. After
+   explicit implementation authority, a live commander session may plan,
+   start, verify, validate, review, and release local work autonomously.
+   Project publication, local-to-public selection, and every delivery effect
+   are distinct explicit operator boundaries, each mechanically refusing
+   without its own `--confirmed`. Review approval confirms none of them.
+   With no
    commander session alive, nothing advances and nothing is lost.
 11. **Read the Code review.** `task.json.review_posture` is `off`, `optional`,
    or `required`; an absent field reads as `off`. Typed task-level changes may
@@ -217,7 +328,6 @@ attempt each).
    ownership becomes stale, ended, delivered, or released. It and the monitor
    carry no lifecycle authority. For `required`, delivery also requires a
    canonical approval for the exact current outcome head later than every
-   feedback event, no pending/requested-change/gap/stale evidence, and an
    immediate non-capability product-status cursor/revision check. Approval
    never supplies `--confirmed` or any external authority. The full contract
    is in `docs/read-the-code-review.md`.
@@ -226,14 +336,29 @@ attempt each).
 
 ```text
 sophon version
-sophon mission create --project <path> --title <t> --objective <o>
+sophon workspace init|inspect <root>
+sophon project list --workspace <root>
+sophon project create <key> --workspace <root> [--initial-branch <branch>]
+sophon project clone <key> --workspace <root> --source <git-source>
+sophon project add|inspect <key> --workspace <root>
+sophon project publish <key> --workspace <root> --repository <owner/repo>
+                       --remote-url <url> --visibility private|public|internal
+                       --confirmed
+sophon mission create --workspace <root> --project <key>
+                      --title <t> --objective <o>
+sophon mission create --project <historical-absolute-path>
+                      --title <t> --objective <o>
 sophon mission list [--json]
-sophon task create --mission <id> --title <public-title>
+sophon task create --mission <id> --title <title>
                    --objective <worker-objective>
-                   --delivery-branch <public-branch> [--kind implementation]
-                   [--delivery branch|pr] [--validate <command>]
+                   [--delivery local|branch|pr]
+                   [--delivery-branch <public-branch>] [--kind implementation]
+                   [--validate <command>]
                    [--review off|optional|required]
-sophon commander attach [--pane <id>] [--workspace <id>] [--tab <id>]
+sophon task cancel <task-id> --reason <reason> --confirmed
+sophon task revise <task-id> --title <title> --objective <objective>
+                   --confirmed [--validate <command>]
+sophon commander attach --scope <root> [--pane <id>] [--workspace <id>] [--tab <id>]
 sophon monitor run|start [--herdr <path>]
 sophon monitor status [--json]
 sophon monitor stop
@@ -254,6 +379,8 @@ sophon worker complete <task-id> --attempt <n> --head-sha <sha> --result <path>
 sophon worker report <task-id> --attempt <n> --head-sha <sha> --report <path>
 sophon verify-complete <task-id>
 sophon validate <task-id>
+sophon delivery select <task-id> --mode branch|pr --title <public-title>
+                       --branch <public-branch> --confirmed
 sophon deliver <task-id> --confirmed
 sophon release <task-id> [--attempt <n>]
 sophon status [--json] [--all]
@@ -267,12 +394,13 @@ Read the Code is the exception: `--read-the-code` overrides
 `SOPHON_READ_THE_CODE`, and an empty configuration refuses with an install/pack
 diagnostic rather than assuming PATH, npm publication, or registry access.
 
-Task creation requires all three distinct intent values. `--title` is a
-single printable public line of at most 120 characters (including an issue
-key naturally when appropriate); `--objective` is the detailed private work
-order; and `--delivery-branch` is a valid, explicitly public-safe Git branch
-used by both branch and PR delivery. No field falls back to another. Records
-created before this schema remain readable historical evidence. An already
+Task creation always separates its bounded one-line `--title` from the detailed
+private worker `--objective`. A local task needs no public metadata. Branch and
+PR tasks additionally require a separately validated public delivery branch;
+an immutable local-to-public selection later records both the current public
+title and branch. No public value is inferred from the private objective,
+internal IDs, local paths, or runtime prose. Records created before this schema
+remain readable historical evidence. An already
 successful delivery receipt for the exact revision/attempt is returned
 unchanged. A historical open PR whose
 exact branch predates the public-name sanitizer may be corrected only by

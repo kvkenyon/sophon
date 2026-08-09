@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"sophon/internal/datahome"
+	"sophon/internal/domain"
 	"sophon/internal/store"
 	runtimeprompts "sophon/prompts"
 )
@@ -49,11 +50,18 @@ func (f *Flow) renderBrief(homeDir string, mission store.Mission, task store.Tas
 	fmt.Fprintf(&body, "- Mission: `%s` — %s\n", mission.ID, cleanLine(mission.Title))
 	fmt.Fprintf(&body, "- Mission objective: %s\n", cleanLine(mission.Objective))
 	fmt.Fprintf(&body, "- Task: `%s` — %s\n", task.ID, cleanLine(task.Title))
-	fmt.Fprintf(&body, "- Public delivery title: %s\n", cleanLine(task.Title))
-	fmt.Fprintf(&body, "- Public delivery branch: `%s`\n", task.DeliveryBranch)
+	if task.DeliveryMode == domain.DeliveryLocal {
+		body.WriteString("- Development posture: `local` — no public branch, remote write, or delivery is authorized.\n")
+	} else {
+		fmt.Fprintf(&body, "- Public delivery title: %s\n", cleanLine(task.Title))
+		fmt.Fprintf(&body, "- Public delivery branch: `%s`\n", task.DeliveryBranch)
+	}
 	fmt.Fprintf(&body, "- Revision: `%d`\n", task.CurrentRevision)
 	fmt.Fprintf(&body, "- Attempt: `%d`\n", attempt)
-	fmt.Fprintf(&body, "- Project: `%s`\n", mission.ProjectPath)
+	if mission.ProjectKey != "" {
+		fmt.Fprintf(&body, "- Workspace project: `%s`\n", mission.ProjectKey)
+	}
+	fmt.Fprintf(&body, "- Project repository: `%s`\n", mission.ProjectPath)
 	fmt.Fprintf(&body, "- Worktree: `%s`\n", worktree)
 	fmt.Fprintf(&body, "- Branch: `%s`\n", branch)
 	fmt.Fprintf(&body, "- Base SHA: `%s`\n", baseSHA)

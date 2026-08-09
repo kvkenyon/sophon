@@ -511,7 +511,80 @@ func (a *CommandAdapter) Start(ctx context.Context, in StartRequest) (Session, e
 	if session.AgentSessionID, err = a.captureAgentSessionID(ctx, session, promptOutput); err != nil {
 		return session, err
 	}
+	if positionalPrompt {
+		if err := a.waitForInitialPositionalPrompt(ctx, session); err != nil {
+			return session, err
+		}
+	}
 	return session, nil
+}
+
+// waitForInitialPositionalPrompt gives Claude and Pi the same positive
+// turn-start guarantee that agent prompt --wait provides for Codex. Their
+// initial brief is part of the launch argv, so native registration and a
+// drawn composer can precede the first working transition. A very fast turn
+// may finish before agent wait begins; Herdr's monotonic state-change sequence
+// then proves that the new pane advanced beyond its initial registration.
+func (a *CommandAdapter) waitForInitialPositionalPrompt(ctx context.Context, session Session) error {
+	_, stderr, waitErr := a.run(ctx, "agent", "wait", session.PaneID,
+		"--until", "working", "--timeout", "30000")
+	if waitErr == nil {
+		return nil
+	}
+	completed, observeErr := a.initialTurnAlreadyCompleted(ctx, session)
+	if observeErr == nil && completed {
+		return nil
+	}
+	waitFailure := commandError("wait for initial "+string(sessionRuntime(session))+" turn", waitErr, stderr)
+	if observeErr != nil {
+		return fmt.Errorf("%w; completion check: %v", waitFailure, observeErr)
+	}
+	return waitFailure
+}
+
+func (a *CommandAdapter) initialTurnAlreadyCompleted(ctx context.Context, session Session) (bool, error) {
+	stdout, stderr, runErr := a.run(ctx, "agent", "get", session.PaneID)
+	body := stdout
+	if len(bytes.TrimSpace(body)) == 0 {
+		body = stderr
+	}
+	var response struct {
+		Result struct {
+			Agent struct {
+				Runtime        string `json:"agent"`
+				PaneID         string `json:"pane_id"`
+				Status         string `json:"agent_status"`
+				StateChangeSeq int64  `json:"state_change_seq"`
+			} `json:"agent"`
+		} `json:"result"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		if runErr != nil {
+			return false, commandError("check initial "+string(sessionRuntime(session))+" turn", runErr, stderr)
+		}
+		return false, fmt.Errorf("decode Herdr initial-turn response: %w", err)
+	}
+	if response.Error.Code != "" {
+		return false, fmt.Errorf("check initial %s turn: Herdr error %s", sessionRuntime(session), response.Error.Code)
+	}
+	if runErr != nil {
+		return false, commandError("check initial "+string(sessionRuntime(session))+" turn", runErr, stderr)
+	}
+	if response.Result.Agent.PaneID != session.PaneID {
+		return false, errors.New("Herdr initial-turn response did not preserve pane identity")
+	}
+	if registered := Runtime(strings.TrimSpace(response.Result.Agent.Runtime)); registered != "" && registered != sessionRuntime(session) {
+		return false, fmt.Errorf("Herdr pane registered %s, want %s", registered, sessionRuntime(session))
+	}
+	switch response.Result.Agent.Status {
+	case "idle", "done", "blocked":
+		return response.Result.Agent.StateChangeSeq > 1, nil
+	default:
+		return false, nil
+	}
 }
 
 // placeAgent chooses the agent's Herdr placement. With an explicit parent
@@ -751,13 +824,53 @@ func composerReady(runtime Runtime, visible string) bool {
 	case RuntimeCodex:
 		return strings.Contains(visible, "OpenAI Codex")
 	case RuntimeClaude:
-		return strings.Contains(visible, "Claude Code") &&
-			(strings.Contains(visible, "bypass permissions on") || strings.Contains(visible, "❯"))
+		return (strings.Contains(visible, "Claude Code") &&
+			(strings.Contains(visible, "bypass permissions on") || strings.Contains(visible, "❯"))) ||
+			(strings.Contains(visible, "bypass permissions on") && separatedComposerReady(visible))
 	case RuntimePi:
-		return strings.Contains(visible, "pi v") && strings.Contains(visible, "escape interrupt")
+		return (strings.Contains(visible, "pi v") && strings.Contains(visible, "escape interrupt")) ||
+			separatedComposerReady(visible)
 	default:
 		return false
 	}
+}
+
+// separatedComposerReady recognizes current Claude and Pi TUIs without
+// relying on product/version banner text. Their composers contain at most
+// eight content rows between two solid horizontal separators. This runs only
+// after Herdr has positively registered the pane as the requested runtime;
+// Claude additionally requires its bypass-permissions footer, so a bare shell
+// or unrelated process cannot satisfy readiness with a single rule line.
+func separatedComposerReady(visible string) bool {
+	open := false
+	contentLines := 0
+	for _, line := range strings.Split(visible, "\n") {
+		if piSeparatorRow(line) {
+			if open && contentLines <= 8 {
+				return true
+			}
+			open = true
+			contentLines = 0
+			continue
+		}
+		if open {
+			contentLines++
+		}
+	}
+	return false
+}
+
+func piSeparatorRow(line string) bool {
+	line = strings.TrimSpace(line)
+	if len([]rune(line)) < 8 {
+		return false
+	}
+	for _, char := range line {
+		if char != '─' {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *CommandAdapter) sendKeys(ctx context.Context, paneID string, keys ...string) error {
@@ -1065,7 +1178,7 @@ func initialCommand(runtime Runtime, in StartRequest) (command string, positiona
 		args = append(args, shellQuote(in.Brief))
 		return dataHomePrefix(in.DataHome) + strings.Join(args, " "), true, nil
 	case RuntimePi:
-		return dataHomePrefix(in.DataHome) + strings.Join([]string{
+		return piProcessPrefix(in.DataHome) + strings.Join([]string{
 			"FM_PI_HARNESS=pi", "pi", "--model", shellQuote(strings.TrimSpace(in.Model)),
 			"-e", shellQuote(strings.TrimSpace(in.PiExtensionPath)), shellQuote(in.Brief),
 		}, " "), true, nil
@@ -1083,6 +1196,15 @@ func dataHomePrefix(home string) string {
 		return ""
 	}
 	return datahome.OverrideEnv + "=" + shellQuote(home) + " "
+}
+
+// piProcessPrefix replaces the pane's interactive shell with Pi. Herdr's Pi
+// integration binds terminal input and native lifecycle state to the pane's
+// foreground owner; leaving an intermediate shell in place can register Pi
+// while its TUI remains unable to consume input. Keep environment assignments
+// on exec's argv so the replacement process retains the pinned data home.
+func piProcessPrefix(home string) string {
+	return "exec env " + dataHomePrefix(home)
 }
 
 func resumeCommand(session Session) (string, error) {
@@ -1107,7 +1229,7 @@ func resumeCommand(session Session) (string, error) {
 		if err := validatePiExtension(session.WorktreePath, session.PiExtensionPath); err != nil {
 			return "", err
 		}
-		return dataHomePrefix(session.DataHome) + strings.Join([]string{
+		return piProcessPrefix(session.DataHome) + strings.Join([]string{
 			"FM_PI_HARNESS=pi", "pi", "--model", shellQuote(strings.TrimSpace(session.Model)),
 			"-e", shellQuote(strings.TrimSpace(session.PiExtensionPath)),
 			"--session", shellQuote(session.AgentSessionID),

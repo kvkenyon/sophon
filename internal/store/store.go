@@ -61,11 +61,15 @@ type WorkerReport struct {
 
 // Mission is durable mission intent.
 type Mission struct {
-	ID          string    `json:"id"`
-	ProjectPath string    `json:"project_path"`
-	Title       string    `json:"title"`
-	Objective   string    `json:"objective"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID              string    `json:"id"`
+	ProjectPath     string    `json:"project_path"`
+	ProjectKey      string    `json:"project_key,omitempty"`
+	ProjectIdentity string    `json:"project_identity,omitempty"`
+	WorkspaceID     string    `json:"workspace_id,omitempty"`
+	WorkspaceRoot   string    `json:"workspace_root,omitempty"`
+	Title           string    `json:"title"`
+	Objective       string    `json:"objective"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 // Task is durable task intent plus the current-attempt incarnation token.
@@ -82,6 +86,64 @@ type Task struct {
 	CurrentAttempt    int                  `json:"current_attempt"`
 	CurrentRevision   int                  `json:"current_revision"`
 	CreatedAt         time.Time            `json:"created_at"`
+}
+
+// BootstrapIntent is immutable authority to create the minimum empty root
+// commit for one explicitly started local project task. It is published before
+// any Git object or ref mutation.
+type BootstrapIntent struct {
+	Version       int       `json:"version"`
+	TaskID        string    `json:"task_id"`
+	MissionID     string    `json:"mission_id"`
+	ProjectKey    string    `json:"project_key,omitempty"`
+	ProjectPath   string    `json:"project_path"`
+	Branch        string    `json:"branch"`
+	Ref           string    `json:"ref"`
+	CommitMessage string    `json:"commit_message"`
+	AuthorName    string    `json:"author_name"`
+	AuthorEmail   string    `json:"author_email"`
+	AuthoredAt    time.Time `json:"authored_at"`
+	RequestedAt   time.Time `json:"requested_at"`
+}
+
+// BootstrapReceipt records the exact conventional empty root created from a
+// BootstrapIntent. It never implies worker start or delivery.
+type BootstrapReceipt struct {
+	Version     int       `json:"version"`
+	TaskID      string    `json:"task_id"`
+	MissionID   string    `json:"mission_id"`
+	Branch      string    `json:"branch"`
+	Ref         string    `json:"ref"`
+	CommitSHA   string    `json:"commit_sha"`
+	CompletedAt time.Time `json:"completed_at"`
+}
+
+// Cancellation is immutable history for explicit cancellation of an
+// unstarted task. Intent remains readable and no task directory is deleted.
+type Cancellation struct {
+	Version         int       `json:"version"`
+	TaskID          string    `json:"task_id"`
+	MissionID       string    `json:"mission_id"`
+	Reason          string    `json:"reason"`
+	Replacement     string    `json:"replacement_task_id,omitempty"`
+	ReplacementTask *Task     `json:"replacement_task,omitempty"`
+	CancelledAt     time.Time `json:"cancelled_at"`
+}
+
+// DeliverySelection is the one immutable transition from local development
+// to a public branch or PR posture. Selection performs no remote write and
+// never substitutes for a separately confirmed delivery.
+type DeliverySelection struct {
+	Version      int                 `json:"version"`
+	TaskID       string              `json:"task_id"`
+	MissionID    string              `json:"mission_id"`
+	FromMode     domain.DeliveryMode `json:"from_mode"`
+	Mode         domain.DeliveryMode `json:"mode"`
+	PublicTitle  string              `json:"public_title"`
+	PublicBranch string              `json:"public_branch"`
+	Repository   string              `json:"repository"`
+	HeadSHA      string              `json:"head_sha"`
+	SelectedAt   time.Time           `json:"selected_at"`
 }
 
 // Spawn is the spawn receipt for one attempt, written only after every
@@ -223,12 +285,14 @@ func CorrectionContinuesPullRequest(correction Correction) bool {
 // never canonical state, and never ownership of the commander. A fresh
 // attach atomically replaces it; nothing reads it to derive status.
 type CommanderRegistration struct {
-	Session     string    `json:"session"`
-	WorkspaceID string    `json:"workspace_id,omitempty"`
-	TabID       string    `json:"tab_id,omitempty"`
-	PaneID      string    `json:"pane_id"`
-	Runtime     string    `json:"runtime,omitempty"`
-	AttachedAt  time.Time `json:"attached_at"`
+	Session          string    `json:"session"`
+	WorkspaceID      string    `json:"workspace_id,omitempty"`
+	TabID            string    `json:"tab_id,omitempty"`
+	PaneID           string    `json:"pane_id"`
+	Runtime          string    `json:"runtime,omitempty"`
+	ScopeRoot        string    `json:"scope_root,omitempty"`
+	ScopeWorkspaceID string    `json:"scope_workspace_id,omitempty"`
+	AttachedAt       time.Time `json:"attached_at"`
 }
 
 // home resolves the data home; SOPHON_DATA_HOME wins so tests are hermetic.
@@ -257,6 +321,22 @@ func TaskDir(home, missionID, taskID string) string {
 // TaskPath is one task's accepted intent with current revision/attempt pointers.
 func TaskPath(home, missionID, taskID string) string {
 	return filepath.Join(TaskDir(home, missionID, taskID), "task.json")
+}
+
+func BootstrapIntentPath(home, missionID, taskID string) string {
+	return filepath.Join(TaskDir(home, missionID, taskID), "bootstrap", "intent.json")
+}
+
+func BootstrapReceiptPath(home, missionID, taskID string) string {
+	return filepath.Join(TaskDir(home, missionID, taskID), "bootstrap", "receipt.json")
+}
+
+func CancellationPath(home, missionID, taskID string) string {
+	return filepath.Join(TaskDir(home, missionID, taskID), "cancellation.json")
+}
+
+func DeliverySelectionPath(home, missionID, taskID string) string {
+	return filepath.Join(TaskDir(home, missionID, taskID), "delivery-selection.json")
 }
 
 // AttemptDir is one attempt's record directory.
@@ -355,6 +435,61 @@ func PublishBytes(path string, data []byte) error {
 	return nil
 }
 
+// PublishImmutable publishes a typed record once. Identical replay is
+// idempotent; any differing value at the same canonical path is refused.
+func PublishImmutable(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode immutable record %s: %w", path, err)
+	}
+	data = append(data, '\n')
+	if existing, err := os.ReadFile(path); err == nil {
+		if bytes.Equal(existing, data) {
+			return nil
+		}
+		return fmt.Errorf("immutable record conflict at %s", path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(dir, ".immutable-*")
+	if err != nil {
+		return err
+	}
+	tempName := temporary.Name()
+	defer os.Remove(tempName)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Link(tempName, path); err != nil {
+		if existing, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(existing, data) {
+			return nil
+		}
+		return fmt.Errorf("publish immutable record: %w", err)
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
+}
+
 // read decodes one record, mapping absence to ErrNotFound.
 func read(path string, v any) error {
 	data, err := os.ReadFile(path)
@@ -400,6 +535,79 @@ func ReadTask(missionID, taskID string) (Task, error) {
 		return task, err
 	}
 	return task, read(TaskPath(homeDir, missionID, taskID), &task)
+}
+
+func ReadBootstrapIntent(missionID, taskID string) (BootstrapIntent, error) {
+	var value BootstrapIntent
+	homeDir, err := home()
+	if err != nil {
+		return value, err
+	}
+	return value, read(BootstrapIntentPath(homeDir, missionID, taskID), &value)
+}
+
+func ReadBootstrapReceipt(missionID, taskID string) (BootstrapReceipt, error) {
+	var value BootstrapReceipt
+	homeDir, err := home()
+	if err != nil {
+		return value, err
+	}
+	return value, read(BootstrapReceiptPath(homeDir, missionID, taskID), &value)
+}
+
+func ReadCancellation(missionID, taskID string) (Cancellation, error) {
+	var value Cancellation
+	homeDir, err := home()
+	if err != nil {
+		return value, err
+	}
+	return value, read(CancellationPath(homeDir, missionID, taskID), &value)
+}
+
+func ReadDeliverySelection(missionID, taskID string) (DeliverySelection, error) {
+	var value DeliverySelection
+	homeDir, err := home()
+	if err != nil {
+		return value, err
+	}
+	return value, read(DeliverySelectionPath(homeDir, missionID, taskID), &value)
+}
+
+func CreateCancellation(value Cancellation) error {
+	if value.Version != 1 || value.TaskID == "" || value.MissionID == "" || strings.TrimSpace(value.Reason) == "" || value.CancelledAt.IsZero() {
+		return errors.New("task cancellation is incomplete")
+	}
+	if value.Replacement == "" && value.ReplacementTask != nil {
+		return errors.New("task cancellation has replacement intent without replacement identity")
+	}
+	if value.Replacement != "" && (value.ReplacementTask == nil || value.ReplacementTask.ID != value.Replacement ||
+		value.ReplacementTask.MissionID != value.MissionID || value.ReplacementTask.CurrentAttempt != 0 || value.ReplacementTask.CurrentRevision != 0) {
+		return errors.New("task cancellation replacement intent is incomplete or mismatched")
+	}
+	homeDir, err := home()
+	if err != nil {
+		return err
+	}
+	return PublishImmutable(CancellationPath(homeDir, value.MissionID, value.TaskID), value)
+}
+
+func CreateDeliverySelection(value DeliverySelection) error {
+	if value.Version != 1 || value.TaskID == "" || value.MissionID == "" || value.FromMode != domain.DeliveryLocal ||
+		(value.Mode != domain.DeliveryBranch && value.Mode != domain.DeliveryPR) || value.Repository == "" ||
+		value.HeadSHA == "" || value.SelectedAt.IsZero() {
+		return errors.New("delivery selection is incomplete")
+	}
+	if err := publicsurface.TaskTitle(value.PublicTitle); err != nil {
+		return err
+	}
+	if err := publicsurface.Branch(value.PublicBranch); err != nil {
+		return err
+	}
+	homeDir, err := home()
+	if err != nil {
+		return err
+	}
+	return PublishImmutable(DeliverySelectionPath(homeDir, value.MissionID, value.TaskID), value)
 }
 
 // FindTask locates a task by ID across all missions. Task IDs are random and
@@ -762,13 +970,13 @@ func CreateTask(task Task) error {
 	if _, err := ReadMission(task.MissionID); err != nil {
 		return err
 	}
-	if task.ID == "" || task.MissionID == "" || strings.TrimSpace(task.Objective) == "" || task.DeliveryBranch == "" {
-		return errors.New("task intent requires id, mission, detailed objective, and public delivery branch")
+	if task.ID == "" || task.MissionID == "" || strings.TrimSpace(task.Title) == "" || strings.TrimSpace(task.Objective) == "" {
+		return errors.New("task intent requires id, mission, title, and detailed objective")
 	}
 	if task.Kind != domain.TaskImplementation {
 		return fmt.Errorf("task intent has unknown kind %q", task.Kind)
 	}
-	if task.DeliveryMode != domain.DeliveryBranch && task.DeliveryMode != domain.DeliveryPR {
+	if task.DeliveryMode != domain.DeliveryLocal && task.DeliveryMode != domain.DeliveryBranch && task.DeliveryMode != domain.DeliveryPR {
 		return fmt.Errorf("task intent has unknown delivery mode %q", task.DeliveryMode)
 	}
 	if task.ReviewPosture != "" && task.ReviewPosture != domain.ReviewOff &&
@@ -778,11 +986,20 @@ func CreateTask(task Task) error {
 	if task.CurrentAttempt != 0 || task.CurrentRevision != 0 || task.CreatedAt.IsZero() {
 		return errors.New("new task intent requires attempt/revision zero and a creation time")
 	}
-	if err := publicsurface.TaskTitle(task.Title); err != nil {
-		return fmt.Errorf("validate task public title: %w", err)
-	}
-	if err := publicsurface.Branch(task.DeliveryBranch); err != nil {
-		return fmt.Errorf("validate task public delivery branch: %w", err)
+	if task.DeliveryMode == domain.DeliveryLocal {
+		if strings.ContainsAny(task.Title, "\r\n") || hasUnsafeControl(task.Title) || len(task.Title) > 512 {
+			return errors.New("local task title must be one bounded printable line")
+		}
+		if task.DeliveryBranch != "" {
+			return errors.New("local task intent cannot carry a public delivery branch")
+		}
+	} else {
+		if err := publicsurface.TaskTitle(task.Title); err != nil {
+			return fmt.Errorf("validate task public title: %w", err)
+		}
+		if err := publicsurface.Branch(task.DeliveryBranch); err != nil {
+			return fmt.Errorf("validate task public delivery branch: %w", err)
+		}
 	}
 	if err := os.MkdirAll(filepath.Join(TaskDir(homeDir, task.MissionID, task.ID), "attempts"), 0o700); err != nil {
 		return fmt.Errorf("create task directory: %w", err)
@@ -917,7 +1134,10 @@ func ListAttemptNumbers(missionID, taskID string) ([]int, error) {
 // Derived task states. Anything beyond active is terminal for the store
 // layer; active is augmented by the caller with live pane observation.
 const (
-	StateQueued                     = "queued"
+	StatePlanned                    = "planned"
+	StateQueued                     = StatePlanned
+	StateCancelled                  = "cancelled"
+	StateProjectDrift               = "project-drift"
 	StateDelivered                  = "delivered"
 	StateVerified                   = "verified"
 	StateReady                      = "ready"
@@ -954,14 +1174,18 @@ type RevisionStatus struct {
 // TaskStatus is the read-time derivation of one task's lifecycle from its
 // canonical records alone.
 type TaskStatus struct {
-	Task          Task             `json:"task"`
-	Attempt       int              `json:"attempt"`
-	Revision      int              `json:"revision"`
-	State         string           `json:"state"`
-	Detail        string           `json:"detail,omitempty"`
-	Revisions     []RevisionStatus `json:"revisions,omitempty"`
-	Review        ReviewStatus     `json:"review"`
-	ReviewHistory []ReviewStatus   `json:"review_history,omitempty"`
+	Task              Task               `json:"task"`
+	Attempt           int                `json:"attempt"`
+	Revision          int                `json:"revision"`
+	State             string             `json:"state"`
+	Detail            string             `json:"detail,omitempty"`
+	Revisions         []RevisionStatus   `json:"revisions,omitempty"`
+	Review            ReviewStatus       `json:"review"`
+	ReviewHistory     []ReviewStatus     `json:"review_history,omitempty"`
+	DeliverySelection *DeliverySelection `json:"delivery_selection,omitempty"`
+	BootstrapIntent   *BootstrapIntent   `json:"bootstrap_intent,omitempty"`
+	BootstrapReceipt  *BootstrapReceipt  `json:"bootstrap_receipt,omitempty"`
+	Cancellation      *Cancellation      `json:"cancellation,omitempty"`
 	// DeliveryState preserves whether released historical work had previously
 	// been delivered. Release itself never implies delivery.
 	DeliveryState string `json:"delivery_state,omitempty"`
@@ -974,15 +1198,79 @@ type TaskStatus struct {
 // task is active. Fenced attempts and wake lines never influence the result.
 func Derive(task Task) (TaskStatus, error) {
 	revision := CurrentRevision(task)
-	status := TaskStatus{Task: task, Attempt: task.CurrentAttempt, Revision: revision, State: StateQueued}
-	if task.CurrentAttempt < 1 {
-		return status, nil
-	}
+	status := TaskStatus{Task: task, Attempt: task.CurrentAttempt, Revision: revision, State: StatePlanned,
+		Detail: "implementation authorized; worker not started"}
 	homeDir, err := home()
 	if err != nil {
 		return status, err
 	}
+	if intent, intentErr := ReadBootstrapIntent(task.MissionID, task.ID); intentErr == nil {
+		status.BootstrapIntent = &intent
+	} else if !errors.Is(intentErr, ErrNotFound) {
+		return status, intentErr
+	}
+	if receipt, receiptErr := ReadBootstrapReceipt(task.MissionID, task.ID); receiptErr == nil {
+		status.BootstrapReceipt = &receipt
+	} else if !errors.Is(receiptErr, ErrNotFound) {
+		return status, receiptErr
+	}
+	if present, err := exists(CancellationPath(homeDir, task.MissionID, task.ID)); err != nil {
+		return status, err
+	} else if present {
+		cancelled, readErr := ReadCancellation(task.MissionID, task.ID)
+		if readErr != nil || cancelled.TaskID != task.ID || cancelled.MissionID != task.MissionID ||
+			strings.TrimSpace(cancelled.Reason) == "" || cancelled.CancelledAt.IsZero() ||
+			(cancelled.Replacement == "" && cancelled.ReplacementTask != nil) ||
+			(cancelled.Replacement != "" && (cancelled.ReplacementTask == nil ||
+				cancelled.ReplacementTask.ID != cancelled.Replacement || cancelled.ReplacementTask.MissionID != task.MissionID)) {
+			status.State = StateInvalidEvidence
+			status.Detail = "invalid task cancellation evidence"
+			return status, nil
+		}
+		status.Cancellation = &cancelled
+		status.State = StateCancelled
+		status.Detail = cancelled.Reason
+		return status, nil
+	}
+	if task.CurrentAttempt < 1 {
+		return status, nil
+	}
+	spawn, spawnErr := ReadSpawn(task.MissionID, task.ID, task.CurrentAttempt)
+	if errors.Is(spawnErr, ErrNotFound) {
+		for _, name := range []string{"result.json", "report.json", "outcome.json", "validation.json", "delivery.json", "release.json"} {
+			present, evidenceErr := exists(AttemptPath(homeDir, task.MissionID, task.ID, task.CurrentAttempt, name))
+			if evidenceErr != nil {
+				return status, evidenceErr
+			}
+			if present {
+				status.State = StateInvalidEvidence
+				status.Detail = "attempt evidence exists without a canonical spawn receipt"
+				return status, nil
+			}
+		}
+		if revision > 1 {
+			if _, correctionErr := ReadCorrection(task.MissionID, task.ID, revision); correctionErr == nil {
+				status.State = StateCorrectionPending
+				status.Detail = "immutable correction intent published; worker not started"
+				return status, nil
+			} else if !errors.Is(correctionErr, ErrNotFound) {
+				return status, correctionErr
+			}
+		}
+		status.Detail = "worker start has no canonical spawn receipt; start or reconcile this planned task"
+		return status, nil
+	}
+	if spawnErr != nil {
+		return status, spawnErr
+	}
+	if spawn.TaskID != task.ID || spawn.MissionID != task.MissionID || spawn.Attempt != task.CurrentAttempt ||
+		spawn.Pane.PaneID == "" || spawn.LeaseID == "" || spawn.LeaseHolder == "" {
+		status.State = StateInvalidEvidence
+		status.Detail = "spawn receipt identity is incomplete or conflicts with the task"
+		return status, nil
+	}
 	status.State = StateActive
+	status.Detail = ""
 	correction := false
 	if revision > 1 {
 		if _, err := ReadCorrection(task.MissionID, task.ID, revision); err == nil {

@@ -13,6 +13,7 @@ import (
 
 	"sophon/internal/datahome"
 	"sophon/internal/domain"
+	"sophon/internal/herdr"
 )
 
 func useHome(t *testing.T) string {
@@ -236,6 +237,12 @@ func TestDeriveLifecycle(t *testing.T) {
 	if _, err := BumpAttempt(mission.ID, task.ID); err != nil {
 		t.Fatal(err)
 	}
+	if err := Publish(AttemptPath(home, mission.ID, task.ID, 1, "spawn.json"), Spawn{
+		TaskID: task.ID, MissionID: mission.ID, Attempt: 1, LeaseID: "lease-1", LeaseHolder: "holder-1",
+		Pane: herdr.Session{PaneID: "pane-1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	assertState(StateActive)
 	publishAttempt := func(attempt int, name string, v any) {
 		t.Helper()
@@ -288,8 +295,8 @@ func TestDeriveFencesNonCurrentAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.State != StateActive {
-		t.Fatalf("state = %q, want active: fenced attempt records must not leak", status.State)
+	if status.State != StatePlanned {
+		t.Fatalf("state = %q, want planned: fenced attempt records must not invent a current worker", status.State)
 	}
 }
 
@@ -372,7 +379,8 @@ func TestDeriveReleasedRequiresExactCurrentAttemptIdentity(t *testing.T) {
 	if _, err := BumpAttempt(mission.ID, task.ID); err != nil {
 		t.Fatal(err)
 	}
-	spawn := Spawn{TaskID: task.ID, MissionID: mission.ID, Attempt: 1, LeaseID: "lease-1", LeaseHolder: "holder-1"}
+	spawn := Spawn{TaskID: task.ID, MissionID: mission.ID, Attempt: 1, LeaseID: "lease-1", LeaseHolder: "holder-1",
+		Pane: herdr.Session{PaneID: "pane-1"}}
 	if err := Publish(AttemptPath(home, mission.ID, task.ID, 1, "spawn.json"), spawn); err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +401,7 @@ func TestDeriveReleasedRequiresExactCurrentAttemptIdentity(t *testing.T) {
 	}
 	current, _ = ReadTask(mission.ID, task.ID)
 	status, err = Derive(current)
-	if err != nil || status.State != StateActive || status.Attempt != 2 {
+	if err != nil || status.State != StatePlanned || status.Attempt != 2 {
 		t.Fatalf("fenced release affected current attempt: %+v, %v", status, err)
 	}
 

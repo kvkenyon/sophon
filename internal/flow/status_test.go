@@ -3,7 +3,9 @@ package flow
 import (
 	"context"
 	"testing"
+	"time"
 
+	"sophon/internal/domain"
 	"sophon/internal/store"
 	"sophon/internal/validation"
 )
@@ -126,6 +128,36 @@ func TestStatusDerivesActionQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertActions(t, report, nil)
+}
+
+func TestForecasterUnstartedFixtureDerivesPlannedWithoutFakeWorker(t *testing.T) {
+	useHome(t)
+	rig := newRig()
+	mission := store.Mission{ID: "mission_b6c051f852dde8b6d24b6a0f743d4ea1", ProjectPath: "/fixtures/forecaster",
+		Title: "ERCOT forecast", Objective: "Build an ERCOT day-ahead forecasting baseline", CreatedAt: time.Now().UTC()}
+	if err := store.CreateMission(mission); err != nil {
+		t.Fatal(err)
+	}
+	task := store.Task{ID: "task_929c93ffa79b0ce6b19acaa5fe0c1039", MissionID: mission.ID,
+		Title: "ERCOT day-ahead baseline", Objective: "Implement the forecasting baseline", DeliveryMode: domain.DeliveryLocal,
+		Kind: domain.TaskImplementation, CreatedAt: time.Now().UTC()}
+	if err := store.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AdvanceTask(mission.ID, task.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	report, err := rig.flow.Status(context.Background(), true)
+	if err != nil || len(report.Missions) != 1 || len(report.Missions[0].Tasks) != 1 {
+		t.Fatalf("status = %+v, %v", report, err)
+	}
+	status := report.Missions[0].Tasks[0]
+	if status.State != store.StatePlanned || status.Attempt != 1 || len(report.Actions) != 1 || report.Actions[0].Kind != ActionStart {
+		t.Fatalf("unstarted fixture = %+v actions=%+v", status, report.Actions)
+	}
+	if rig.panes.observeCalls != 0 {
+		t.Fatalf("planned task invented a live worker observation: %d", rig.panes.observeCalls)
+	}
 }
 
 func assertActions(t *testing.T, report Report, want []Action) {

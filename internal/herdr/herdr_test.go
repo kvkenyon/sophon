@@ -103,15 +103,17 @@ func TestHerdrRuntimeConformanceStartsClaudeAndPiWithLaunchProfiles(t *testing.T
 			name: "claude", runtime: RuntimeClaude,
 			request: StartRequest{TaskID: "tsk_claude", Attempt: 1, WorktreePath: "/worktrees/claude",
 				Brief: "complete Claude brief", Model: "claude-opus-5"},
-			composer: "Claude Code\n❯", sessionID: "claude-session-1",
+			composer:      "Fable 5 with high effort\n────────────\n❯\n────────────\n⏵⏵ bypass permissions on (shift+tab to cycle)",
+			sessionID:     "claude-session-1",
 			launchCommand: "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --model 'claude-opus-5' 'complete Claude brief'",
 		},
 		{
 			name: "pi", runtime: RuntimePi,
 			request: StartRequest{TaskID: "tsk_pi", Attempt: 2, WorktreePath: piWorktree,
 				Brief: "complete Pi brief", Model: "kimi-coding/k3-256k", PiExtensionPath: piExtension},
-			composer: "pi v0.84.0\nescape interrupt", sessionID: "/sessions/pi-session.jsonl",
-			launchCommand: "FM_PI_HARNESS=pi pi --model 'kimi-coding/k3-256k' -e " + shellQuote(piExtension) + " 'complete Pi brief'",
+			composer:      "────────────\n\n────────────\n/worktrees/pi\n$0.000 (sub) 0.0%/262k (auto)  k3-256k • high",
+			sessionID:     "/sessions/pi-session.jsonl",
+			launchCommand: "exec env FM_PI_HARNESS=pi pi --model 'kimi-coding/k3-256k' -e " + shellQuote(piExtension) + " 'complete Pi brief'",
 		},
 	}
 	for _, test := range tests {
@@ -124,6 +126,7 @@ func TestHerdrRuntimeConformanceStartsClaudeAndPiWithLaunchProfiles(t *testing.T
 				{stdout: `{"result":{"agent":{"agent":"` + string(test.runtime) + `","pane_id":"w1:p1","agent_status":"working","state_change_seq":1}}}`},
 				{stdout: test.composer},
 				{stdout: `{"result":{"agent":{"agent":"` + string(test.runtime) + `","pane_id":"w1:p1","agent_session":{"value":"` + test.sessionID + `"}}}}`},
+				{stdout: `{"result":{"agent":{"pane_id":"w1:p1","agent_status":"working"}}}`},
 			}}
 			adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
 			request := test.request
@@ -143,11 +146,43 @@ func TestHerdrRuntimeConformanceStartsClaudeAndPiWithLaunchProfiles(t *testing.T
 				{"agent", "get", "w1:p1", "--session", "fm-lab-contract"},
 				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
 				{"agent", "get", "w1:p1", "--session", "fm-lab-contract"},
+				{"agent", "wait", "w1:p1", "--until", "working", "--timeout", "30000", "--session", "fm-lab-contract"},
 			}
 			if !reflect.DeepEqual(runner.calls, want) {
 				t.Fatalf("Herdr calls = %#v, want %#v", runner.calls, want)
 			}
 		})
+	}
+}
+
+func TestInitialPositionalPromptAcceptsCompletedTurnAfterWaitRace(t *testing.T) {
+	runner := &fakeRunner{responses: []runnerResponse{
+		{stderr: `{"error":{"code":"timeout"}}`, err: errors.New("exit 1")},
+		{stdout: `{"result":{"agent":{"agent":"pi","pane_id":"w1:p1","agent_status":"idle","state_change_seq":3}}}`},
+	}}
+	adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
+	err := adapter.waitForInitialPositionalPrompt(context.Background(), Session{Runtime: RuntimePi, PaneID: "w1:p1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{
+		{"agent", "wait", "w1:p1", "--until", "working", "--timeout", "30000", "--session", "fm-lab-contract"},
+		{"agent", "get", "w1:p1", "--session", "fm-lab-contract"},
+	}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("Herdr calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
+func TestInitialPositionalPromptRefusesUnstartedIdleRegistration(t *testing.T) {
+	runner := &fakeRunner{responses: []runnerResponse{
+		{stderr: `{"error":{"code":"timeout"}}`, err: errors.New("exit 1")},
+		{stdout: `{"result":{"agent":{"agent":"claude","pane_id":"w1:p1","agent_status":"idle","state_change_seq":1}}}`},
+	}}
+	adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
+	err := adapter.waitForInitialPositionalPrompt(context.Background(), Session{Runtime: RuntimeClaude, PaneID: "w1:p1"})
+	if err == nil || !strings.Contains(err.Error(), "wait for initial claude turn") {
+		t.Fatalf("unstarted positional prompt error = %v", err)
 	}
 }
 
@@ -271,6 +306,15 @@ func TestHerdrRuntimeConformanceHandlesClaudeAndPiFirstLaunchScreensStructurally
 			},
 		},
 		{
+			name: "pi current separator composer", runtime: RuntimePi,
+			responses: []runnerResponse{
+				{stdout: "────────────\n\n────────────\n/worktree\n$0.000 (sub) 0.0%/262k (auto)  k3-256k • high"},
+			},
+			wantCalls: [][]string{
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+			},
+		},
+		{
 			name: "claude shell echo is a keyless transient", runtime: RuntimeClaude,
 			responses: []runnerResponse{
 				{stdout: "❯ CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --\ndangerously-skip-permissions"},
@@ -278,6 +322,15 @@ func TestHerdrRuntimeConformanceHandlesClaudeAndPiFirstLaunchScreensStructurally
 			},
 			wantCalls: [][]string{
 				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+			},
+		},
+		{
+			name: "claude current separator composer", runtime: RuntimeClaude,
+			responses: []runnerResponse{
+				{stdout: "Fable 5 with high effort\n────────────\n❯\n────────────\n⏵⏵ bypass permissions on (shift+tab to cycle)"},
+			},
+			wantCalls: [][]string{
 				{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
 			},
 		},
@@ -303,6 +356,12 @@ func TestHerdrRuntimeConformanceHandlesClaudeAndPiFirstLaunchScreensStructurally
 			responses: []runnerResponse{{stdout: "A different confirmation screen"}},
 			wantCalls: [][]string{{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"}},
 			wantErr:   "visible pane:\nA different confirmation screen",
+		},
+		{
+			name: "incomplete pi separator is not a composer", runtime: RuntimePi,
+			responses: []runnerResponse{{stdout: "────────────\nnot yet complete"}},
+			wantCalls: [][]string{{"pane", "read", "w1:p1", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"}},
+			wantErr:   "visible pane:\n",
 		},
 	}
 	for _, test := range tests {
@@ -511,7 +570,7 @@ func TestHerdrRuntimeConformanceResumesClaudeAndPiAfterRestart(t *testing.T) {
 				TabID: "w1:t1", PaneID: "w1:p1", AgentName: "pi-task-a1", AgentSessionID: "/sessions/pi-session.jsonl",
 				WorktreePath: piWorktree, Model: "kimi-coding/k3-256k", PiExtensionPath: piExtension},
 			composer: "pi v0.84.0\nescape interrupt",
-			resumeCommand: "FM_PI_HARNESS=pi pi --model 'kimi-coding/k3-256k' -e " + shellQuote(piExtension) +
+			resumeCommand: "exec env FM_PI_HARNESS=pi pi --model 'kimi-coding/k3-256k' -e " + shellQuote(piExtension) +
 				" --session '/sessions/pi-session.jsonl'",
 		},
 	}
@@ -984,24 +1043,38 @@ export default function (pi: any) {
 	}
 
 	for name, original := range map[string]Session{"claude": claude, "pi": piSession} {
-		t.Run(name+" restart resume and lost", func(t *testing.T) {
-			if state, err := adapter.Observe(context.Background(), original); err != nil || state != StateHusk {
-				t.Fatalf("restored liveness = %s, %v; want husk", state, err)
-			}
-			replacement, err := adapter.Wake(context.Background(), original,
-				"After restart, run `sleep 3`, reply RESUME_M5_OK, then wait.")
+		t.Run(name+" restart recovery and lost", func(t *testing.T) {
+			state, err := adapter.Observe(context.Background(), original)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if replacement.WorkspaceID != original.WorkspaceID || replacement.TabID == original.TabID ||
-				replacement.PaneID == original.PaneID || replacement.AgentSessionID != original.AgentSessionID {
-				t.Fatalf("replacement identity: before=%+v after=%+v", original, replacement)
+			active, err := adapter.Wake(context.Background(), original,
+				"After restart, run `sleep 3`, reply RESUME_M5_OK, then wait.")
+			if err != nil {
+				t.Fatalf("recover %s from %s: %v", name, state, err)
 			}
-			waitForHerdrState(t, adapter, replacement, StateIdle, 3*time.Minute)
-			if err := adapter.Stop(context.Background(), replacement); err != nil {
+			switch state {
+			case StateIdle:
+				// A foreground-owned runtime can remain genuinely registered
+				// across a Herdr server restart. The successful prompt above is
+				// the positive liveness proof; preserving the exact placement is
+				// required rather than manufacturing a duplicate resumed agent.
+				if active != original {
+					t.Fatalf("live restart changed placement: before=%+v after=%+v", original, active)
+				}
+			case StateHusk:
+				if active.WorkspaceID != original.WorkspaceID || active.TabID == original.TabID ||
+					active.PaneID == original.PaneID || active.AgentSessionID != original.AgentSessionID {
+					t.Fatalf("replacement identity: before=%+v after=%+v", original, active)
+				}
+			default:
+				t.Fatalf("restored liveness = %s; want a promptable idle agent or resumable husk", state)
+			}
+			waitForHerdrState(t, adapter, active, StateIdle, 3*time.Minute)
+			if err := adapter.Stop(context.Background(), active); err != nil {
 				t.Fatal(err)
 			}
-			if state, err := adapter.Observe(context.Background(), replacement); err != nil || state != StateLost {
+			if state, err := adapter.Observe(context.Background(), active); err != nil || state != StateLost {
 				t.Fatalf("closed process observation = %s, %v; want lost", state, err)
 			}
 		})
@@ -1126,7 +1199,7 @@ func TestInitialCommandPinsDataHomeForEveryRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(pi, prefix+"FM_PI_HARNESS=pi pi ") {
+	if !strings.HasPrefix(pi, "exec env "+prefix+"FM_PI_HARNESS=pi pi ") {
 		t.Fatalf("pi launch = %q", pi)
 	}
 

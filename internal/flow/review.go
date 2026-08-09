@@ -382,6 +382,10 @@ func (f *Flow) ApplyReviewFeedback(ctx context.Context, taskID string, sequence 
 	if err != nil {
 		return store.ReviewRoute{}, err
 	}
+	mission, err = f.resolveMissionProject(ctx, mission)
+	if err != nil {
+		return store.ReviewRoute{}, err
+	}
 	link, err := reviewCorrectionLinkForTask(task, sequence)
 	if err != nil {
 		return store.ReviewRoute{}, err

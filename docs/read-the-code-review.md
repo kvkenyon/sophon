@@ -24,6 +24,12 @@ flag are `off`.
 - `required` adds `open-review` after verification and configured validation,
   and blocks every delivery until the current exact head is approved.
 
+Local tasks use this same exact-revision review path without a remote. Approval
+records product evidence only: it does not select branch/PR delivery, create or
+add a remote, push, open a PR, or emit delivery evidence. A later immutable
+local-to-public selection and a still later freshly confirmed delivery remain
+separate operator actions.
+
 An explicit operator decision can monotonically escalate posture while
 preserving immutable history:
 
@@ -126,7 +132,7 @@ requires all of:
   delivery invocation.
 
 Approval never confirms delivery and grants no push, PR, merge, destructive,
-or unrelated authority. Any new task attempt/head has its own binding and
+repository/remote creation, delivery selection, or unrelated authority. Any new task attempt/head has its own binding and
 starts with no approval; old sessions, comments, and approval remain history.
 Ending a review is an explicit operator command and never erases evidence.
 Every accepted correction creates a new revision and therefore a new exact

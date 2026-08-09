@@ -21,7 +21,7 @@ const (
 var (
 	CommanderSkills = []string{
 		"agent-adapters", "coding-guidelines", "decision-lifecycle",
-		"diagnostic-reasoning", "operator-authority", "recap", "status", "worker-recovery",
+		"diagnostic-reasoning", "operator-authority", "proposal-execution", "recap", "status", "worker-recovery",
 	}
 	WorkerSkills = []string{"coding-guidelines", "decision-lifecycle", "diagnostic-reasoning"}
 )
@@ -101,6 +101,7 @@ func SkillTriggers(dir string, names []string) string {
 		{"a worker is wedged or stuck", "worker-recovery"},
 		{"you find a decision that needs preserving", "decision-lifecycle"},
 		{"an authority or operator-consent question arises", "operator-authority"},
+		{"proposal, start, approval, or project-selection language arises", "proposal-execution"},
 		{"a recap is requested", "recap"},
 		{"a status or catch-up request is made", "status"},
 		{"you are doing coding work", "coding-guidelines"},

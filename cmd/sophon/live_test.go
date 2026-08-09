@@ -74,6 +74,289 @@ exec %s run %s "${args[@]:0:n-2}"
 	return path
 }
 
+// TestLiveWorkspaceCommanderLocalBootstrapInHerdrLab proves the primary
+// workspace boundary with real commander and worker agents. One commander
+// starts at a non-Git workspace root, proposes without effects, deliberately
+// exposes truthful planned state, starts empty-project work, changes project
+// context, and supervises an independent remote-backed task without restart or
+// reattach. Every Herdr operation goes through herdrLab's generated helper
+// wrapper and exact non-default session.
+func TestLiveWorkspaceCommanderLocalBootstrapInHerdrLab(t *testing.T) {
+	herdrBinary, sessionName := herdrLab(t)
+	treehouseBinary, err := exec.LookPath("treehouse")
+	if err != nil {
+		t.Skip("treehouse binary not on PATH")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary is required")
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain is required to build the CLI under test")
+	}
+
+	home := t.TempDir()
+	t.Setenv("SOPHON_DATA_HOME", home)
+	t.Setenv("HERDR_SESSION", "")
+	t.Setenv("HERDR_PANE_ID", "")
+	t.Setenv("HERDR_WORKSPACE_ID", "")
+	t.Setenv("HERDR_TAB_ID", "")
+	t.Setenv("SOPHON_PROMPT_DIR", "")
+	ctx := context.Background()
+
+	root := filepath.Join(t.TempDir(), "workspace")
+	runCLI(t, "workspace", "init", root)
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve canonical workspace root: %v", err)
+	}
+	runCLI(t, "project", "create", "empty-local", "--workspace", root, "--initial-branch", "trunk")
+	source := filepath.Join(t.TempDir(), "remote-source")
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runCLIGit(t, source, "init", "-b", "main")
+	runCLIGit(t, source, "config", "user.name", "Sophon Workspace Lab")
+	runCLIGit(t, source, "config", "user.email", "workspace-lab@example.invalid")
+	writeCLIFile(t, filepath.Join(source, "base.txt"), "remote fixture\n", 0o600)
+	runCLIGit(t, source, "add", "base.txt")
+	runCLIGit(t, source, "commit", "-m", "Initial remote fixture")
+	runCLI(t, "project", "clone", "remote-backed", "--workspace", root, "--source", source)
+	if _, err := os.Stat(filepath.Join(root, ".git")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("workspace root became a Git repository: %v", err)
+	}
+
+	sophonBin := buildSophonBinary(t)
+	prompt := exec.Command(sophonBin, "prompt", "commander")
+	prompt.Env = append(os.Environ(), "SOPHON_DATA_HOME="+home)
+	promptBody, err := prompt.Output()
+	if err != nil {
+		t.Fatalf("compose workspace commander prompt: %v", err)
+	}
+	brief := string(promptBody) + fmt.Sprintf(`
+## Guarded workspace lab facts
+
+These exact lab facts override generic placeholders and command examples:
+
+- Your workspace root is %s. Start and remain there; it is intentionally not a
+  Git repository. Inspect it and list both projects before greeting.
+- Sophon is not taken from PATH. Replace every `+"`sophon`"+` command with the exact
+  binary %s.
+- Every Sophon command that accepts Herdr flags must use --herdr %s and
+  --herdr-session %s. Every start action must also use --treehouse %s --git git.
+  Never invoke another Herdr binary or session.
+- Attach exactly once with --scope %s. Do not reattach when project context
+  changes. Keep each project outcome in its own mission, task, and worker.
+- For this proof, when the operator first authorizes the empty-project build
+  and explicitly asks you to pause at planned state, create the local task but
+  do not run its start action until the next operator instruction.
+- Give every implementation task an executable validation command. Never
+  create a repository, add/change a remote, select delivery, push, or open a PR.
+`, root, sophonBin, herdrBinary, sessionName, treehouseBinary, root)
+
+	adapter := herdr.NewCommandAdapter(herdrBinary, sessionName, "sophon")
+	commander, err := adapter.StartCodex(ctx, herdr.StartRequest{
+		AgentName: "workspace-root-commander", Attempt: 1, WorktreePath: root,
+		Brief: brief, DataHome: home})
+	if err != nil {
+		t.Fatalf("start workspace commander: %v", err)
+	}
+	t.Cleanup(func() {
+		stopMonitor := exec.Command(sophonBin, "monitor", "stop")
+		stopMonitor.Env = append(os.Environ(), "SOPHON_DATA_HOME="+home)
+		if output, stopErr := stopMonitor.CombinedOutput(); stopErr != nil {
+			t.Errorf("stop workspace lab monitor: %v: %s", stopErr, output)
+		}
+		if output, closeErr := exec.Command(herdrBinary, "tab", "close", commander.TabID,
+			"--session", sessionName).CombinedOutput(); closeErr != nil && !strings.Contains(string(output), "not_found") {
+			t.Errorf("close workspace commander tab: %v: %s", closeErr, output)
+		}
+	})
+	waitIdle := func(what string) {
+		t.Helper()
+		waitFor(t, 6*time.Minute, func() bool {
+			state, observeErr := adapter.Observe(ctx, commander)
+			return observeErr == nil && state == herdr.StateIdle
+		}, what)
+	}
+	waitIdle("workspace commander startup")
+	// Ensure the optional transport uses this exact helper-backed Herdr adapter;
+	// start is idempotent if the commander already performed its startup step.
+	monitorStart := exec.Command(sophonBin, "monitor", "start", "--herdr", herdrBinary)
+	monitorStart.Env = append(os.Environ(), "SOPHON_DATA_HOME="+home)
+	if output, err := monitorStart.CombinedOutput(); err != nil {
+		t.Fatalf("start workspace lab monitor: %v: %s", err, output)
+	}
+	registration, err := store.ReadCommander()
+	if err != nil || registration.PaneID != commander.PaneID || registration.ScopeRoot != root || registration.ScopeWorkspaceID == "" {
+		t.Fatalf("workspace commander registration = %+v, %v", registration, err)
+	}
+	originalAttach := registration.AttachedAt
+
+	// Proposal language is discussion only: no mission, task, worker tab, Git
+	// baseline, or durable change notification is permitted.
+	if _, err := adapter.Submit(ctx, commander,
+		"Decide what to build in empty-local. Propose a small dependency-free habit tracker with tests, but only talk it through."); err != nil {
+		t.Fatalf("submit proposal-only request: %v", err)
+	}
+	waitIdle("proposal-only response")
+	if missions, err := store.ListMissions(); err != nil || len(missions) != 0 {
+		t.Fatalf("proposal created durable work: %+v, %v", missions, err)
+	}
+	emptyPath := filepath.Join(root, "projects", "empty-local")
+	if _, err := exec.Command("git", "-C", emptyPath, "rev-parse", "--verify", "HEAD").CombinedOutput(); err == nil {
+		t.Fatal("proposal-only request created a Git baseline")
+	}
+	if tabs := labTabList(t, herdrBinary, sessionName, commander.WorkspaceID); len(tabs) != 1 || !tabs[commander.TabID] {
+		t.Fatalf("proposal-only request allocated a worker tab: %+v", tabs)
+	}
+
+	findProjectTask := func(key string) (store.Mission, store.Task, bool) {
+		missions, listErr := store.ListMissions()
+		if listErr != nil {
+			return store.Mission{}, store.Task{}, false
+		}
+		for _, mission := range missions {
+			if mission.ProjectKey != key {
+				continue
+			}
+			tasks, taskErr := store.ListTasks(mission.ID)
+			if taskErr == nil && len(tasks) > 0 {
+				return mission, tasks[len(tasks)-1], true
+			}
+		}
+		return store.Mission{}, store.Task{}, false
+	}
+
+	if _, err := adapter.Submit(ctx, commander,
+		"Build that accepted habit-tracker proposal locally in empty-local. Create its project-confined local mission and task with a real test command, then pause before start so I can observe planned state."); err != nil {
+		t.Fatalf("authorize planned local work: %v", err)
+	}
+	waitIdle("commander to publish the deliberately paused plan")
+	emptyMission, emptyTask, ok := findProjectTask("empty-local")
+	if !ok {
+		t.Fatal("authorized build did not create the empty-local task")
+	}
+	planned, err := store.Derive(emptyTask)
+	if err != nil || planned.State != store.StatePlanned {
+		t.Fatalf("unstarted task did not derive planned: %+v, %v", planned, err)
+	}
+	if _, err := store.ReadSpawn(emptyMission.ID, emptyTask.ID, 1); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("planned task invented a spawn receipt: %v", err)
+	}
+
+	if _, err := adapter.Submit(ctx, commander, "Start development now for that exact planned empty-local task."); err != nil {
+		t.Fatalf("authorize empty-local start: %v", err)
+	}
+	var emptySpawn store.Spawn
+	waitFor(t, 6*time.Minute, func() bool {
+		spawn, readErr := store.ReadSpawn(emptyMission.ID, emptyTask.ID, 1)
+		if readErr == nil {
+			emptySpawn = spawn
+			return true
+		}
+		return false
+	}, "empty-local bootstrap and worker allocation")
+	if emptySpawn.Pane.WorkspaceID != commander.WorkspaceID || emptySpawn.Pane.SessionName != sessionName ||
+		emptySpawn.WorktreePath == root || emptySpawn.WorktreePath == emptyPath {
+		t.Fatalf("empty worker placement = %+v", emptySpawn)
+	}
+	intent, intentErr := store.ReadBootstrapIntent(emptyMission.ID, emptyTask.ID)
+	receipt, receiptErr := store.ReadBootstrapReceipt(emptyMission.ID, emptyTask.ID)
+	if intentErr != nil || receiptErr != nil || receipt.CommitSHA == "" ||
+		receipt.CommitSHA != strings.TrimSpace(runCLIGit(t, emptyPath, "rev-parse", "HEAD")) ||
+		strings.TrimSpace(runCLIGit(t, emptyPath, "ls-tree", "--name-only", "HEAD")) != "" ||
+		strings.TrimSpace(runCLIGit(t, emptyPath, "remote")) != "" {
+		t.Fatalf("empty bootstrap intent=%+v/%v receipt=%+v/%v", intent, intentErr, receipt, receiptErr)
+	}
+	// Make the source-tree binary explicit to the real worker; the worktree
+	// brief remains the authority, this only avoids an unrelated installed CLI.
+	runCLI(t, "send", emptyTask.ID, "Use "+sophonBin+" for every Sophon progress/completion command in your generated brief; continue the exact accepted task.",
+		"--herdr", herdrBinary, "--herdr-session", sessionName)
+	runCLI(t, "worker", "progress", emptyTask.ID, "--attempt", "1", "--phase", "implementing", "--message", "workspace empty project started")
+
+	// Switch project context while the first worker remains owned by the same
+	// commander. Inspection is read-only and must not reattach or infer CWD.
+	waitIdle("commander after empty-local worker start")
+	if _, err := adapter.Submit(ctx, commander,
+		"Switch context to remote-backed and report that project's current Sophon status only. Do not create work or reattach."); err != nil {
+		t.Fatalf("request second-project inspection: %v", err)
+	}
+	waitIdle("remote-backed status inspection")
+	// The response is five blocks (the project context plus the four-section
+	// status contract), so the first line can scroll one line beyond the current
+	// viewport. Read real recent transcript rather than a clipped screen. The
+	// operator prompt deliberately does not contain the expected answer text;
+	// only the commander's response can satisfy this assertion.
+	transcript := labPaneRead(t, herdrBinary, sessionName, commander.PaneID, 2000)
+	if squashed := strings.Join(strings.Fields(transcript), ""); !strings.Contains(squashed, "Projectremote-backed:") {
+		t.Fatalf("commander did not identify inspected project in its live turn transcript:\n%s", transcript)
+	}
+	registration, err = store.ReadCommander()
+	if err != nil || registration.PaneID != commander.PaneID || !registration.AttachedAt.Equal(originalAttach) {
+		t.Fatalf("project switch restarted or reattached commander: %+v, %v", registration, err)
+	}
+
+	if _, err := adapter.Submit(ctx, commander,
+		"Start an independent local implementation in remote-backed now: add remote-marker.txt documenting workspace coordination, validate it with test -f remote-marker.txt, and keep it project-confined. Do not publish anything."); err != nil {
+		t.Fatalf("authorize remote-backed work: %v", err)
+	}
+	var remoteMission store.Mission
+	var remoteTask store.Task
+	var remoteSpawn store.Spawn
+	waitFor(t, 6*time.Minute, func() bool {
+		var found bool
+		remoteMission, remoteTask, found = findProjectTask("remote-backed")
+		if !found {
+			return false
+		}
+		spawn, readErr := store.ReadSpawn(remoteMission.ID, remoteTask.ID, 1)
+		if readErr == nil {
+			remoteSpawn = spawn
+			return true
+		}
+		return false
+	}, "independent remote-backed worker allocation")
+	if remoteSpawn.Pane.WorkspaceID != commander.WorkspaceID || remoteSpawn.Pane.TabID == emptySpawn.Pane.TabID {
+		t.Fatalf("remote-backed worker placement = %+v; empty=%+v", remoteSpawn, emptySpawn)
+	}
+	runCLI(t, "send", remoteTask.ID, "Use "+sophonBin+" for every Sophon progress/completion command in your generated brief; continue the exact accepted task.",
+		"--herdr", herdrBinary, "--herdr-session", sessionName)
+	runCLI(t, "worker", "progress", remoteTask.ID, "--attempt", "1", "--phase", "implementing", "--message", "workspace remote project started")
+
+	// Each real worker publishes completion; independent notifications wake the
+	// same commander, which drains verification and validation for both.
+	waitFor(t, 18*time.Minute, func() bool {
+		for _, pair := range []struct{ mission, task string }{{emptyMission.ID, emptyTask.ID}, {remoteMission.ID, remoteTask.ID}} {
+			current, findErr := store.FindTask(pair.task)
+			if findErr != nil {
+				return false
+			}
+			status, deriveErr := store.Derive(current)
+			validation, validationErr := store.ReadValidation(pair.mission, pair.task, 1)
+			if deriveErr != nil || status.State != store.StateVerified || validationErr != nil || !validation.Passed {
+				return false
+			}
+		}
+		return true
+	}, "both project workers to complete and the one commander to verify and validate them")
+	registration, err = store.ReadCommander()
+	if err != nil || registration.PaneID != commander.PaneID || !registration.AttachedAt.Equal(originalAttach) {
+		t.Fatalf("multi-project completion replaced commander: %+v, %v", registration, err)
+	}
+	if state, err := adapter.Observe(ctx, commander); err != nil || state == herdr.StateLost {
+		t.Fatalf("workspace commander after both notifications = %s, %v", state, err)
+	}
+	for _, task := range []store.Task{emptyTask, remoteTask} {
+		if _, err := store.ReadDeliverySelection(task.MissionID, task.ID); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("local task %s gained delivery selection: %v", task.ID, err)
+		}
+		if _, err := store.ReadDelivery(task.MissionID, task.ID, 1); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("local task %s gained delivery evidence: %v", task.ID, err)
+		}
+		runCLI(t, "release", task.ID, "--treehouse", treehouseBinary)
+	}
+}
+
 // TestLiveWorkerLifecycleInHerdrLab is the guarded real-lifecycle proof: it
 // spawns a real Codex worker pane in an isolated Herdr lab session against a
 // real temp Git project and the real treehouse binary. It never touches the

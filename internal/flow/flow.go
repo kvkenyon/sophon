@@ -18,6 +18,7 @@ import (
 	"sophon/internal/store"
 	"sophon/internal/treehouse"
 	"sophon/internal/validation"
+	"sophon/internal/workspace"
 )
 
 var (
@@ -56,6 +57,15 @@ type Git interface {
 	VerifyCompletion(context.Context, string, string) (gitcontrol.Completion, error)
 }
 
+type BootstrapGit interface {
+	InspectBootstrap(context.Context, string) (gitcontrol.BootstrapState, error)
+	CreateBootstrap(context.Context, string, gitcontrol.BootstrapSpec) (gitcontrol.BootstrapResult, error)
+}
+
+type ProjectResolver interface {
+	Resolve(context.Context, string, string) (workspace.Project, error)
+}
+
 // DeliveryGit matches internal/delivery.CommandGit's immutable-head checks.
 type DeliveryGit interface {
 	VerifyHead(context.Context, string, string, string) error
@@ -85,6 +95,8 @@ type Validator interface {
 // Deps wires the flow's external boundaries. Tests substitute fakes.
 type Deps struct {
 	Git            Git
+	Bootstrap      BootstrapGit
+	Projects       ProjectResolver
 	Leases         treehouse.CLI
 	Panes          herdr.Adapter
 	DeliveryGit    DeliveryGit
@@ -127,6 +139,8 @@ func ProductionDeps(gitBinary, treehouseBinary, ghBinary string, panes herdr.Ada
 	git.Binary = gitBinary
 	return Deps{
 		Git:            git,
+		Bootstrap:      git,
+		Projects:       workspace.Inspector{GitBinary: gitBinary},
 		Leases:         treehouse.NewCommandClient(treehouseBinary),
 		Panes:          panes,
 		DeliveryGit:    delivery.CommandGit{Binary: gitBinary},

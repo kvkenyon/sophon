@@ -61,6 +61,55 @@ func configureReviewRevision(rig *testRig, session, head string) {
 		BaseSHA: rig.git.baseSHA, HeadSHA: head, UpdatedAt: now}
 }
 
+func TestLocalCompletionCanBeReviewedButApprovalNeverDelivers(t *testing.T) {
+	home := useHome(t)
+	rig := newRig()
+	ctx := context.Background()
+	mission, err := rig.flow.CreateMission(ctx, "/repo", "Local review", "Implement and review locally")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := rig.flow.CreateTask(ctx, mission.ID, "Local reviewed work", "Implement the reviewed behavior.",
+		"", "", domain.DeliveryLocal, "", domain.ReviewRequired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawn, err := rig.flow.Spawn(ctx, task.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultPath := writeResult(t, home, spawn, validResult)
+	if _, err := rig.flow.PublishResult(ctx, task.ID, 1, rig.git.headSHA, resultPath); err != nil {
+		t.Fatal(err)
+	}
+	rig.leaseStatus(spawn)
+	if _, err := rig.flow.VerifyComplete(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	configureReviewRevision(rig, liveSession, rig.git.headSHA)
+	opened, err := rig.flow.ReviewOpen(ctx, task.ID, 1, true)
+	if err != nil || opened.HeadSHA != rig.git.headSHA {
+		t.Fatalf("local review open = %+v, %v", opened, err)
+	}
+	approval := readcode.Event{SchemaVersion: 1, SessionID: liveSession, Sequence: 1,
+		ID: "99999999-9999-4999-8999-999999999999", CreatedAt: "2026-08-09T12:00:00Z",
+		BaseSHA: rig.git.baseSHA, HeadSHA: rig.git.headSHA, Type: "approval", ApprovedHeadSHA: rig.git.headSHA}
+	rig.review.polls = []readcode.PollResult{{SchemaVersion: 1, SessionID: liveSession, After: 0, NextCursor: 1, Events: []readcode.Event{approval}}}
+	rig.review.status.EventCount, rig.review.status.LastSequence = 1, 1
+	if _, err := rig.flow.ReviewReconcile(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rig.flow.AcknowledgeReviewApproval(ctx, task.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if rig.remote.pushes != 0 || rig.remote.creates != 0 {
+		t.Fatalf("local approval caused delivery: pushes=%d creates=%d", rig.remote.pushes, rig.remote.creates)
+	}
+	if _, err := store.ReadDelivery(mission.ID, task.ID, 1); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("local approval created delivery evidence: %v", err)
+	}
+}
+
 func liveFeedbackAndApproval(base, head string) []readcode.Event {
 	created := "2026-08-08T12:00:00Z"
 	feedback := readcode.Event{SchemaVersion: 1, SessionID: liveSession, Sequence: 1,

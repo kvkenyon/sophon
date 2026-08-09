@@ -649,8 +649,10 @@ func TestCLITaskCreateRequiresSeparatePublicAndWorkerIntent(t *testing.T) {
 	if _, err := runCLIErr(t, append(base, "--delivery-branch", "home-111/add-client")...); err == nil {
 		t.Fatal("CLI accepted a task without --objective")
 	}
-	if _, err := runCLIErr(t, append(base, "--objective", "Implement the client")...); err == nil {
-		t.Fatal("CLI accepted a task without --delivery-branch")
+	localJSON := runCLI(t, append(base, "--objective", "Implement the client")...)
+	var local store.Task
+	if err := json.Unmarshal(localJSON, &local); err != nil || local.DeliveryMode != domain.DeliveryLocal || local.DeliveryBranch != "" {
+		t.Fatalf("local task = %+v, %v", local, err)
 	}
 	if _, err := runCLIErr(t, "task", "create", "--mission", mission.ID, "--title", "Bad\nTitle",
 		"--objective", "Implement the client", "--delivery-branch", "home-111/add-client"); err == nil {
@@ -1082,7 +1084,7 @@ func TestCLIStatusIgnoresWakeLines(t *testing.T) {
 func TestCLICleanStartNeedsNoInit(t *testing.T) {
 	fixture := newCLIFixture(t)
 	status := runCLI(t, "status", "--herdr", fixture.herdr)
-	if strings.TrimSpace(string(status)) != "MISSION\tTASK\tSTATE\tATTEMPT\tDETAIL" {
+	if strings.TrimSpace(string(status)) != "PROJECT\tMISSION\tTASK\tSTATE\tATTEMPT\tDETAIL" {
 		t.Fatalf("empty status = %q", status)
 	}
 	missions := runCLI(t, "mission", "list")

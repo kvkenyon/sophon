@@ -10,6 +10,7 @@ import (
 
 	"sophon/internal/herdr"
 	"sophon/internal/store"
+	"sophon/internal/workspace"
 )
 
 // SessionPanes is the explicit-Herdr-session boundary used for volatile
@@ -37,6 +38,7 @@ type AttachRequest struct {
 	WorkspaceID string
 	TabID       string
 	PaneID      string
+	ScopeRoot   string
 }
 
 // AttachCommander registers the volatile wake and placement address of the
@@ -70,9 +72,19 @@ func (f *Flow) AttachCommander(ctx context.Context, in AttachRequest) (store.Com
 	if state != herdr.StateIdle && state != herdr.StateRunning {
 		return store.CommanderRegistration{}, fmt.Errorf("commander pane %s is %s, not a live registered agent", in.PaneID, state)
 	}
+	var scopeID string
+	if strings.TrimSpace(in.ScopeRoot) != "" {
+		marker, scopeErr := workspace.Read(in.ScopeRoot)
+		if scopeErr != nil {
+			return store.CommanderRegistration{}, fmt.Errorf("validate commander workspace scope: %w", scopeErr)
+		}
+		in.ScopeRoot = marker.Root
+		scopeID = marker.ID
+	}
 	registration := store.CommanderRegistration{
 		Session: in.Session, WorkspaceID: in.WorkspaceID, TabID: in.TabID,
-		PaneID: in.PaneID, Runtime: string(runtime), AttachedAt: time.Now().UTC(),
+		PaneID: in.PaneID, Runtime: string(runtime), ScopeRoot: in.ScopeRoot,
+		ScopeWorkspaceID: scopeID, AttachedAt: time.Now().UTC(),
 	}
 	release, err := store.Acquire(ctx, "commander attach")
 	if err != nil {

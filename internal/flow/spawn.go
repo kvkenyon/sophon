@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"sophon/internal/datahome"
@@ -14,12 +16,18 @@ import (
 	"sophon/internal/publicsurface"
 	"sophon/internal/store"
 	"sophon/internal/treehouse"
+	"sophon/internal/workspace"
 )
 
 // CreateMission publishes durable mission intent.
 func (f *Flow) CreateMission(ctx context.Context, projectPath, title, objective string) (store.Mission, error) {
 	if err := requireNonEmpty(projectPath, title, objective); err != nil {
 		return store.Mission{}, fmt.Errorf("create mission: %w", err)
+	}
+	if _, err := os.Lstat(filepath.Join(projectPath, workspace.MarkerName)); err == nil {
+		return store.Mission{}, errors.New("workspace root is commander scope, never a mission project; select a projects/<key> child")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return store.Mission{}, fmt.Errorf("inspect mission project: %w", err)
 	}
 	release, err := store.Acquire(ctx, "mission create")
 	if err != nil {
@@ -35,30 +43,68 @@ func (f *Flow) CreateMission(ctx context.Context, projectPath, title, objective 
 	return mission, store.CreateMission(mission)
 }
 
+// CreateWorkspaceMission resolves and pins one direct workspace child. The
+// workspace organizes projects; canonical task truth remains in the store.
+func (f *Flow) CreateWorkspaceMission(ctx context.Context, workspaceRoot, projectKey, title, objective string) (store.Mission, error) {
+	if err := requireNonEmpty(workspaceRoot, projectKey, title, objective); err != nil {
+		return store.Mission{}, fmt.Errorf("create workspace mission: %w", err)
+	}
+	if f.deps.Projects == nil {
+		return store.Mission{}, errors.New("flow is not configured for workspace project resolution")
+	}
+	project, err := f.deps.Projects.Resolve(ctx, workspaceRoot, projectKey)
+	if err != nil {
+		return store.Mission{}, err
+	}
+	release, err := store.Acquire(ctx, "workspace mission create")
+	if err != nil {
+		return store.Mission{}, err
+	}
+	defer release()
+	missionID, err := id.New("mission")
+	if err != nil {
+		return store.Mission{}, err
+	}
+	mission := store.Mission{ID: missionID, ProjectPath: project.Path, ProjectKey: project.Key,
+		ProjectIdentity: project.Identity, WorkspaceID: project.WorkspaceID, WorkspaceRoot: project.WorkspaceRoot,
+		Title: title, Objective: objective, CreatedAt: time.Now().UTC()}
+	return mission, store.CreateMission(mission)
+}
+
 // CreateTask publishes durable task intent under a mission. Empty kind
-// defaults to implementation; empty delivery mode defaults to branch.
+// defaults to implementation; empty delivery mode defaults to local.
 func (f *Flow) CreateTask(ctx context.Context, missionID, title, objective, deliveryBranch string, kind domain.TaskKind,
 	mode domain.DeliveryMode, validationCommand string, reviewPosture ...domain.ReviewPosture) (store.Task, error) {
-	if err := requireNonEmpty(missionID, title, objective, deliveryBranch); err != nil {
-		return store.Task{}, fmt.Errorf("create task: %w", err)
-	}
-	if err := publicsurface.TaskTitle(title); err != nil {
-		return store.Task{}, fmt.Errorf("create task: %w", err)
-	}
-	if err := publicsurface.Branch(deliveryBranch); err != nil {
+	if err := requireNonEmpty(missionID, title, objective); err != nil {
 		return store.Task{}, fmt.Errorf("create task: %w", err)
 	}
 	if kind == "" {
 		kind = domain.TaskImplementation
 	}
 	if mode == "" {
-		mode = domain.DeliveryBranch
+		if deliveryBranch == "" {
+			mode = domain.DeliveryLocal
+		} else {
+			// Read compatibility for the original CLI contract: an explicit
+			// public branch with no mode selected branch delivery.
+			mode = domain.DeliveryBranch
+		}
 	}
 	if kind != domain.TaskImplementation {
 		return store.Task{}, fmt.Errorf("unknown task kind %q", kind)
 	}
 	switch mode {
+	case domain.DeliveryLocal:
+		if deliveryBranch != "" {
+			return store.Task{}, errors.New("local development cannot predeclare a public delivery branch")
+		}
 	case domain.DeliveryBranch, domain.DeliveryPR:
+		if err := publicsurface.TaskTitle(title); err != nil {
+			return store.Task{}, fmt.Errorf("create task: %w", err)
+		}
+		if err := publicsurface.Branch(deliveryBranch); err != nil {
+			return store.Task{}, fmt.Errorf("create task: %w", err)
+		}
 	default:
 		return store.Task{}, fmt.Errorf("unknown delivery mode %q", mode)
 	}
@@ -102,26 +148,49 @@ func (f *Flow) Spawn(ctx context.Context, taskID string, retry bool) (store.Spaw
 	if err != nil {
 		return store.Spawn{}, err
 	}
-	if task.CurrentAttempt >= 1 {
-		if !retry {
-			return store.Spawn{}, fmt.Errorf("%w (task %s attempt %d)", ErrAttemptsExist, taskID, task.CurrentAttempt)
-		}
-		if delivery, err := store.ReadDelivery(task.MissionID, taskID, task.CurrentAttempt); err == nil && delivery.State.Terminal() {
-			return store.Spawn{}, errors.New("delivered revision cannot be retried; use sophon revise for accepted open-PR feedback")
-		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return store.Spawn{}, err
-		}
-		// Fence the previous attempt's lease by exact identity, best effort: a
-		// mismatch or release failure is never destructive, so continue either way.
-		if previous, err := store.ReadSpawn(task.MissionID, taskID, task.CurrentAttempt); err == nil {
-			f.releaseLeaseBestEffort(mission.ProjectPath, previous)
-		} else if !errors.Is(err, store.ErrNotFound) {
+	if _, err := store.ReadCancellation(task.MissionID, task.ID); err == nil {
+		return store.Spawn{}, errors.New("cancelled task cannot be started")
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return store.Spawn{}, err
+	}
+	mission, err = f.resolveMissionProject(ctx, mission)
+	if err != nil {
+		return store.Spawn{}, err
+	}
+	if task.DeliveryMode == domain.DeliveryLocal {
+		if err := f.ensureBootstrapLocked(ctx, mission, task); err != nil {
 			return store.Spawn{}, err
 		}
 	}
-	task, err = store.AdvanceTask(task.MissionID, task.ID, false)
-	if err != nil {
-		return store.Spawn{}, err
+	reuseUnstarted := false
+	if task.CurrentAttempt >= 1 {
+		if _, spawnErr := store.ReadSpawn(task.MissionID, taskID, task.CurrentAttempt); errors.Is(spawnErr, store.ErrNotFound) {
+			reuseUnstarted = true
+		} else if spawnErr != nil {
+			return store.Spawn{}, spawnErr
+		} else if !retry {
+			return store.Spawn{}, fmt.Errorf("%w (task %s attempt %d)", ErrAttemptsExist, taskID, task.CurrentAttempt)
+		}
+		if !reuseUnstarted {
+			if delivery, err := store.ReadDelivery(task.MissionID, taskID, task.CurrentAttempt); err == nil && delivery.State.Terminal() {
+				return store.Spawn{}, errors.New("delivered revision cannot be retried; use sophon revise for accepted open-PR feedback")
+			} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return store.Spawn{}, err
+			}
+			// Fence the previous attempt's lease by exact identity, best effort: a
+			// mismatch or release failure is never destructive, so continue either way.
+			if previous, err := store.ReadSpawn(task.MissionID, taskID, task.CurrentAttempt); err == nil {
+				f.releaseLeaseBestEffort(mission.ProjectPath, previous)
+			} else if !errors.Is(err, store.ErrNotFound) {
+				return store.Spawn{}, err
+			}
+		}
+	}
+	if !reuseUnstarted {
+		task, err = store.AdvanceTask(task.MissionID, task.ID, false)
+		if err != nil {
+			return store.Spawn{}, err
+		}
 	}
 	var correction *store.Correction
 	if task.CurrentRevision > 1 {
@@ -132,6 +201,80 @@ func (f *Flow) Spawn(ctx context.Context, taskID string, retry bool) (store.Spaw
 		correction = &record
 	}
 	return f.spawnAttemptLocked(ctx, mission, task, correction)
+}
+
+func (f *Flow) resolveMissionProject(ctx context.Context, mission store.Mission) (store.Mission, error) {
+	if mission.WorkspaceID == "" {
+		return mission, nil
+	}
+	if f.deps.Projects == nil {
+		return mission, errors.New("flow is not configured for workspace project resolution")
+	}
+	project, err := f.deps.Projects.Resolve(ctx, mission.WorkspaceRoot, mission.ProjectKey)
+	if err != nil {
+		return mission, fmt.Errorf("resolve mission project %s: %w", mission.ProjectKey, err)
+	}
+	if err := workspace.ValidatePinned(project, mission.WorkspaceID, mission.ProjectKey, mission.ProjectPath, mission.ProjectIdentity); err != nil {
+		return mission, err
+	}
+	mission.ProjectPath = project.Path
+	return mission, nil
+}
+
+func (f *Flow) ensureBootstrapLocked(ctx context.Context, mission store.Mission, task store.Task) error {
+	if f.deps.Bootstrap == nil {
+		return nil
+	}
+	state, err := f.deps.Bootstrap.InspectBootstrap(ctx, mission.ProjectPath)
+	if err != nil {
+		return fmt.Errorf("inspect project start baseline: %w", err)
+	}
+	intent, intentErr := store.ReadBootstrapIntent(task.MissionID, task.ID)
+	if errors.Is(intentErr, store.ErrNotFound) && !state.Needed {
+		return nil
+	}
+	if intentErr != nil && !errors.Is(intentErr, store.ErrNotFound) {
+		return intentErr
+	}
+	if errors.Is(intentErr, store.ErrNotFound) {
+		now := time.Now().UTC()
+		intent = store.BootstrapIntent{Version: 1, TaskID: task.ID, MissionID: task.MissionID,
+			ProjectKey: mission.ProjectKey, ProjectPath: mission.ProjectPath, Branch: state.Branch, Ref: state.Ref,
+			CommitMessage: "Initialize project history", AuthorName: "Project Contributors",
+			AuthorEmail: "contributors@localhost.invalid", AuthoredAt: now, RequestedAt: now}
+		homeDir, homeErr := datahome.AbsDir()
+		if homeErr != nil {
+			return homeErr
+		}
+		if err := store.PublishImmutable(store.BootstrapIntentPath(homeDir, task.MissionID, task.ID), intent); err != nil {
+			return fmt.Errorf("publish bootstrap intent: %w", err)
+		}
+	}
+	if intent.Version != 1 || intent.TaskID != task.ID || intent.MissionID != task.MissionID ||
+		intent.ProjectPath != mission.ProjectPath || intent.Branch == "" || intent.Ref == "" {
+		return errors.New("bootstrap intent does not match the current task and project")
+	}
+	result, err := f.deps.Bootstrap.CreateBootstrap(ctx, mission.ProjectPath, gitcontrol.BootstrapSpec{
+		Branch: intent.Branch, Ref: intent.Ref, CommitMessage: intent.CommitMessage,
+		AuthorName: intent.AuthorName, AuthorEmail: intent.AuthorEmail, AuthoredAt: intent.AuthoredAt})
+	if err != nil {
+		return fmt.Errorf("create or recover empty project baseline: %w", err)
+	}
+	receipt := store.BootstrapReceipt{Version: 1, TaskID: task.ID, MissionID: task.MissionID,
+		Branch: result.Branch, Ref: result.Ref, CommitSHA: result.CommitSHA, CompletedAt: time.Now().UTC()}
+	if prior, readErr := store.ReadBootstrapReceipt(task.MissionID, task.ID); readErr == nil {
+		receipt.CompletedAt = prior.CompletedAt
+		if prior.CommitSHA != receipt.CommitSHA || prior.Branch != receipt.Branch || prior.Ref != receipt.Ref {
+			return errors.New("bootstrap receipt conflicts with observed project baseline")
+		}
+	} else if !errors.Is(readErr, store.ErrNotFound) {
+		return readErr
+	}
+	homeDir, err := datahome.AbsDir()
+	if err != nil {
+		return err
+	}
+	return store.PublishImmutable(store.BootstrapReceiptPath(homeDir, task.MissionID, task.ID), receipt)
 }
 
 // spawnAttemptLocked performs allocation after the caller has advanced task

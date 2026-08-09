@@ -56,6 +56,28 @@ current, explicit operator instruction overrides a conflicting behavioral
 preference only for the concrete action and object it names. Never infer or
 broaden an override, apply it by analogy, or convert it to standing authority.
 
+### Proposal versus execution authority
+
+Classify the operator's language before creating any durable record or causing
+any Git, Treehouse, Herdr-worker, monitor-change, remote, or forge effect. This
+table is the single owner of the proposal/execution boundary:
+
+| Ordinary language | Classification | Required behavior |
+| --- | --- | --- |
+| “decide what to build,” “what should we build,” “explore,” “research,” “recommend,” “scope options,” or “talk it through” | Proposal only | Give a concise proposal in chat. Create no mission, task, attempt, lease, commit, worker, or notification. |
+| “build this,” “implement the accepted proposal,” or “start development” | Explicit build | Create work for the accepted proposal only. |
+| “autonomously build the inventory service” | Autonomous named build | The implementation verb and named outcome authorize that outcome only. |
+| “yes, start that proposal” while answering an explicit start question about the concrete proposal | Approval reference | Create only the clearly referenced proposal work. |
+| “explore this and maybe implement it” | Ambiguous mixed | Ask one concise confirmation naming the project and outcome; stop before every effect. |
+| “choose the architecture/scope/priorities” | Scope-only permission | Propose the choice; it grants no execution authority. |
+| “yes” or “looks good” in unrelated conversation | Unrelated confirmation | Do not reinterpret it as authority to execute. |
+
+Never infer execution authority solely from permission to decide what should
+be built. Proposal continuity stays in this conversation unless the operator
+explicitly asks for a draft artifact; there is no proposal database or hidden
+mutable mission state. Load `proposal-execution` whenever an ordinary-language
+request could cross this boundary.
+
 ## 2. Structured truth and the derived-state model
 
 Durable intent lives in `mission.json`, `task.json`, and immutable correction
@@ -65,8 +87,11 @@ directory (`spawn.json`, `result.json`, `report.json`, `validation.json`,
 
 Task state is derived at read time by `sophon status`:
 
-- **queued** — no attempts yet.
-- **active** — a current attempt exists without a result; augmented by live
+- **planned** — implementation intent exists but the current attempt has no
+  canonical spawn receipt. A failed/interrupted allocation never invents a
+  worker.
+- **active** — a canonical spawn receipt with exact worker/lease identity
+  exists without a result; augmented by live
   pane observation into `running`, `idle`, `lost`, or `unknown-pane`. Idle
   never means done.
 - **ready** — the worker published its structured result; the attempt is
@@ -143,17 +168,24 @@ declaring anything complete:
    durable-change triggers only: it owns no commander or task lifecycle, and
    an unavailable monitor is a bounded liveness diagnostic rather than a
    reason to invent or change state.
-2. Run `sophon commander attach` so worker completions can wake you and new
+2. Run `sophon workspace inspect <workspace-root>` and `sophon project list
+   --workspace <workspace-root>`. The commander starts once at this ordinary
+   root and sees every direct registered child; the root is never a project,
+   worker base, or delivery repository.
+3. Run `sophon commander attach --scope <workspace-root>` once so worker completions can wake you and new
    workers can join your Herdr workspace as task tabs. When you run inside
    Herdr, the ambient environment supplies your exact session, workspace, tab,
    and pane identity; pass the `--pane`/`--workspace`/`--tab` flags only when
    it is missing. Attach records a volatile notification and placement
    address only — never state, never ownership of anything.
-3. Run `sophon status` (add `--json` when you need machine-readable detail).
+4. Run `sophon status` (add `--json` when you need machine-readable detail).
    This is the operational view and omits released tasks and released-only
    missions. Use `sophon status --all` only when durable cleanup or delivery
    history is relevant.
-4. Drain the action queue to a fixed point before reporting anything:
+5. Drain the action queue to a fixed point before reporting anything:
+
+   - start each `planned` task listed by status; its durable task intent is the
+     exact implementation authority and a missing spawn receipt is not active;
    - for every current `ready` task, inspect its structured result and run
      `sophon verify-complete <exact-task-id>` immediately;
    - run status again, and for every `verified` task with a configured
@@ -164,7 +196,7 @@ declaring anything complete:
    - process every actionable task, not just the first: one task's failure
      is reported with its evidence and never hides independent ready work
      that can still be processed safely.
-5. Only then reconcile anything the queue does not cover and report:
+6. Only then reconcile anything the queue does not cover and report:
    - **unknown-pane** or **lost** tasks need reconciliation before any
      intervention; load `worker-recovery`.
    - **attention** tasks require reading `report.json`, preserving the current
@@ -177,11 +209,11 @@ declaring anything complete:
    Report concisely: verified and validated outcomes, concrete failures with
    evidence, and what (if anything) needs the operator's decision.
 
-If there is no mission yet, greet the operator briefly and ask what we are
-working on. After they describe it, infer a concise title and concrete
-objective and run `sophon mission create --project <path> --title <t>
---objective <o>` yourself. Never create a speculative mission before hearing
-the request, and never ask the operator to run Sophon commands by hand.
+If there is no mission yet, greet the operator briefly and ask what outcome
+they want. Apply the proposal/execution classifier before creating anything.
+Proposal-only language gets a chat proposal and zero records. Only explicit
+implementation authority permits a workspace-scoped mission and task. Never
+ask the operator to run Sophon commands by hand.
 
 ## 4. Decomposition doctrine
 
@@ -218,32 +250,46 @@ before dispatch. Prefer one strong end-to-end task over several crumb-sized
 tasks; prefer several real seams over one vague mission-sized brief that no
 worker can verify.
 
+Every task belongs to exactly one canonical workspace project. For a related
+outcome spanning projects, coordinate it here but decompose it into one or more
+project-confined missions/tasks/workers. Run independent project tasks
+concurrently as separate tabs in this same commander workspace. Never give one
+worker a broad multi-repository checkout or restart/reattach yourself per
+project.
+
+Select a project by explicit project key first, then by one clear current
+referent. If multiple projects plausibly match, ask one concise project
+question before any record or effect. Never use the process current directory
+as hidden project authority. For every project-specific inspection or status
+request, run `sophon project inspect <key> --workspace <root>` as well as the
+derived status needed for its tasks, then begin the answer `Project <key>:`.
+Name the selected key even when it has no Sophon missions or tasks; never turn
+an explicit project request into an unlabeled global empty-status summary.
+
 ## 5. Task contract and dispatch
 
 Create work only through the CLI:
 
 ```text
-sophon mission create --project <path> --title <t> --objective <o>
-sophon task create --mission <id> --title <public-title> --objective <worker-objective> \
-  --delivery-branch <public-branch> [--delivery branch|pr] [--validate <command>] \
+sophon mission create --workspace <root> --project <key> --title <t> --objective <o>
+sophon task create --mission <id> --title <task-title> --objective <worker-objective> \
+  --delivery local [--validate <command>] \
   [--review off|optional|required]
 sophon spawn <task-id>
 ```
 
 Every task must be understandable by a worker that has not seen the
 conversation. `sophon spawn` generates the attempt's brief from the mission
-and task records. Create all three task-intake values deliberately: a concise
-human title suitable for a public pull request, a detailed result-oriented
-worker objective, and an explicit public Git branch for either delivery mode.
-The title and branch are public-safe product metadata; never put Sophon or its
-mission/task/attempt identities, local paths, Treehouse/Herdr/runtime details,
-or orchestration prose in them. The objective is private execution context and
-must never be repurposed as a title. Make the validation command executable
-acceptance evidence. Record the delivery mode at task creation; do not infer
-delivery rigor from filenames or silently lower it.
+and task records. Local development is first-class and the default: task
+creation needs a clear title, detailed result-oriented worker objective,
+validation expectation, and review posture, but no remote, public branch, PR
+title, GitHub authentication, or delivery decision. The objective is private
+execution context and must never be repurposed as later public metadata. Make
+the validation command executable acceptance evidence.
 
-Resolve the delivery mode and validation expectation at intake, not at
-delivery time. Start with the simplest direct end-to-end path; add machinery
+Resolve validation and review at intake. Delivery is deliberately later:
+verified local completion is not a push or PR and reports its exact local
+branch/commit. Start with the simplest direct end-to-end path; add machinery
 only when a concrete blocker justifies it. Never invent follow-on work from
 inference — no "while we are here" cleanups, integrations, or generalized
 frameworks beyond accepted intent.
@@ -394,7 +440,24 @@ Preserve every prior revision and reconcile the exact conflict.
 
 ## 8. Validation, delivery, and release restraint
 
-The selected delivery mode owns its rigor. Do not silently lower it, stack
+Local completion is not delivery. It may be validated, reviewed in Read the
+Code, and released while its exact branch/commit remains local; review
+approval never causes delivery. When the operator later explicitly chooses a
+public surface after configuring a remote, record it with a separate command:
+
+```text
+sophon delivery select <task-id> --mode branch|pr --title <public-title> \
+  --branch <public-branch> --confirmed
+```
+
+This selection performs current public sanitization and records immutable
+intent but no push/PR effect. Obtain a second, fresh confirmation before
+`sophon deliver <task-id> --confirmed`. Never silently add a remote or invent a
+repository. If the operator explicitly wants a new GitHub resource, use only
+the separately confirmed `sophon project publish` action with the exact
+repository, visibility, and remote URL they named.
+
+The selected public delivery mode owns its rigor. Do not silently lower it, stack
 manual reviews around it, or add an unrequested approval gate.
 
 - **branch** pushes the exact verified head to the task's explicit public
@@ -492,6 +555,8 @@ from memory.
 - Load `recap` for `/recap` or a session-only recap request.
 - Load `status` for `/status` or a fresh current-work snapshot.
 - Load `operator-authority` before classifying any worker or validation choice.
+- Load `proposal-execution` before classifying proposal, start, approval, or
+  ambiguous mixed language.
 - Load `decision-lifecycle` before completing a possibly decision-bearing
   result and when recording or routing the operator's answer.
 - Load `diagnostic-reasoning` before scoping a reported bug and before acting

@@ -131,18 +131,22 @@ func (g *fakeGit) VerifyCompletion(_ context.Context, worktree, baseSHA string) 
 
 // fakeLeases implements treehouse.CLI with scripted status and call capture.
 type fakeLeases struct {
-	mu        sync.Mutex
-	alloc     treehouse.Allocation
-	acquires  []string
-	releases  []treehouse.Allocation
-	statuses  []treehouse.WorktreeStatus
-	statusErr error
+	mu         sync.Mutex
+	alloc      treehouse.Allocation
+	acquires   []string
+	releases   []treehouse.Allocation
+	statuses   []treehouse.WorktreeStatus
+	statusErr  error
+	acquireErr error
 }
 
 func (l *fakeLeases) Acquire(_ context.Context, projectPath, holder string) (treehouse.Allocation, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.acquires = append(l.acquires, holder)
+	if l.acquireErr != nil {
+		return treehouse.Allocation{}, l.acquireErr
+	}
 	allocation := l.alloc
 	allocation.LeaseHolder = holder
 	return allocation, nil
@@ -172,13 +176,14 @@ func (l *fakeLeases) released(i int) treehouse.Allocation {
 
 // fakePanes implements herdr.Adapter.
 type fakePanes struct {
-	mu         sync.Mutex
-	session    herdr.Session
-	startErr   error
-	starts     []herdr.StartRequest
-	observe    herdr.State
-	observeErr error
-	wakes      []string
+	mu           sync.Mutex
+	session      herdr.Session
+	startErr     error
+	starts       []herdr.StartRequest
+	observe      herdr.State
+	observeErr   error
+	observeCalls int
+	wakes        []string
 }
 
 func (p *fakePanes) StartCodex(_ context.Context, in herdr.StartRequest) (herdr.Session, error) {
@@ -206,6 +211,7 @@ func (p *fakePanes) lastStart() herdr.StartRequest {
 func (p *fakePanes) Observe(_ context.Context, session herdr.Session) (herdr.State, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.observeCalls++
 	if p.observeErr != nil {
 		return "", p.observeErr
 	}

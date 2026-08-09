@@ -755,7 +755,7 @@ func TestBranchDeliveryAppliesCommitMessagePreflight(t *testing.T) {
 	}
 }
 
-func TestCreateTaskRequiresExplicitPublicAndPrivateIntent(t *testing.T) {
+func TestCreateTaskSeparatesLocalIntentFromLaterPublicMetadata(t *testing.T) {
 	useHome(t)
 	rig := newRig()
 	mission, err := rig.flow.CreateMission(context.Background(), "/repo", "Ship", "Mission context")
@@ -765,8 +765,9 @@ func TestCreateTaskRequiresExplicitPublicAndPrivateIntent(t *testing.T) {
 	if _, err := rig.flow.CreateTask(context.Background(), mission.ID, "Public title", "", "feature/public", "", "", ""); err == nil {
 		t.Fatal("missing detailed objective was accepted")
 	}
-	if _, err := rig.flow.CreateTask(context.Background(), mission.ID, "Public title", "Detailed objective", "", "", "", ""); err == nil {
-		t.Fatal("missing public delivery branch was accepted")
+	local, err := rig.flow.CreateTask(context.Background(), mission.ID, "Local implementation", "Detailed objective", "", "", "", "")
+	if err != nil || local.DeliveryMode != domain.DeliveryLocal || local.DeliveryBranch != "" {
+		t.Fatalf("local task intake = %+v, %v", local, err)
 	}
 	if _, err := rig.flow.CreateTask(context.Background(), mission.ID, "Bad\nTitle", "Detailed objective", "feature/public", "", "", ""); err == nil {
 		t.Fatal("multiline public title was accepted")
