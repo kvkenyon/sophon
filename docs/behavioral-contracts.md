@@ -23,7 +23,8 @@ no managed runtime, no resume machinery. Its contract:
 - **Durable-state reconstruction.** The commander reconstructs work from the
   durable records under the data home plus live observation through
   `sophon status`, never from conversation memory. A restart is a non-event:
-  session start is `sophon commander attach` (registering the volatile
+  session start ensures the optional transport with `sophon monitor start`,
+  then runs `sophon commander attach` (registering the volatile
   wake/placement address so completions can wake the session and new workers
   can join its Herdr workspace as tabs), then `sophon status`, drain the
   derived action queue to a fixed point (every ready task verified, every
@@ -66,6 +67,10 @@ no managed runtime, no resume machinery. Its contract:
   and never writes Sophon branding or orchestration mechanics to a public Git
   or forge surface.
 
+Sparse worker phase transitions arrive as non-authoritative triggers. The
+commander never relays them as truth or operator-facing chatter; it runs status
+before acting and stays quiet when no durable outcome or action exists.
+
 Conditional procedures live in the materialized skills under `prompts/skills/`
 (recap, status, operator-authority, decision-lifecycle, diagnostic-reasoning,
 coding-guidelines, worker-recovery, agent-adapters); the commander prompt
@@ -84,6 +89,10 @@ in its own leased Treehouse worktree. Its contract:
   authority: mission, task, attempt, worktree, branch, base SHA, validation,
   delivery mode, permissions, and completion steps. The worker does exactly
   what it says and never expands scope.
+- **Sparse optional progress.** Meaningful transitions use the generated,
+  data-home-pinned `sophon worker progress` form and only the stable phase
+  vocabulary. Notes are bounded data, never commands or operator messages;
+  monitor absence is nonfatal and never delays canonical completion/report.
 - **Isolated workspace.** All project changes happen inside the assigned
   attempt worktree and nowhere else. The worker never touches leases,
   worktrees, or any shared state — mission or task records, other attempts,

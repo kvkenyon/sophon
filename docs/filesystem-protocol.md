@@ -1,8 +1,9 @@
 # Sophon filesystem protocol
 
 Sophon's only state model is a filesystem protocol under the Sophon data home.
-There is no daemon, database, event stream, command ledger, state projection,
-or managed agent runtime. Facts are canonical typed records; status is derived
+There is no database, command ledger, state projection, or managed agent
+runtime. One intentionally narrow local monitor may carry optional notification
+traffic; it never carries facts or authority. Facts are canonical typed records; status is derived
 at read time from those records plus live Herdr, Treehouse, Git, and forge
 observation.
 
@@ -34,6 +35,11 @@ attempt each).
     <task-id>.status                    # VOLATILE wake lines; never truth
     commander.json                      # VOLATILE commander wake/placement address; never truth
     .lock/                              # shared-mutation lock (mkdir) with owner.json
+    monitor/                            # private optional notification runtime (0700)
+      rpc.sock                          # JSON-RPC 2.0 Unix socket (0600)
+      runtime.json                      # private exact generation/pid identity (0600)
+      start.lock                        # crash-released singleton file lock (0600)
+      monitor.log[.1]                   # bounded transport diagnostics, never bodies/tokens
   skills/                               # per-session materialized runtime skills
 ```
 
@@ -107,7 +113,19 @@ attempt each).
    fresh attach replaces only this volatile address — no recovery transition,
    no task-truth mutation. Workers never author the wake prose; the binary
    generates it.
-7. **Running steering and worker pane retirement.** `sophon send` observes the
+7. **Optional notification monitor.** The monitor is a private per-data-home
+   JSON-RPC 2.0 Unix-socket transport, specified in
+   `docs/notification-monitor.md`. Canonical publication always precedes a
+   durable-change request. An accepted monitor request suppresses the direct
+   completion/report wake; an unavailable or rejecting monitor preserves that
+   bounded direct fallback. Progress is sparse, attempt-fenced, sanitized, and
+   never written as truth. The monitor validates current task/attempt identity
+   and canonical change generations before coalescing exact task/attempt bursts
+   into fixed Sophon-generated commander triggers. It never polls, replays a
+   durable queue, starts or recovers a commander, controls workers, or advances
+   lifecycle state. Loss or restart costs optional liveness only; status catches
+   up from canonical records.
+8. **Running steering and worker pane retirement.** `sophon send` observes the
    exact session/pane from the current attempt's `spawn.json`. Idle delivery
    waits for Herdr's affirmative turn-start acknowledgement; already-running
    delivery submits one queued prompt without waiting for an impossible
@@ -125,7 +143,7 @@ attempt each).
    cleanup receipt because the tab close is directly observable and a retry
    converges via reality. Until the terminal boundary the worker pane stays
    available for corrections to the same attempt.
-8. **External boundaries.** The lease boundary uses exact identity guards:
+9. **External boundaries.** The lease boundary uses exact identity guards:
    release is conditional on `(lease_id, holder)` and fences on mismatch. The
    forge boundary keeps the generated execution branch local and pushes the
    exact verified SHA to the explicit public delivery branch recorded at task
@@ -143,7 +161,7 @@ attempt each).
    receipt after (`delivery.json`, `release.json`); re-running the same command
    converges to the same result via observed reality. There is no generalized
    command ledger.
-9. **Authority.** A live commander session may verify and validate
+10. **Authority.** A live commander session may verify and validate
    autonomously. Every delivery effect requires operator confirmation, enforced
    mechanically: `sophon deliver` refuses without `--confirmed`. With no
    commander session alive, nothing advances and nothing is lost.
@@ -159,7 +177,11 @@ sophon task create --mission <id> --title <public-title>
                    --delivery-branch <public-branch> [--kind implementation]
                    [--delivery branch|pr] [--validate <command>]
 sophon commander attach [--pane <id>] [--workspace <id>] [--tab <id>]
+sophon monitor run|start [--herdr <path>]
+sophon monitor status [--json]
+sophon monitor stop
 sophon spawn <task-id> [--retry]
+sophon worker progress <task-id> --attempt <n> --phase <phase> [--message <note>]
 sophon worker complete <task-id> --attempt <n> --head-sha <sha> --result <path>
 sophon worker report <task-id> --attempt <n> --head-sha <sha> --report <path>
 sophon verify-complete <task-id>
@@ -193,7 +215,10 @@ environment; no other environment values cross the launch boundary.
 
 ## Explicit limitations
 
-- Sophon does not move unless a commander session (or the operator) invokes
+- The monitor has no supported worker turn-end source in the current Herdr
+  boundary. `notify.turn_ended` is therefore intentionally omitted: there is
+  no screen scraping, private runtime hook, or polling substitute.
+- Sophon lifecycle does not move unless a commander session (or the operator) invokes
   commands. Completed work waits safely and visibly; nothing automatically
   recovers, restarts, or fails over any agent session.
 - The lock's stale reclamation relies on pid liveness on a single machine;

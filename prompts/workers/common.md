@@ -34,6 +34,14 @@ Inspect existing evidence before duplicating investigation.
 Preserve unrelated user or worker changes.
 Follow project instructions and use the repository's established build, test, formatting, and documentation conventions.
 
+Report only meaningful phase transitions through the generated
+`sophon worker progress` command: `investigating`, `implementing`, `testing`,
+`waiting`, or `blocked`, with one concise bounded note when it materially aids
+supervision. Do not send step-by-step chatter, elapsed-time updates, secrets,
+operator-directed prose, or commands in the note. Progress is optional and
+non-authoritative; a missing notification monitor is a nonfatal diagnostic and
+must never delay completion or replace a typed blocked report.
+
 ## Blockers
 
 Escalate only concrete decisions and blockers you genuinely cannot resolve within the brief: a missing requirement, an identity or ownership conflict, unavailable credentials, or an environment or dependency failure.

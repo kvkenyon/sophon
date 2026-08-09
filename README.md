@@ -2,7 +2,7 @@
 
 Sophon is single-operator local orchestration for autonomous coding agents. A human operator talks to one **commander** — an ordinary, disposable agent session; the commander decomposes work into tasks and dispatches **workers**, each an isolated agent session executing one attempt in its own Treehouse worktree over a Herdr pane.
 
-There is no daemon, database, or event stream. Sophon's only state model is a filesystem protocol: durable typed records under `~/.sophon/`, with task status **derived at read time** from those records plus live Herdr, Treehouse, Git, and forge observation. Every `sophon` command is one short-lived invocation.
+Sophon's only state model is a filesystem protocol: durable typed records under `~/.sophon/`, with task status **derived at read time** from those records plus live Herdr, Treehouse, Git, and forge observation. A deliberately narrow local notification monitor may run in the background, but it transports optional triggers only; it is never task truth, a lifecycle controller, recovery service, or commander manager.
 
 > Reasoning may be probabilistic. Execution state may not be.
 
@@ -28,6 +28,9 @@ External tools (`herdr`, `treehouse`, `git`, `gh-axi`) are resolved from PATH by
 Start a commander session from the rendered prompt (for example, paste the output of `sophon prompt commander` into a fresh agent session), or drive the CLI directly:
 
 ```bash
+# 0. Ensure the optional per-data-home notification transport is ready.
+sophon monitor start
+
 # 1. Create a mission: durable intent for one project.
 sophon mission create --project /path/to/repo --title "Rate limiting" \
   --objective "Add per-client rate limiting to the API with regression tests"
@@ -63,7 +66,7 @@ sophon release <task-id>
 sophon status --all
 ```
 
-Other commands: `sophon commander attach` (register the live commander's volatile Herdr wake/placement address so publications wake it and workers group into its workspace as tabs), `sophon spawn <task-id> --retry` (fence the current attempt and spawn the next), `sophon send <task-id> <message>` (queue an exact steer to an idle or running current worker), `sophon mission list` (durable mission history, unlike filtered operational status), `sophon version`.
+Other commands: `sophon monitor run|start|status --json|stop` (direct lifecycle for the optional private JSON-RPC notification transport), `sophon commander attach` (register the live commander's volatile Herdr wake/placement address so publications wake it and workers group into its workspace as tabs), `sophon worker progress` (send one sparse non-authoritative phase transition), `sophon spawn <task-id> --retry` (fence the current attempt and spawn the next), `sophon send <task-id> <message>` (queue an exact steer to an idle or running current worker), `sophon mission list` (durable mission history, unlike filtered operational status), `sophon version`.
 
 Workers write completion JSON only to the generated staging path. The CLI validates the complete schema and live head before atomically publishing canonical `result.json`:
 
@@ -77,11 +80,11 @@ Scope mismatch, ordinary blockers, and failed execution use typed non-completion
 SOPHON_DATA_HOME=<assigned-home> sophon worker report <task-id> --attempt <n> --head-sha "$(git rev-parse HEAD)" --report <path>
 ```
 
-After durable publication the CLI best-effort wakes the attached commander. A valid report derives `attention`, preserves dirty-work disclosure, and creates no verification or validation action. Once terminal completion evidence lands (verification, plus a passing validation when configured), the exact finished worker pane is closed as routine cleanup; the branch and lease remain until explicit release. A valid current-attempt release derives historical `released`; normal status omits it, while `status --all` preserves whether delivery occurred.
+After durable publication the CLI asks the healthy monitor to coalesce and forward the change; when no monitor accepts it, completion/report publication retains the direct commander wake fallback. Notification failure never changes the publication. A valid report derives `attention`, preserves dirty-work disclosure, and creates no verification or validation action. Once terminal completion evidence lands (verification, plus a passing validation when configured), the exact finished worker pane is closed as routine cleanup; the branch and lease remain until explicit release. A valid current-attempt release derives historical `released`; normal status omits it, while `status --all` preserves whether delivery occurred.
 
 ## What it guarantees
 
-- **Derived state, no daemon.** Nothing runs in the background; nothing automatically recovers, restarts, or fails over. With no commander session alive, nothing advances and nothing is lost — completed work waits on disk and surfaces as `ready` to the next session.
+- **Derived state despite monitor loss.** The optional monitor carries no truth and performs no recovery or lifecycle transitions. With no monitor or commander session alive, nothing advances and nothing is lost — completed work waits on disk and surfaces as `ready` to the next status run.
 - **Structured evidence, not prose.** Strict completion and typed non-completion schemas are pinned to the live worktree HEAD. Workers write staging files; only validated CLI publication creates canonical truth. Worker prose and notification lines are never state.
 - **Attempt fencing.** Retry fences the old attempt's lease by exact identity before the next attempt exists; stale results are refused loudly.
 - **Operator authority at the boundary.** Verification and validation are autonomous; every delivery effect requires `--confirmed`. There is no merge path.
@@ -98,6 +101,7 @@ After durable publication the CLI best-effort wakes the attached commander. A va
 ## Documentation
 
 - `docs/filesystem-protocol.md` — the authoritative design: layout, rules, and CLI surface.
+- `docs/notification-monitor.md` — versioned JSON-RPC framing, methods, bounds, lifecycle, and security model.
 - `docs/behavioral-contracts.md` — the commander and worker behavioral contracts implemented in `prompts/`.
 
 Named for the all-seeing sophons in *The Three-Body Problem*.

@@ -123,17 +123,22 @@ anyone runs `sophon status`.
 At session start, before dispatching, steering, retrying, delivering, or
 declaring anything complete:
 
-1. Run `sophon commander attach` so worker completions can wake you and new
+1. Run `sophon monitor start` to ensure the optional private notification
+   monitor is healthy for this data home. It transports sparse progress and
+   durable-change triggers only: it owns no commander or task lifecycle, and
+   an unavailable monitor is a bounded liveness diagnostic rather than a
+   reason to invent or change state.
+2. Run `sophon commander attach` so worker completions can wake you and new
    workers can join your Herdr workspace as task tabs. When you run inside
    Herdr, the ambient environment supplies your exact session, workspace, tab,
    and pane identity; pass the `--pane`/`--workspace`/`--tab` flags only when
    it is missing. Attach records a volatile notification and placement
    address only — never state, never ownership of anything.
-2. Run `sophon status` (add `--json` when you need machine-readable detail).
+3. Run `sophon status` (add `--json` when you need machine-readable detail).
    This is the operational view and omits released tasks and released-only
    missions. Use `sophon status --all` only when durable cleanup or delivery
    history is relevant.
-3. Drain the action queue to a fixed point before reporting anything:
+4. Drain the action queue to a fixed point before reporting anything:
    - for every current `ready` task, inspect its structured result and run
      `sophon verify-complete <exact-task-id>` immediately;
    - run status again, and for every `verified` task with a configured
@@ -144,7 +149,7 @@ declaring anything complete:
    - process every actionable task, not just the first: one task's failure
      is reported with its evidence and never hides independent ready work
      that can still be processed safely.
-4. Only then reconcile anything the queue does not cover and report:
+5. Only then reconcile anything the queue does not cover and report:
    - **unknown-pane** or **lost** tasks need reconciliation before any
      intervention; load `worker-recovery`.
    - **attention** tasks require reading `report.json`, preserving the current

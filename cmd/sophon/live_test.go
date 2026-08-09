@@ -28,7 +28,13 @@ func herdrLab(t *testing.T) (helper, sessionName string) {
 	if helper == "" {
 		t.Skip("set HERDR_LAB_HELPER to the fm-herdr-lab.sh path")
 	}
-	nameOutput, err := exec.Command(helper, "name", "sophon-worker-env-commander-wake").Output()
+	if preprovisioned := strings.TrimSpace(os.Getenv("SOPHON_HERDR_LAB_SESSION")); preprovisioned != "" {
+		if !strings.HasPrefix(preprovisioned, "fm-lab-") || preprovisioned == "default" {
+			t.Fatalf("unsafe preprovisioned Herdr lab session %q", preprovisioned)
+		}
+		return helper, preprovisioned
+	}
+	nameOutput, err := exec.Command(helper, "name", "sophon-notification-monitor").Output()
 	if err != nil {
 		t.Fatalf("derive Herdr lab session name: %v", err)
 	}
@@ -47,6 +53,31 @@ func herdrLab(t *testing.T) (helper, sessionName string) {
 	return helper, sessionName
 }
 
+// labHerdrBinary makes every test-specific Herdr invocation pass through the
+// isolation helper. Internal/herdr already appends an explicit --session;
+// the wrapper removes that pair before the helper appends the required final
+// session argument itself.
+func labHerdrBinary(t *testing.T, helper, sessionName string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "herdr-lab")
+	script := fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
+args=()
+while (($#)); do
+  if [[ "$1" == "--session" ]]; then
+    shift
+    (($#)) && shift
+    continue
+  fi
+  args+=("$1")
+  shift
+done
+exec %s run %s "${args[@]}"
+`, shellQuote(helper), shellQuote(sessionName))
+	writeCLIFile(t, path, script, 0o700)
+	return path
+}
+
 // TestLiveWorkerLifecycleInHerdrLab is the guarded real-lifecycle proof: it
 // spawns a real Codex worker pane in an isolated Herdr lab session against a
 // real temp Git project and the real treehouse binary. It never touches the
@@ -54,15 +85,16 @@ func herdrLab(t *testing.T) (helper, sessionName string) {
 //
 //	SOPHON_HERDR_LAB=1 HERDR_LAB_HELPER=/path/to/fm-herdr-lab.sh go test ./cmd/sophon -run TestLiveWorkerLifecycle
 func TestLiveWorkerLifecycleInHerdrLab(t *testing.T) {
-	_, sessionName := herdrLab(t)
+	helper, sessionName := herdrLab(t)
 	treehouseBinary, err := exec.LookPath("treehouse")
 	if err != nil {
 		t.Skip("treehouse binary not on PATH")
 	}
-	herdrBinary, err := exec.LookPath("herdr")
+	_, err = exec.LookPath("herdr")
 	if err != nil {
 		t.Skip("herdr binary not on PATH")
 	}
+	herdrBinary := labHerdrBinary(t, helper, sessionName)
 
 	home := t.TempDir()
 	t.Setenv("SOPHON_DATA_HOME", home)
@@ -125,15 +157,16 @@ func TestLiveWorkerLifecycleInHerdrLab(t *testing.T) {
 //
 //	SOPHON_HERDR_LAB=1 HERDR_LAB_HELPER=/path/to/fm-herdr-lab.sh go test ./cmd/sophon -run TestLiveCommanderWake -timeout 20m
 func TestLiveCommanderWakeGroupingAndRetirementInHerdrLab(t *testing.T) {
-	_, sessionName := herdrLab(t)
+	helper, sessionName := herdrLab(t)
 	treehouseBinary, err := exec.LookPath("treehouse")
 	if err != nil {
 		t.Skip("treehouse binary not on PATH")
 	}
-	herdrBinary, err := exec.LookPath("herdr")
+	_, err = exec.LookPath("herdr")
 	if err != nil {
 		t.Skip("herdr binary not on PATH")
 	}
+	herdrBinary := labHerdrBinary(t, helper, sessionName)
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git binary is required")
 	}
@@ -174,6 +207,18 @@ func TestLiveCommanderWakeGroupingAndRetirementInHerdrLab(t *testing.T) {
 	runCLI(t, "commander", "attach", "--pane", commander.PaneID,
 		"--workspace", commander.WorkspaceID, "--tab", commander.TabID,
 		"--herdr", herdrBinary, "--herdr-session", sessionName)
+	// The live proof uses the real detached monitor process; its Herdr boundary
+	// is still the helper-backed wrapper above.
+	sophonBinary := buildSophonBinary(t)
+	startMonitor := exec.Command(sophonBinary, "monitor", "start", "--herdr", herdrBinary)
+	if output, err := startMonitor.CombinedOutput(); err != nil {
+		t.Fatalf("start lab notification monitor: %v: %s", err, output)
+	}
+	t.Cleanup(func() {
+		if output, err := exec.Command(sophonBinary, "monitor", "stop").CombinedOutput(); err != nil {
+			t.Errorf("stop lab notification monitor: %v: %s", err, output)
+		}
+	})
 
 	// Two workers must become distinct tabs inside the commander's exact
 	// workspace, each carrying the resolved data home on its launch command.
@@ -243,6 +288,35 @@ func TestLiveCommanderWakeGroupingAndRetirementInHerdrLab(t *testing.T) {
 		tabs := labTabList(t, herdrBinary, sessionName, commander.WorkspaceID)
 		return tabs[commander.TabID] && tabs[spawnB.Pane.TabID] && !tabs[spawnA.Pane.TabID]
 	}, "worker A tab retired, commander and sibling tabs surviving")
+
+	// Put the commander into a live turn, then publish worker B's completion.
+	// Herdr's supported running-safe submit path must accept the monitor's
+	// fixed message without screen scraping or waiting for idle.
+	if _, err := adapter.Submit(ctx, commander,
+		"Review the current Sophon status carefully and explain the action queue before ending this turn."); err != nil {
+		t.Fatalf("start running-commander proof turn: %v", err)
+	}
+	if _, state, err := adapter.Identify(ctx, commander); err != nil || state != herdr.StateRunning {
+		t.Fatalf("commander is not running before monitor publication: state=%s err=%v", state, err)
+	}
+	if err := adapter.Cancel(ctx, spawnB.Pane); err != nil {
+		t.Fatalf("quiet lab worker B: %v", err)
+	}
+	runCLIGit(t, spawnB.WorktreePath, "checkout", "--", ".")
+	runCLIGit(t, spawnB.WorktreePath, "clean", "-fd")
+	fixture.completeWorker(t, mission.ID, taskB.ID, 1)
+	runningWakeDeadline := time.Now().Add(90 * time.Second)
+	runningWake := "task" + taskB.ID + "attempt1"
+	for {
+		pane := labPaneRead(t, herdrBinary, sessionName, commander.PaneID, 2000)
+		if strings.Contains(strings.Join(strings.Fields(pane), ""), runningWake) {
+			break
+		}
+		if time.Now().After(runningWakeDeadline) {
+			t.Fatalf("running commander never received queued monitor wake; pane shows:\n%s", pane)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // labPaneRead reads a lab pane's content through the explicit session. The

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"sophon/internal/domain"
 	"sophon/internal/flow"
 	"sophon/internal/store"
 )
@@ -49,6 +50,9 @@ func TestCLIWorkerEnvironmentCarriesAssignedDataHome(t *testing.T) {
 	}
 	if !strings.Contains(string(brief), wantEnv+" sophon worker complete "+task.ID) {
 		t.Fatalf("brief completion command not pinned to the assigned data home:\n%s", brief)
+	}
+	if !strings.Contains(string(brief), wantEnv+" sophon worker progress "+task.ID+" --attempt 1") {
+		t.Fatalf("brief progress command not pinned to the assigned data home:\n%s", brief)
 	}
 
 	// The full worker-completion path with a scrubbed environment: the worker
@@ -116,6 +120,146 @@ func TestCLIWorkerCompletionWakesAttachedCommander(t *testing.T) {
 	}
 	if status := fixture.taskStatus(t, task.ID); status.State != store.StateReady {
 		t.Fatalf("status = %+v, want ready", status)
+	}
+}
+
+// TestCLIMonitorForwardsProgressCompletionAndReportWithoutDirectDuplicates is
+// the faithful local transport E2E: a real background monitor accepts worker
+// requests, validates canonical evidence, and submits fixed messages to the
+// exact attached commander. Accepted durable events must not also take the
+// direct fallback path.
+func TestCLIMonitorForwardsProgressCompletionAndReportWithoutDirectDuplicates(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "Monitor forwarding")
+	completed := fixture.createTask(t, mission.ID, "--title", "Completed")
+	fixture.spawnTask(t, completed.ID)
+	runCLI(t, "commander", "attach", "--pane", "w1:p1",
+		"--herdr", fixture.herdr, "--herdr-session", "fm-lab-cli-test")
+
+	binary := buildSophonBinary(t)
+	start := exec.Command(binary, "monitor", "start", "--herdr", fixture.herdr)
+	if output, err := start.CombinedOutput(); err != nil {
+		t.Fatalf("monitor start: %v\n%s", err, output)
+	}
+	t.Cleanup(func() {
+		stop := exec.Command(binary, "monitor", "stop")
+		if output, err := stop.CombinedOutput(); err != nil {
+			t.Errorf("monitor stop: %v\n%s", err, output)
+		}
+	})
+	status := exec.Command(binary, "monitor", "status", "--json")
+	if output, err := status.CombinedOutput(); err != nil || !strings.Contains(string(output), `"running": true`) ||
+		strings.Contains(string(output), "generation") {
+		t.Fatalf("public monitor status = %s, %v", output, err)
+	}
+
+	before := readLogLines(t, fixture.herdrLog)
+	progress := runCLI(t, "worker", "progress", completed.ID, "--attempt", "1",
+		"--phase", "testing", "--message", "unit tests\nstarted")
+	if !strings.Contains(string(progress), `"status": "accepted"`) {
+		t.Fatalf("progress acknowledgement = %s", progress)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		delta := logDelta(t, fixture.herdrLog, before)
+		return strings.Contains(delta, completed.ID) && strings.Contains(delta, "testing phase") &&
+			strings.Contains(delta, "unit tests started")
+	}, "monitor-forwarded progress")
+
+	before = readLogLines(t, fixture.herdrLog)
+	fixture.completeWorker(t, mission.ID, completed.ID, 1)
+	waitFor(t, 3*time.Second, func() bool {
+		return strings.Contains(logDelta(t, fixture.herdrLog, before), "sophon verify-complete "+completed.ID)
+	}, "monitor-forwarded completion")
+	completionWake := logDelta(t, fixture.herdrLog, before)
+	if count := strings.Count(completionWake, "prompt w1:p1 "); count != 1 {
+		t.Fatalf("accepted completion used duplicate direct fallback (%d prompts):\n%s", count, completionWake)
+	}
+
+	reported := fixture.createTask(t, mission.ID, "--title", "Reported")
+	spawn := fixture.spawnTask(t, reported.ID)
+	reportPath := store.AttemptPath(fixture.home, mission.ID, reported.ID, 1, store.ReportSubmissionName)
+	report := store.WorkerReport{Version: 1, Status: store.WorkerReportBlocked, TaskID: reported.ID, Attempt: 1,
+		HeadSHA: spawn.BaseSHA, Reason: "dependency unavailable", Verification: []domain.VerificationResult{},
+		Evidence: []string{"dependency command failed"}, ChangedFiles: []string{}, DirtyWork: false, Risks: []string{}}
+	if err := store.Publish(reportPath, report); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(reportPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+	before = readLogLines(t, fixture.herdrLog)
+	runCLI(t, "worker", "report", reported.ID, "--attempt", "1", "--head-sha", spawn.BaseSHA,
+		"--report", reportPath, "--git", fixture.git, "--herdr", fixture.herdr)
+	waitFor(t, 3*time.Second, func() bool {
+		delta := logDelta(t, fixture.herdrLog, before)
+		return strings.Contains(delta, reported.ID) && strings.Contains(delta, "durable blocked report")
+	}, "monitor-forwarded typed report")
+	reportWake := logDelta(t, fixture.herdrLog, before)
+	if count := strings.Count(reportWake, "prompt w1:p1 "); count != 1 {
+		t.Fatalf("accepted report used duplicate direct fallback (%d prompts):\n%s", count, reportWake)
+	}
+}
+
+func TestCLIProgressWithoutMonitorIsNonfatalAndWritesNoTruth(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "Missing progress monitor")
+	task := fixture.createTask(t, mission.ID)
+	fixture.spawnTask(t, task.ID)
+	output := runCLI(t, "worker", "progress", task.ID, "--attempt", "1", "--phase", "investigating",
+		"--message", "starting")
+	if !strings.Contains(string(output), `"status": "unavailable"`) {
+		t.Fatalf("missing-monitor progress = %s", output)
+	}
+	if status := fixture.taskStatus(t, task.ID); status.State == store.StateReady || status.State == store.StateAttention {
+		t.Fatalf("progress created lifecycle truth: %+v", status)
+	}
+}
+
+func TestCLIConcurrentMonitorStartsConvergeAndStopCleansRuntime(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SOPHON_DATA_HOME", home)
+	binary := buildSophonBinary(t)
+	t.Cleanup(func() { _, _ = exec.Command(binary, "monitor", "stop").CombinedOutput() })
+	type result struct {
+		output []byte
+		err    error
+	}
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			command := exec.Command(binary, "monitor", "start")
+			output, err := command.CombinedOutput()
+			results <- result{output: output, err: err}
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		started := <-results
+		if started.err != nil || !strings.Contains(string(started.output), `"running": true`) {
+			t.Fatalf("concurrent monitor start = %s, %v", started.output, started.err)
+		}
+	}
+	statusCommand := exec.Command(binary, "monitor", "status", "--json")
+	statusOutput, err := statusCommand.CombinedOutput()
+	if err != nil {
+		t.Fatalf("monitor status: %v\n%s", err, statusOutput)
+	}
+	var status struct {
+		Running bool `json:"running"`
+		PID     int  `json:"pid"`
+	}
+	if err := json.Unmarshal(statusOutput, &status); err != nil || !status.Running || status.PID <= 0 {
+		t.Fatalf("monitor status = %s, %v", statusOutput, err)
+	}
+	stopCommand := exec.Command(binary, "monitor", "stop")
+	if output, err := stopCommand.CombinedOutput(); err != nil {
+		t.Fatalf("monitor stop: %v\n%s", err, output)
+	}
+	for _, path := range []string{filepath.Join(home, "state", "monitor", "runtime.json"),
+		filepath.Join(home, "state", "monitor", "rpc.sock")} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("monitor stop left %s: %v", path, err)
+		}
 	}
 }
 

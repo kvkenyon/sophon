@@ -67,6 +67,10 @@ func (f *Flow) renderBrief(homeDir string, mission store.Mission, task store.Tas
 	body.WriteString("- Do not submit completion from any attempt other than the one above.\n")
 	body.WriteString("- Do not put Sophon branding, task/attempt IDs, private paths, runtime details, or orchestration prose in commit messages; commits must read as ordinary public-quality product history.\n")
 	body.WriteString("\n## Completion contract\n\n")
+	body.WriteString("For meaningful phase transitions only, send optional non-authoritative progress with this data-home-pinned form; choose only the stable phases `investigating`, `implementing`, `testing`, `waiting`, or `blocked`, and keep the note concise:\n\n```bash\n")
+	fmt.Fprintf(&body, "%s=%s sophon worker progress %s --attempt %d --phase testing --message 'required validation started'\n",
+		datahome.OverrideEnv, shellQuote(homeDir), task.ID, attempt)
+	body.WriteString("```\n\nA missing monitor is nonfatal; continue to canonical completion or report publication.\n\n")
 	fmt.Fprintf(&body, "1. Commit at least one new descendant of `%s` on `%s` using a concise public-quality subject and product-focused body with no orchestration language.\n", baseSHA, branch)
 	body.WriteString("2. Run the required validation and ensure the Git worktree is clean.\n")
 	fmt.Fprintf(&body, "3. Write version 1 completion JSON to `%s` with exactly these fields: `version`, `status`, `summary`, `verification`, `changed_files`, and `risks`.\n", resultPath)

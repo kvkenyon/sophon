@@ -8,20 +8,28 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"log"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"sophon/internal/datahome"
 	"sophon/internal/domain"
 	"sophon/internal/flow"
 	"sophon/internal/herdr"
 	"sophon/internal/id"
+	"sophon/internal/monitor"
 	"sophon/internal/store"
 	runtimeprompts "sophon/prompts"
 )
 
-const version = "0.3.0-m3"
+const version = "0.4.0-m1"
 
 func main() {
 	if err := run(context.Background(), os.Args[1:]); err != nil {
@@ -49,6 +57,8 @@ func run(ctx context.Context, args []string) error {
 		return workerCommand(ctx, args[1:])
 	case "commander":
 		return commanderCommand(ctx, args[1:])
+	case "monitor":
+		return monitorCommand(ctx, args[1:])
 	case "verify-complete":
 		return verifyCompleteCommand(ctx, args[1:])
 	case "validate":
@@ -265,7 +275,10 @@ func workerCommand(ctx context.Context, args []string) error {
 	if len(args) >= 1 && args[0] == "report" {
 		return workerReport(ctx, args[1:])
 	}
-	return &exitError{2, errors.New("expected: sophon worker complete|report TASK --attempt N --head-sha SHA --result|--report FILE")}
+	if len(args) >= 1 && args[0] == "progress" {
+		return workerProgress(ctx, args[1:])
+	}
+	return &exitError{2, errors.New("expected: sophon worker complete|report|progress TASK [flags]")}
 }
 
 func workerComplete(ctx context.Context, args []string) error {
@@ -286,11 +299,7 @@ func workerComplete(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	// The result is durable. The commander wake is liveness only: a missing,
-	// dead, or unreachable target is a bounded diagnostic, never a failure.
-	if err := tools.flow().NotifyCommander(ctx, positional[0], *attempt); err != nil {
-		fmt.Fprintf(os.Stderr, "sophon: commander wake undelivered (completion is durable): %v\n", err)
-	}
+	notifyDurableChange(ctx, tools.flow(), positional[0], *attempt, monitor.ChangeCompletion)
 	return encode(map[string]any{"task_id": positional[0], "attempt": *attempt, "result_sha256": digest})
 }
 
@@ -312,10 +321,31 @@ func workerReport(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := tools.flow().NotifyCommanderReport(ctx, positional[0], *attempt); err != nil {
-		fmt.Fprintf(os.Stderr, "sophon: commander wake undelivered (report is durable): %v\n", err)
-	}
+	notifyDurableChange(ctx, tools.flow(), positional[0], *attempt, monitor.ChangeReport)
 	return encode(map[string]any{"task_id": positional[0], "attempt": *attempt, "report_sha256": digest})
+}
+
+func workerProgress(_ context.Context, args []string) error {
+	flags := flag.NewFlagSet("worker progress", flag.ContinueOnError)
+	attempt := flags.Int("attempt", 0, "task attempt")
+	phase := flags.String("phase", "", "stable worker phase")
+	message := flags.String("message", "", "optional bounded phase note")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 || *attempt < 1 || !monitor.ValidPhase(*phase) {
+		return errors.New("worker progress requires TASK --attempt N --phase investigating|implementing|testing|waiting|blocked")
+	}
+	home, err := datahome.AbsDir()
+	if err != nil {
+		return err
+	}
+	ack, deliveryErr := monitor.NewClient(home).Progress(positional[0], *attempt, *phase, *message)
+	if deliveryErr != nil {
+		fmt.Fprintf(os.Stderr, "sophon: progress notification unavailable (nonfatal): %v\n", deliveryErr)
+	}
+	return encode(ack)
 }
 
 func commanderCommand(ctx context.Context, args []string) error {
@@ -350,6 +380,292 @@ func commanderAttach(ctx context.Context, args []string) error {
 	return encode(registration)
 }
 
+type monitorForwarder struct{ flow *flow.Flow }
+
+func (f monitorForwarder) Forward(ctx context.Context, event monitor.Event) error {
+	if event.Kind == monitor.MethodProgress {
+		return f.flow.NotifyCommanderProgress(ctx, event.TaskID, event.Attempt, event.Phase, event.Note)
+	}
+	return f.flow.NotifyCommanderChange(ctx, event.TaskID, event.Attempt, event.Change)
+}
+
+func monitorCommand(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return &exitError{2, errors.New("expected: sophon monitor run|start|status|stop")}
+	}
+	switch args[0] {
+	case "run":
+		return monitorRun(ctx, args[1:])
+	case "start":
+		return monitorStart(ctx, args[1:])
+	case "status":
+		return monitorStatus(ctx, args[1:])
+	case "stop":
+		return monitorStop(ctx, args[1:])
+	default:
+		return &exitError{2, fmt.Errorf("unknown monitor command %q", args[0])}
+	}
+}
+
+func monitorRun(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("monitor run", flag.ContinueOnError)
+	backgroundChild := flags.Bool("background-child", false, "internal background child marker")
+	tools.bind(flags, "herdr")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 0 {
+		return errors.New("monitor run does not accept positional arguments")
+	}
+	home, err := datahome.AbsDir()
+	if err != nil {
+		return err
+	}
+	signalCtx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	var logOutput io.Writer = os.Stderr
+	if *backgroundChild {
+		logOutput = &boundedLogWriter{path: monitor.LogPath(home), limit: 256 << 10}
+	}
+	logger := log.New(logOutput, "sophon-monitor: ", log.LstdFlags|log.LUTC)
+	server := &monitor.Server{Home: home, Forwarder: monitorForwarder{flow: tools.flow()}, Logger: logger}
+	err = server.Run(signalCtx)
+	if *backgroundChild && errors.Is(err, monitor.ErrAlreadyRunning) {
+		return nil
+	}
+	return err
+}
+
+func monitorStart(_ context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("monitor start", flag.ContinueOnError)
+	tools.bind(flags, "herdr")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 0 {
+		return errors.New("monitor start does not accept positional arguments")
+	}
+	home, err := datahome.AbsDir()
+	if err != nil {
+		return err
+	}
+	if _, err := monitor.NewClient(home).Ping(); err == nil {
+		return encode(monitor.PublicState(home))
+	}
+	if err := monitor.EnsureRuntimeDir(home); err != nil {
+		return err
+	}
+	logFile, err := openMonitorLog(home)
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := launchMonitorChild(executable, home, tools.herdr, logFile); err != nil {
+		return err
+	}
+	launches := 1
+	lastLaunch := time.Now()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := monitor.NewClient(home).Ping(); err == nil {
+			return encode(monitor.PublicState(home))
+		}
+		// A start racing an authenticated stop can lose its first child to the
+		// still-live old generation. Once exact cleanup reaches stopped, launch
+		// a fresh contender; the startup lock still converges concurrent callers.
+		if launches < 3 && time.Since(lastLaunch) >= 750*time.Millisecond && monitor.PublicState(home).Status == "stopped" {
+			if err := launchMonitorChild(executable, home, tools.herdr, logFile); err != nil {
+				return err
+			}
+			launches++
+			lastLaunch = time.Now()
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+	return errors.New("monitor background process did not pass authenticated ping within 5s")
+}
+
+func launchMonitorChild(executable, home, herdrBinary string, logFile *os.File) error {
+	command := exec.Command(executable, "monitor", "run", "--background-child", "--herdr", herdrBinary)
+	command.Env = assignedDataHomeEnv(os.Environ(), home)
+	command.Stdin = nil
+	command.Stdout = logFile
+	command.Stderr = logFile
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("start monitor process: %w", err)
+	}
+	_ = command.Process.Release()
+	return nil
+}
+
+func monitorStatus(_ context.Context, args []string) error {
+	flags := flag.NewFlagSet("monitor status", flag.ContinueOnError)
+	jsonOutput := flags.Bool("json", false, "emit versioned JSON")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 0 {
+		return errors.New("monitor status does not accept positional arguments")
+	}
+	home, err := datahome.AbsDir()
+	if err != nil {
+		return err
+	}
+	status := monitor.PublicState(home)
+	if *jsonOutput {
+		return encode(status)
+	}
+	fmt.Printf("monitor %s (protocol %d)\n", status.Status, status.ProtocolVersion)
+	return nil
+}
+
+func monitorStop(_ context.Context, args []string) error {
+	flags := flag.NewFlagSet("monitor stop", flag.ContinueOnError)
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 0 {
+		return errors.New("monitor stop does not accept positional arguments")
+	}
+	home, err := datahome.AbsDir()
+	if err != nil {
+		return err
+	}
+	ack, err := monitor.NewClient(home).Shutdown()
+	if err != nil {
+		return err
+	}
+	if ack.Status != monitor.AckAccepted {
+		return fmt.Errorf("monitor shutdown %s: %s", ack.Status, ack.Detail)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status := monitor.PublicState(home)
+		_, runtimeErr := os.Lstat(monitor.RuntimePath(home))
+		_, socketErr := os.Lstat(monitor.SocketPath(home))
+		if !status.Running && status.Status == "stopped" && os.IsNotExist(runtimeErr) && os.IsNotExist(socketErr) {
+			return encode(ack)
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+	return errors.New("authenticated monitor shutdown was acknowledged but exact runtime files remain")
+}
+
+func openMonitorLog(home string) (*os.File, error) {
+	path := monitor.LogPath(home)
+	if err := validateMonitorLogTarget(path); err != nil {
+		return nil, err
+	}
+	if info, err := os.Stat(path); err == nil && info.Size() > 256<<10 {
+		_ = os.Remove(path + ".1")
+		if err := os.Rename(path, path+".1"); err != nil {
+			return nil, fmt.Errorf("rotate monitor log: %w", err)
+		}
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open monitor log: %w", err)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		return nil, fmt.Errorf("protect monitor log: %w", err)
+	}
+	return file, nil
+}
+
+func validateMonitorLogTarget(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect monitor log: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return errors.New("monitor log path is not a regular file")
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return errors.New("monitor log is not user-private")
+	}
+	return nil
+}
+
+type boundedLogWriter struct {
+	mu    sync.Mutex
+	path  string
+	limit int64
+}
+
+func (w *boundedLogWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := validateMonitorLogTarget(w.path); err != nil {
+		return 0, err
+	}
+	if info, err := os.Stat(w.path); err == nil && info.Size()+int64(len(data)) > w.limit {
+		_ = os.Remove(w.path + ".1")
+		if err := os.Rename(w.path, w.path+".1"); err != nil {
+			return 0, err
+		}
+	}
+	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return 0, err
+	}
+	written, writeErr := file.Write(data)
+	closeErr := file.Close()
+	if writeErr != nil {
+		return written, writeErr
+	}
+	return written, closeErr
+}
+
+func assignedDataHomeEnv(existing []string, home string) []string {
+	prefix := datahome.OverrideEnv + "="
+	result := make([]string, 0, len(existing)+1)
+	for _, value := range existing {
+		if !strings.HasPrefix(value, prefix) {
+			result = append(result, value)
+		}
+	}
+	return append(result, prefix+home)
+}
+
+func notifyDurableChange(ctx context.Context, f *flow.Flow, taskID string, attempt int, change string) {
+	home, err := datahome.AbsDir()
+	if err == nil {
+		var generation string
+		generation, err = monitor.CanonicalGeneration(home, taskID, attempt, change)
+		if err == nil {
+			var ack monitor.Ack
+			ack, err = monitor.NewClient(home).TaskChanged(taskID, attempt, change, generation)
+			if err == nil && (ack.Status == monitor.AckAccepted || ack.Status == monitor.AckCoalesced) {
+				return
+			}
+			if err == nil {
+				err = fmt.Errorf("monitor %s: %s", ack.Status, ack.Detail)
+			}
+		}
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sophon: notification monitor unavailable (durable %s is unaffected): %v\n", change, err)
+	}
+	if directErr := f.NotifyCommanderChange(ctx, taskID, attempt, change); directErr != nil {
+		fmt.Fprintf(os.Stderr, "sophon: commander wake undelivered (durable %s is unaffected): %v\n", change, directErr)
+	}
+}
+
 func verifyCompleteCommand(ctx context.Context, args []string) error {
 	tools := defaultTools()
 	flags := flag.NewFlagSet("verify-complete", flag.ContinueOnError)
@@ -368,6 +684,7 @@ func verifyCompleteCommand(ctx context.Context, args []string) error {
 	if err := encode(outcome); err != nil {
 		return err
 	}
+	notifyDurableChange(ctx, tools.flow(), positional[0], outcome.Attempt, monitor.ChangeVerification)
 	// Successful verification of a no-validation task is terminal worker
 	// evidence; retirement is quiet cleanup and never a verification failure.
 	return retireWorkerQuietly(ctx, tools.flow(), positional[0])
@@ -391,6 +708,7 @@ func validateCommand(ctx context.Context, args []string) error {
 	if err := encode(record); err != nil {
 		return err
 	}
+	notifyDurableChange(ctx, tools.flow(), positional[0], record.Attempt, monitor.ChangeValidation)
 	if !record.Passed {
 		return errors.New("validation failed")
 	}
@@ -424,6 +742,7 @@ func deliverCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	notifyDurableChange(ctx, tools.flow(), positional[0], delivered.Attempt, monitor.ChangeDelivery)
 	return encode(delivered)
 }
 
@@ -442,6 +761,7 @@ func releaseCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	notifyDurableChange(ctx, tools.flow(), positional[0], released.Attempt, monitor.ChangeRelease)
 	return encode(released)
 }
 
@@ -548,7 +868,11 @@ func usage() {
   sophon spawn TASK [--retry] [--herdr BIN] [--treehouse BIN] [--git BIN] [--herdr-session NAME]
   sophon worker complete TASK --attempt N --head-sha SHA --result FILE [--git BIN] [--herdr BIN]
   sophon worker report TASK --attempt N --head-sha SHA --report FILE [--git BIN] [--herdr BIN]
+  sophon worker progress TASK --attempt N --phase PHASE [--message NOTE]
   sophon commander attach [--pane ID] [--workspace ID] [--tab ID] [--herdr BIN] [--herdr-session NAME]
+  sophon monitor run|start [--herdr BIN]
+  sophon monitor status [--json]
+  sophon monitor stop
   sophon verify-complete TASK [--git BIN] [--treehouse BIN] [--herdr BIN]
   sophon validate TASK [--git BIN] [--herdr BIN]
   sophon deliver TASK --confirmed [--git BIN] [--gh-axi BIN]
