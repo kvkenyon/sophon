@@ -67,7 +67,11 @@ func (f *Flow) PublishResult(ctx context.Context, taskID string, attempt int, he
 	if err != nil {
 		return "", fmt.Errorf("publish worker result: %w", err)
 	}
-	store.AppendWake(taskID, fmt.Sprintf("ready: result published (attempt %d)", attempt))
+	state := "ready"
+	if spawn.Revision > 1 {
+		state = "correction-ready"
+	}
+	store.AppendWake(taskID, fmt.Sprintf("%s: result published (attempt %d)", state, attempt))
 	return digest, nil
 }
 
@@ -223,6 +227,15 @@ func (f *Flow) VerifyComplete(ctx context.Context, taskID string) (store.Outcome
 	if err != nil {
 		return store.Outcome{}, fmt.Errorf("verify attempt %d: %w", attempt, err)
 	}
+	if existing, err := store.ReadOutcome(task.MissionID, taskID, attempt); err == nil {
+		if existing.TaskID != taskID || existing.Attempt != attempt ||
+			(existing.Revision != 0 && existing.Revision != spawn.Revision) {
+			return store.Outcome{}, fmt.Errorf("%w: existing outcome identity does not match current revision", ErrEvidenceConflict)
+		}
+		return existing, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return store.Outcome{}, err
+	}
 	homeDir, err := datahome.Dir()
 	if err != nil {
 		return store.Outcome{}, err
@@ -253,7 +266,7 @@ func (f *Flow) VerifyComplete(ctx context.Context, taskID string) (store.Outcome
 		return store.Outcome{}, fmt.Errorf("completion branch %q does not match spawned branch %q", completion.Branch, spawn.Branch)
 	}
 	digest := sha256.Sum256(resultBytes)
-	outcome := store.Outcome{TaskID: taskID, Attempt: attempt, HeadSHA: completion.HeadSHA,
+	outcome := store.Outcome{TaskID: taskID, Attempt: attempt, Revision: spawn.Revision, HeadSHA: completion.HeadSHA,
 		Branch: completion.Branch, ResultSHA256: hex.EncodeToString(digest[:]), VerifiedAt: time.Now().UTC()}
 	if err := store.Publish(store.AttemptPath(homeDir, task.MissionID, taskID, attempt, "outcome.json"), outcome); err != nil {
 		return store.Outcome{}, fmt.Errorf("publish outcome: %w", err)

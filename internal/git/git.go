@@ -66,6 +66,36 @@ func (c *Client) CreateTaskBranch(ctx context.Context, worktreePath, branch stri
 	return c.Snapshot(ctx, worktreePath)
 }
 
+// CreateTaskBranchAt prepares a correction worker from the exact recorded
+// public branch head. Fetching is read-only at the public boundary; the new
+// private execution branch is created only after FETCH_HEAD matches baseSHA.
+func (c *Client) CreateTaskBranchAt(ctx context.Context, worktreePath, branch, publicBranch, baseSHA string) (Snapshot, error) {
+	if branch == "" || publicBranch == "" || !fullSHA.MatchString(baseSHA) {
+		return Snapshot{}, errors.New("private branch, public branch, and full correction base SHA are required")
+	}
+	status, err := c.output(ctx, worktreePath, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("inspect worktree cleanliness: %w", err)
+	}
+	if status != "" {
+		return Snapshot{Clean: false}, ErrDirtyTree
+	}
+	if _, err := c.output(ctx, worktreePath, "fetch", "--no-tags", "origin", "refs/heads/"+publicBranch); err != nil {
+		return Snapshot{}, fmt.Errorf("fetch correction base: %w", err)
+	}
+	fetched, err := c.output(ctx, worktreePath, "rev-parse", "FETCH_HEAD")
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("resolve fetched correction base: %w", err)
+	}
+	if !strings.EqualFold(fetched, baseSHA) {
+		return Snapshot{}, fmt.Errorf("%w: fetched public head %s, recorded correction base %s", ErrNotDescendant, fetched, baseSHA)
+	}
+	if _, err := c.output(ctx, worktreePath, "switch", "-c", branch, baseSHA); err != nil {
+		return Snapshot{}, fmt.Errorf("create correction branch %q: %w", branch, err)
+	}
+	return c.Snapshot(ctx, worktreePath)
+}
+
 // Snapshot records the full commit identity and branch at acquisition time.
 func (c *Client) Snapshot(ctx context.Context, worktreePath string) (Snapshot, error) {
 	head, err := c.output(ctx, worktreePath, "rev-parse", "HEAD")

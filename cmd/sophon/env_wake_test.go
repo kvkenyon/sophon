@@ -199,6 +199,46 @@ func TestCLIMonitorForwardsProgressCompletionAndReportWithoutDirectDuplicates(t 
 	if count := strings.Count(reportWake, "prompt w1:p1 "); count != 1 {
 		t.Fatalf("accepted report used duplicate direct fallback (%d prompts):\n%s", count, reportWake)
 	}
+
+	// The same JSON-RPC completion path must preserve the stronger
+	// correction-ready drain trigger for a later revision of one open PR.
+	continued := fixture.createTask(t, mission.ID, "--title", "Continued review", "--delivery", "pr")
+	fixture.spawnTask(t, continued.ID)
+	before = readLogLines(t, fixture.herdrLog)
+	fixture.completeWorker(t, mission.ID, continued.ID, 1)
+	waitFor(t, 3*time.Second, func() bool {
+		return strings.Contains(logDelta(t, fixture.herdrLog, before), "sophon verify-complete "+continued.ID)
+	}, "monitor-forwarded first-revision completion")
+	before = readLogLines(t, fixture.herdrLog)
+	fixture.verifyComplete(t, continued.ID)
+	waitFor(t, 3*time.Second, func() bool {
+		return strings.Contains(logDelta(t, fixture.herdrLog, before), "durable verification change")
+	}, "monitor-forwarded first-revision verification")
+	before = readLogLines(t, fixture.herdrLog)
+	runCLI(t, "deliver", continued.ID, "--confirmed", "--git", fixture.git, "--gh-axi", fixture.ghAxi)
+	waitFor(t, 3*time.Second, func() bool {
+		return strings.Contains(logDelta(t, fixture.herdrLog, before), "durable delivery change")
+	}, "monitor-forwarded first-revision delivery")
+	revisionJSON := runCLI(t, "revise", continued.ID,
+		"--reason", "Accepted feedback corrects the same behavior.",
+		"--objective", "Apply only the bounded correction beyond the current pull request head.",
+		"--herdr", fixture.herdr, "--treehouse", fixture.treehouse, "--git", fixture.git,
+		"--gh-axi", fixture.ghAxi, "--herdr-session", "fm-lab-cli-test")
+	var revision store.Spawn
+	if err := json.Unmarshal(revisionJSON, &revision); err != nil || revision.Revision != 2 || revision.Attempt != 2 {
+		t.Fatalf("monitor correction revision = %+v, %v", revision, err)
+	}
+	before = readLogLines(t, fixture.herdrLog)
+	fixture.completeWorker(t, mission.ID, continued.ID, 2)
+	waitFor(t, 3*time.Second, func() bool {
+		delta := logDelta(t, fixture.herdrLog, before)
+		return strings.Contains(delta, "derives correction-ready") &&
+			strings.Contains(delta, "sophon verify-complete "+continued.ID)
+	}, "monitor-forwarded correction completion")
+	correctionWake := logDelta(t, fixture.herdrLog, before)
+	if count := strings.Count(correctionWake, "prompt w1:p1 "); count != 1 {
+		t.Fatalf("accepted correction completion used duplicate direct fallback (%d prompts):\n%s", count, correctionWake)
+	}
 }
 
 func TestCLIProgressWithoutMonitorIsNonfatalAndWritesNoTruth(t *testing.T) {

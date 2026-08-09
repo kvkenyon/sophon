@@ -1,0 +1,10 @@
+{
+  "repository": "github.com/light-technology/backend",
+  "public_branch": "sophon/home-111-tesla-fleet-api-baseclient-taskf0bb/attempt-1",
+  "base_repository": "github.com/light-technology/backend",
+  "base_branch": "develop",
+  "pr_url": "https://github.com/light-technology/backend/pull/6818",
+  "pr_number": 6818,
+  "open_pr_head": "cfa1ef810d95f2a091b895f4fe21d8a0191cd3f5",
+  "verified_correction_head": "7a2143564c6ed044a04d549d0395e31e8762bb2f"
+}

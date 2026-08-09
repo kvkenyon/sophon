@@ -78,6 +78,7 @@ type Task struct {
 	DeliveryMode      domain.DeliveryMode `json:"delivery_mode"`
 	ValidationCommand string              `json:"validation_command,omitempty"`
 	CurrentAttempt    int                 `json:"current_attempt"`
+	CurrentRevision   int                 `json:"current_revision"`
 	CreatedAt         time.Time           `json:"created_at"`
 }
 
@@ -87,6 +88,7 @@ type Spawn struct {
 	TaskID       string        `json:"task_id"`
 	MissionID    string        `json:"mission_id"`
 	Attempt      int           `json:"attempt"`
+	Revision     int           `json:"revision"`
 	WorktreePath string        `json:"worktree_path"`
 	Branch       string        `json:"branch"`
 	BaseSHA      string        `json:"base_sha"`
@@ -102,6 +104,7 @@ type Spawn struct {
 type Outcome struct {
 	TaskID       string    `json:"task_id"`
 	Attempt      int       `json:"attempt"`
+	Revision     int       `json:"revision"`
 	HeadSHA      string    `json:"head_sha"`
 	Branch       string    `json:"branch"`
 	ResultSHA256 string    `json:"result_sha256"`
@@ -112,6 +115,7 @@ type Outcome struct {
 type Validation struct {
 	TaskID   string    `json:"task_id"`
 	Attempt  int       `json:"attempt"`
+	Revision int       `json:"revision"`
 	Command  string    `json:"command"`
 	HeadSHA  string    `json:"head_sha"`
 	ExitCode int       `json:"exit_code"`
@@ -136,26 +140,53 @@ func (s DeliveryState) Terminal() bool {
 
 // Delivery is the delivery intent-plus-receipt record for one attempt.
 type Delivery struct {
-	TaskID      string              `json:"task_id"`
-	Attempt     int                 `json:"attempt"`
-	Mode        domain.DeliveryMode `json:"mode"`
-	Repository  string              `json:"repository,omitempty"`
-	Branch      string              `json:"branch"`
-	HeadSHA     string              `json:"head_sha"`
-	State       DeliveryState       `json:"state"`
-	PRURL       string              `json:"pr_url,omitempty"`
-	PRNumber    int                 `json:"pr_number,omitempty"`
-	IntentAt    time.Time           `json:"intent_at"`
-	DeliveredAt *time.Time          `json:"delivered_at,omitempty"`
+	TaskID         string              `json:"task_id"`
+	Attempt        int                 `json:"attempt"`
+	Revision       int                 `json:"revision"`
+	Mode           domain.DeliveryMode `json:"mode"`
+	Repository     string              `json:"repository,omitempty"`
+	Branch         string              `json:"branch"`
+	HeadSHA        string              `json:"head_sha"`
+	PriorHeadSHA   string              `json:"prior_head_sha,omitempty"`
+	BaseRepository string              `json:"base_repository,omitempty"`
+	BaseBranch     string              `json:"base_branch,omitempty"`
+	State          DeliveryState       `json:"state"`
+	PRURL          string              `json:"pr_url,omitempty"`
+	PRNumber       int                 `json:"pr_number,omitempty"`
+	IntentAt       time.Time           `json:"intent_at"`
+	DeliveredAt    *time.Time          `json:"delivered_at,omitempty"`
 }
 
 // Release is the conditional lease-release receipt for one attempt.
 type Release struct {
 	TaskID      string    `json:"task_id"`
 	Attempt     int       `json:"attempt"`
+	Revision    int       `json:"revision"`
 	LeaseID     string    `json:"lease_id"`
 	LeaseHolder string    `json:"lease_holder"`
 	ReleasedAt  time.Time `json:"released_at"`
+}
+
+// Correction is immutable accepted intent for one correction revision. It is
+// published before allocating a worker copy. Public forge identity remains in
+// this typed record and is never copied into mutable task prose.
+type Correction struct {
+	Version        int       `json:"version"`
+	TaskID         string    `json:"task_id"`
+	MissionID      string    `json:"mission_id"`
+	Revision       int       `json:"revision"`
+	PriorRevision  int       `json:"prior_revision"`
+	PriorAttempt   int       `json:"prior_attempt"`
+	Reason         string    `json:"reason"`
+	Objective      string    `json:"objective"`
+	Repository     string    `json:"repository"`
+	PublicBranch   string    `json:"public_branch"`
+	PRURL          string    `json:"pr_url"`
+	PRNumber       int       `json:"pr_number"`
+	BaseRepository string    `json:"base_repository"`
+	BaseBranch     string    `json:"base_branch"`
+	BaseSHA        string    `json:"base_sha"`
+	AcceptedAt     time.Time `json:"accepted_at"`
 }
 
 // CommanderRegistration is the volatile wake and placement address of the
@@ -195,7 +226,7 @@ func TaskDir(home, missionID, taskID string) string {
 	return filepath.Join(MissionDir(home, missionID), "tasks", taskID)
 }
 
-// TaskPath is one task's intent record with the current-attempt token.
+// TaskPath is one task's accepted intent with current revision/attempt pointers.
 func TaskPath(home, missionID, taskID string) string {
 	return filepath.Join(TaskDir(home, missionID, taskID), "task.json")
 }
@@ -208,6 +239,17 @@ func AttemptDir(home, missionID, taskID string, attempt int) string {
 // AttemptPath names one typed record inside an attempt directory.
 func AttemptPath(home, missionID, taskID string, attempt int, name string) string {
 	return filepath.Join(AttemptDir(home, missionID, taskID, attempt), name)
+}
+
+// RevisionDir is one immutable product revision under a task. Attempts may be
+// retried within a revision, but only revise creates the next revision.
+func RevisionDir(home, missionID, taskID string, revision int) string {
+	return filepath.Join(TaskDir(home, missionID, taskID), "revisions", strconv.Itoa(revision))
+}
+
+// CorrectionPath names the immutable correction-intake record for a revision.
+func CorrectionPath(home, missionID, taskID string, revision int) string {
+	return filepath.Join(RevisionDir(home, missionID, taskID, revision), "correction.json")
 }
 
 // StateDir holds volatile wake lines and the shared-mutation lock.
@@ -358,7 +400,24 @@ func ReadSpawn(missionID, taskID string, attempt int) (Spawn, error) {
 	if err != nil {
 		return spawn, err
 	}
-	return spawn, read(AttemptPath(homeDir, missionID, taskID, attempt, "spawn.json"), &spawn)
+	if err := read(AttemptPath(homeDir, missionID, taskID, attempt, "spawn.json"), &spawn); err != nil {
+		return spawn, err
+	}
+	// Records written before explicit revisions map each historical attempt to
+	// its own immutable revision for read compatibility.
+	if spawn.Revision == 0 {
+		spawn.Revision = attempt
+	}
+	return spawn, nil
+}
+
+// CurrentRevision resolves the current revision token, including records
+// created before the explicit revision field existed.
+func CurrentRevision(task Task) int {
+	if task.CurrentRevision > 0 {
+		return task.CurrentRevision
+	}
+	return task.CurrentAttempt
 }
 
 // ReadResult strictly decodes one canonical completion record.
@@ -543,6 +602,50 @@ func ReadRelease(missionID, taskID string, attempt int) (Release, error) {
 	return release, nil
 }
 
+// ReadCorrection loads the immutable accepted correction intent for a task
+// revision.
+func ReadCorrection(missionID, taskID string, revision int) (Correction, error) {
+	var correction Correction
+	homeDir, err := home()
+	if err != nil {
+		return correction, err
+	}
+	return correction, read(CorrectionPath(homeDir, missionID, taskID, revision), &correction)
+}
+
+// CreateCorrection publishes immutable correction intent. An identical retry
+// is idempotent; any differing record at the same revision is refused.
+func CreateCorrection(correction Correction) error {
+	homeDir, err := home()
+	if err != nil {
+		return err
+	}
+	if correction.Version != 1 || correction.TaskID == "" || correction.MissionID == "" ||
+		correction.Revision < 2 || correction.PriorRevision < 1 || correction.PriorRevision >= correction.Revision ||
+		correction.PriorAttempt < 1 || strings.TrimSpace(correction.Reason) == "" ||
+		strings.TrimSpace(correction.Objective) == "" || correction.Repository == "" ||
+		correction.PublicBranch == "" || correction.PRURL == "" || correction.PRNumber < 1 ||
+		correction.BaseRepository == "" || correction.BaseBranch == "" || correction.BaseSHA == "" ||
+		correction.AcceptedAt.IsZero() {
+		return errors.New("correction intent is incomplete")
+	}
+	path := CorrectionPath(homeDir, correction.MissionID, correction.TaskID, correction.Revision)
+	encoded, err := json.MarshalIndent(correction, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode correction intent: %w", err)
+	}
+	encoded = append(encoded, '\n')
+	if existing, err := os.ReadFile(path); err == nil {
+		if bytes.Equal(existing, encoded) {
+			return nil
+		}
+		return errors.New("correction revision already has different immutable intent")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect correction intent: %w", err)
+	}
+	return PublishBytes(path, encoded)
+}
+
 // ReadCommander loads the volatile commander registration, mapping absence to
 // ErrNotFound like every other record. Callers must treat the value as a
 // best-effort notification address, never as state.
@@ -599,8 +702,8 @@ func CreateTask(task Task) error {
 	if task.DeliveryMode != domain.DeliveryBranch && task.DeliveryMode != domain.DeliveryPR {
 		return fmt.Errorf("task intent has unknown delivery mode %q", task.DeliveryMode)
 	}
-	if task.CurrentAttempt != 0 || task.CreatedAt.IsZero() {
-		return errors.New("new task intent requires attempt zero and a creation time")
+	if task.CurrentAttempt != 0 || task.CurrentRevision != 0 || task.CreatedAt.IsZero() {
+		return errors.New("new task intent requires attempt/revision zero and a creation time")
 	}
 	if err := publicsurface.TaskTitle(task.Title); err != nil {
 		return fmt.Errorf("validate task public title: %w", err)
@@ -610,6 +713,9 @@ func CreateTask(task Task) error {
 	}
 	if err := os.MkdirAll(filepath.Join(TaskDir(homeDir, task.MissionID, task.ID), "attempts"), 0o700); err != nil {
 		return fmt.Errorf("create task directory: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(TaskDir(homeDir, task.MissionID, task.ID), "revisions"), 0o700); err != nil {
+		return fmt.Errorf("create task revision directory: %w", err)
 	}
 	return Publish(TaskPath(homeDir, task.MissionID, task.ID), task)
 }
@@ -676,14 +782,25 @@ func ListTasks(missionID string) ([]Task, error) {
 	return tasks, nil
 }
 
-// BumpAttempt increments the task's current-attempt token and republishes the
-// intent record. The caller must hold the shared-mutation lock.
-func BumpAttempt(missionID, taskID string) (Task, error) {
+// AdvanceTask increments the current attempt and optionally starts the next
+// product revision. The caller must hold the shared-mutation lock. Retry uses
+// newRevision=false; correction intake is the sole newRevision=true owner.
+func AdvanceTask(missionID, taskID string, newRevision bool) (Task, error) {
 	task, err := ReadTask(missionID, taskID)
 	if err != nil {
 		return Task{}, err
 	}
+	priorAttempt := task.CurrentAttempt
 	task.CurrentAttempt++
+	if task.CurrentRevision == 0 {
+		if newRevision && priorAttempt > 0 {
+			task.CurrentRevision = priorAttempt + 1
+		} else {
+			task.CurrentRevision = 1
+		}
+	} else if newRevision {
+		task.CurrentRevision++
+	}
 	homeDir, err := home()
 	if err != nil {
 		return Task{}, err
@@ -691,26 +808,85 @@ func BumpAttempt(missionID, taskID string) (Task, error) {
 	return task, Publish(TaskPath(homeDir, missionID, taskID), task)
 }
 
+// BumpAttempt retains the retry-compatible store API.
+func BumpAttempt(missionID, taskID string) (Task, error) {
+	return AdvanceTask(missionID, taskID, false)
+}
+
+// ListAttemptNumbers returns all immutable attempt directories in numeric
+// order, ignoring unrelated entries.
+func ListAttemptNumbers(missionID, taskID string) ([]int, error) {
+	homeDir, err := home()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(filepath.Join(TaskDir(homeDir, missionID, taskID), "attempts"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list task attempts: %w", err)
+	}
+	var attempts []int
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		attempt, err := strconv.Atoi(entry.Name())
+		if err == nil && attempt > 0 {
+			attempts = append(attempts, attempt)
+		}
+	}
+	sort.Ints(attempts)
+	return attempts, nil
+}
+
 // Derived task states. Anything beyond active is terminal for the store
 // layer; active is augmented by the caller with live pane observation.
 const (
-	StateQueued          = "queued"
-	StateDelivered       = "delivered"
-	StateVerified        = "verified"
-	StateReady           = "ready"
-	StateAttention       = "attention"
-	StateInvalidEvidence = "invalid-evidence"
-	StateReleased        = "released"
-	StateActive          = "active"
+	StateQueued                     = "queued"
+	StateDelivered                  = "delivered"
+	StateVerified                   = "verified"
+	StateReady                      = "ready"
+	StateAttention                  = "attention"
+	StateInvalidEvidence            = "invalid-evidence"
+	StateReleased                   = "released"
+	StateActive                     = "active"
+	StateAwaitingFeedback           = "awaiting-feedback"
+	StateCorrectionPending          = "correction-pending"
+	StateCorrectionActive           = "correction-under-way"
+	StateCorrectionReady            = "correction-ready"
+	StateCorrectionVerified         = "correction-verified"
+	StateCorrectionAwaitingDelivery = "correction-awaiting-delivery"
+	StateCorrectionValidationFailed = "correction-validation-failed"
+	StateReconciliation             = "reconciliation"
+	StateMerged                     = "merged"
 )
+
+// AttemptStatus is immutable derived history for one attempt.
+type AttemptStatus struct {
+	Attempt       int    `json:"attempt"`
+	Revision      int    `json:"revision"`
+	State         string `json:"state"`
+	Detail        string `json:"detail,omitempty"`
+	DeliveryState string `json:"delivery_state,omitempty"`
+}
+
+// RevisionStatus groups retries under the one product revision they serve.
+type RevisionStatus struct {
+	Revision int             `json:"revision"`
+	Attempts []AttemptStatus `json:"attempts"`
+}
 
 // TaskStatus is the read-time derivation of one task's lifecycle from its
 // canonical records alone.
 type TaskStatus struct {
-	Task    Task   `json:"task"`
-	Attempt int    `json:"attempt"`
-	State   string `json:"state"`
-	Detail  string `json:"detail,omitempty"`
+	Task      Task             `json:"task"`
+	Attempt   int              `json:"attempt"`
+	Revision  int              `json:"revision"`
+	State     string           `json:"state"`
+	Detail    string           `json:"detail,omitempty"`
+	Revisions []RevisionStatus `json:"revisions,omitempty"`
 	// DeliveryState preserves whether released historical work had previously
 	// been delivered. Release itself never implies delivery.
 	DeliveryState string `json:"delivery_state,omitempty"`
@@ -722,7 +898,8 @@ type TaskStatus struct {
 // completion derive delivered, verified, and ready respectively. Otherwise the
 // task is active. Fenced attempts and wake lines never influence the result.
 func Derive(task Task) (TaskStatus, error) {
-	status := TaskStatus{Task: task, Attempt: task.CurrentAttempt, State: StateQueued}
+	revision := CurrentRevision(task)
+	status := TaskStatus{Task: task, Attempt: task.CurrentAttempt, Revision: revision, State: StateQueued}
 	if task.CurrentAttempt < 1 {
 		return status, nil
 	}
@@ -731,6 +908,14 @@ func Derive(task Task) (TaskStatus, error) {
 		return status, err
 	}
 	status.State = StateActive
+	correction := false
+	if revision > 1 {
+		if _, err := ReadCorrection(task.MissionID, task.ID, revision); err == nil {
+			correction = true
+		} else if !errors.Is(err, ErrNotFound) {
+			return status, err
+		}
+	}
 	record := func(name string) (bool, error) {
 		return exists(AttemptPath(homeDir, task.MissionID, task.ID, task.CurrentAttempt, name))
 	}
@@ -745,6 +930,7 @@ func Derive(task Task) (TaskStatus, error) {
 		}
 		spawn, err := ReadSpawn(task.MissionID, task.ID, task.CurrentAttempt)
 		if err != nil || released.TaskID != task.ID || released.Attempt != task.CurrentAttempt ||
+			(released.Revision != 0 && released.Revision != spawn.Revision) ||
 			released.LeaseID != spawn.LeaseID || released.LeaseHolder != spawn.LeaseHolder || released.ReleasedAt.IsZero() {
 			status.State = StateInvalidEvidence
 			status.Detail = "current-attempt release identity does not match spawn receipt"
@@ -806,6 +992,12 @@ func Derive(task Task) (TaskStatus, error) {
 		if err != nil {
 			return status, err
 		}
+		if delivery.TaskID != task.ID || delivery.Attempt != task.CurrentAttempt ||
+			(delivery.Revision != 0 && delivery.Revision != revision) {
+			status.State = StateInvalidEvidence
+			status.Detail = "delivery identity does not match current revision/attempt"
+			return status, nil
+		}
 		if delivery.State.Terminal() {
 			status.State = StateDelivered
 			status.Detail = string(delivery.State)
@@ -815,15 +1007,93 @@ func Derive(task Task) (TaskStatus, error) {
 	if present, err := record("outcome.json"); err != nil {
 		return status, err
 	} else if present {
+		outcome, err := ReadOutcome(task.MissionID, task.ID, task.CurrentAttempt)
+		if err != nil || outcome.TaskID != task.ID || outcome.Attempt != task.CurrentAttempt ||
+			(outcome.Revision != 0 && outcome.Revision != revision) {
+			status.State = StateInvalidEvidence
+			status.Detail = "outcome identity does not match current revision/attempt"
+			return status, nil
+		}
+		if correction {
+			if strings.TrimSpace(task.ValidationCommand) == "" {
+				status.State = StateCorrectionAwaitingDelivery
+				status.Detail = "correction verified; awaiting separate delivery confirmation"
+				return status, nil
+			}
+			validation, validationErr := ReadValidation(task.MissionID, task.ID, task.CurrentAttempt)
+			if errors.Is(validationErr, ErrNotFound) {
+				status.State = StateCorrectionVerified
+				status.Detail = "correction verified; pending configured validation"
+				return status, nil
+			}
+			if validationErr != nil {
+				return status, validationErr
+			}
+			if !validation.Passed {
+				status.State = StateCorrectionValidationFailed
+				status.Detail = "correction validation failed; worker path and evidence preserved"
+				return status, nil
+			}
+			status.State = StateCorrectionAwaitingDelivery
+			status.Detail = "correction verified and validated; awaiting separate delivery confirmation"
+			return status, nil
+		}
 		status.State = StateVerified
 		return status, nil
 	}
 	if resultPresent {
-		status.State = StateReady
+		if correction {
+			status.State = StateCorrectionReady
+		} else {
+			status.State = StateReady
+		}
 		status.Detail = "pending verification"
 		return status, nil
 	}
+	if correction {
+		if _, err := ReadSpawn(task.MissionID, task.ID, task.CurrentAttempt); errors.Is(err, ErrNotFound) {
+			status.State = StateCorrectionPending
+			status.Detail = "immutable correction intent published; allocation pending"
+		} else if err != nil {
+			return status, err
+		} else {
+			status.State = StateCorrectionActive
+		}
+	}
 	return status, nil
+}
+
+// DeriveHistory returns every immutable attempt grouped by product revision.
+// It never reads forge state; Flow augments only the current revision with live
+// PR observation.
+func DeriveHistory(task Task) ([]RevisionStatus, error) {
+	attempts, err := ListAttemptNumbers(task.MissionID, task.ID)
+	if err != nil {
+		return nil, err
+	}
+	var revisions []RevisionStatus
+	for _, attempt := range attempts {
+		copy := task
+		copy.CurrentAttempt = attempt
+		if spawn, err := ReadSpawn(task.MissionID, task.ID, attempt); err == nil {
+			copy.CurrentRevision = spawn.Revision
+		} else if !errors.Is(err, ErrNotFound) {
+			return nil, err
+		} else {
+			copy.CurrentRevision = attempt
+		}
+		derived, err := Derive(copy)
+		if err != nil {
+			return nil, err
+		}
+		entry := AttemptStatus{Attempt: attempt, Revision: derived.Revision, State: derived.State,
+			Detail: derived.Detail, DeliveryState: derived.DeliveryState}
+		if len(revisions) == 0 || revisions[len(revisions)-1].Revision != entry.Revision {
+			revisions = append(revisions, RevisionStatus{Revision: entry.Revision})
+		}
+		revisions[len(revisions)-1].Attempts = append(revisions[len(revisions)-1].Attempts, entry)
+	}
+	return revisions, nil
 }
 
 // AppendWake adds one notification line to the task's volatile wake file.

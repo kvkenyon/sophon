@@ -19,12 +19,12 @@ import (
 // herdrLab provisions an isolated named Herdr lab session through the
 // brief-mandated helper and fails closed on any unsafe name. It never touches
 // the default fleet session.
-func herdrLab(t *testing.T) (helper, sessionName string) {
+func herdrLab(t *testing.T) (herdrBinary, sessionName string) {
 	t.Helper()
 	if os.Getenv("SOPHON_HERDR_LAB") != "1" {
 		t.Skip("set SOPHON_HERDR_LAB=1 to run the real Herdr lab lifecycle proof")
 	}
-	helper = os.Getenv("HERDR_LAB_HELPER")
+	helper := os.Getenv("HERDR_LAB_HELPER")
 	if helper == "" {
 		t.Skip("set HERDR_LAB_HELPER to the fm-herdr-lab.sh path")
 	}
@@ -32,9 +32,9 @@ func herdrLab(t *testing.T) (helper, sessionName string) {
 		if !strings.HasPrefix(preprovisioned, "fm-lab-") || preprovisioned == "default" {
 			t.Fatalf("unsafe preprovisioned Herdr lab session %q", preprovisioned)
 		}
-		return helper, preprovisioned
+		return labHerdrBinary(t, helper, preprovisioned), preprovisioned
 	}
-	nameOutput, err := exec.Command(helper, "name", "sophon-notification-monitor").Output()
+	nameOutput, err := exec.Command(helper, "name", "sophon-existing-pr-revisions").Output()
 	if err != nil {
 		t.Fatalf("derive Herdr lab session name: %v", err)
 	}
@@ -42,15 +42,15 @@ func herdrLab(t *testing.T) (helper, sessionName string) {
 	if !strings.HasPrefix(sessionName, "fm-lab-") || sessionName == "default" {
 		t.Fatalf("unsafe Herdr lab session %q", sessionName)
 	}
-	if output, err := exec.Command(helper, "provision", sessionName).CombinedOutput(); err != nil {
-		t.Fatalf("provision Herdr lab: %v: %s", err, output)
-	}
 	t.Cleanup(func() {
 		if output, err := exec.Command(helper, "teardown", sessionName).CombinedOutput(); err != nil {
 			t.Errorf("teardown Herdr lab: %v: %s", err, output)
 		}
 	})
-	return helper, sessionName
+	if output, err := exec.Command(helper, "provision", sessionName).CombinedOutput(); err != nil {
+		t.Fatalf("provision Herdr lab: %v: %s", err, output)
+	}
+	return labHerdrBinary(t, helper, sessionName), sessionName
 }
 
 // labHerdrBinary makes every test-specific Herdr invocation pass through the
@@ -62,18 +62,14 @@ func labHerdrBinary(t *testing.T, helper, sessionName string) string {
 	path := filepath.Join(t.TempDir(), "herdr-lab")
 	script := fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
-args=()
-while (($#)); do
-  if [[ "$1" == "--session" ]]; then
-    shift
-    (($#)) && shift
-    continue
-  fi
-  args+=("$1")
-  shift
-done
-exec %s run %s "${args[@]}"
-`, shellQuote(helper), shellQuote(sessionName))
+args=("$@")
+n=${#args[@]}
+if (( n < 3 )) || [[ "${args[n-2]}" != "--session" ]] || [[ "${args[n-1]}" != %s ]]; then
+  echo "lab wrapper requires exact trailing --session" >&2
+  exit 97
+fi
+exec %s run %s "${args[@]:0:n-2}"
+`, shellQuote(sessionName), shellQuote(helper), shellQuote(sessionName))
 	writeCLIFile(t, path, script, 0o700)
 	return path
 }
@@ -85,16 +81,11 @@ exec %s run %s "${args[@]}"
 //
 //	SOPHON_HERDR_LAB=1 HERDR_LAB_HELPER=/path/to/fm-herdr-lab.sh go test ./cmd/sophon -run TestLiveWorkerLifecycle
 func TestLiveWorkerLifecycleInHerdrLab(t *testing.T) {
-	helper, sessionName := herdrLab(t)
+	herdrBinary, sessionName := herdrLab(t)
 	treehouseBinary, err := exec.LookPath("treehouse")
 	if err != nil {
 		t.Skip("treehouse binary not on PATH")
 	}
-	_, err = exec.LookPath("herdr")
-	if err != nil {
-		t.Skip("herdr binary not on PATH")
-	}
-	herdrBinary := labHerdrBinary(t, helper, sessionName)
 
 	home := t.TempDir()
 	t.Setenv("SOPHON_DATA_HOME", home)
@@ -141,11 +132,80 @@ func TestLiveWorkerLifecycleInHerdrLab(t *testing.T) {
 		t.Fatalf("status omitted the spawned task: %s", status)
 	}
 
-	// Stop the pane through the herdr CLI in the lab session.
+	// Stop the pane through the helper-routed Herdr wrapper in the lab session.
 	if output, err := exec.Command(herdrBinary, "tab", "close", spawned.Pane.TabID,
 		"--session", sessionName).CombinedOutput(); err != nil {
 		t.Fatalf("stop worker pane: %v: %s", err, output)
 	}
+}
+
+// TestLiveCorrectionRevisionPlacementInHerdrLab proves that the correction
+// launch path uses the exact already-public PR head in a real named Herdr
+// session, then publishes ordinary worker completion and retires that exact
+// correction tab. Git and forge effects are guarded local fakes only.
+func TestLiveCorrectionRevisionPlacementInHerdrLab(t *testing.T) {
+	herdrBinary, sessionName := herdrLab(t)
+	treehouseBinary, err := exec.LookPath("treehouse")
+	if err != nil {
+		t.Skip("treehouse binary not on PATH")
+	}
+	fixture := newCLIFixture(t)
+	fixture.herdr = herdrBinary
+	fixture.treehouse = treehouseBinary
+	adapter := herdr.NewCommandAdapter(herdrBinary, sessionName, "sophon")
+	ctx := context.Background()
+
+	mission := fixture.createMission(t, "Exact open PR correction placement")
+	task := fixture.createTask(t, mission.ID, "--delivery", "pr")
+	spawnJSON := runCLI(t, "spawn", task.ID, "--herdr", herdrBinary, "--treehouse", treehouseBinary,
+		"--git", fixture.git, "--herdr-session", sessionName)
+	var firstSpawn store.Spawn
+	if err := json.Unmarshal(spawnJSON, &firstSpawn); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Cancel(ctx, firstSpawn.Pane); err != nil {
+		t.Fatalf("quiet first worker: %v", err)
+	}
+	runCLIGit(t, firstSpawn.WorktreePath, "checkout", "--", ".")
+	runCLIGit(t, firstSpawn.WorktreePath, "clean", "-fd")
+	firstHead := fixture.completeWorker(t, mission.ID, task.ID, 1)
+	fixture.verifyComplete(t, task.ID)
+	waitFor(t, 30*time.Second, func() bool {
+		state, observeErr := adapter.Observe(ctx, firstSpawn.Pane)
+		return observeErr == nil && state == herdr.StateLost
+	}, "first worker tab retirement")
+	runCLI(t, "deliver", task.ID, "--confirmed", "--git", fixture.git, "--gh-axi", fixture.ghAxi)
+
+	correctionJSON := runCLI(t, "revise", task.ID,
+		"--reason", "Accepted feedback corrects the same behavior.",
+		"--objective", "Apply only the bounded correction beyond the current PR head.",
+		"--herdr", herdrBinary, "--treehouse", treehouseBinary, "--git", fixture.git,
+		"--gh-axi", fixture.ghAxi, "--herdr-session", sessionName)
+	var correctionSpawn store.Spawn
+	if err := json.Unmarshal(correctionJSON, &correctionSpawn); err != nil {
+		t.Fatal(err)
+	}
+	if correctionSpawn.Revision != 2 || correctionSpawn.Attempt != 2 ||
+		!strings.EqualFold(correctionSpawn.BaseSHA, firstHead) ||
+		!strings.EqualFold(runCLIGit(t, correctionSpawn.WorktreePath, "rev-parse", "HEAD"), firstHead) {
+		t.Fatalf("live correction placement = %+v, exact PR head %s", correctionSpawn, firstHead)
+	}
+	if correctionSpawn.Pane.SessionName != sessionName || correctionSpawn.Pane.TabID == firstSpawn.Pane.TabID {
+		t.Fatalf("live correction pane = %+v, first = %+v", correctionSpawn.Pane, firstSpawn.Pane)
+	}
+	if err := adapter.Cancel(ctx, correctionSpawn.Pane); err != nil {
+		t.Fatalf("quiet correction worker: %v", err)
+	}
+	runCLIGit(t, correctionSpawn.WorktreePath, "checkout", "--", ".")
+	runCLIGit(t, correctionSpawn.WorktreePath, "clean", "-fd")
+	fixture.completeWorker(t, mission.ID, task.ID, 2)
+	fixture.verifyComplete(t, task.ID)
+	waitFor(t, 30*time.Second, func() bool {
+		state, observeErr := adapter.Observe(ctx, correctionSpawn.Pane)
+		return observeErr == nil && state == herdr.StateLost
+	}, "correction worker tab retirement")
+	runCLI(t, "release", task.ID, "--attempt", "1", "--treehouse", treehouseBinary)
+	runCLI(t, "release", task.ID, "--attempt", "2", "--treehouse", treehouseBinary)
 }
 
 // TestLiveCommanderWakeGroupingAndRetirementInHerdrLab proves the full fix
@@ -157,16 +217,11 @@ func TestLiveWorkerLifecycleInHerdrLab(t *testing.T) {
 //
 //	SOPHON_HERDR_LAB=1 HERDR_LAB_HELPER=/path/to/fm-herdr-lab.sh go test ./cmd/sophon -run TestLiveCommanderWake -timeout 20m
 func TestLiveCommanderWakeGroupingAndRetirementInHerdrLab(t *testing.T) {
-	helper, sessionName := herdrLab(t)
+	herdrBinary, sessionName := herdrLab(t)
 	treehouseBinary, err := exec.LookPath("treehouse")
 	if err != nil {
 		t.Skip("treehouse binary not on PATH")
 	}
-	_, err = exec.LookPath("herdr")
-	if err != nil {
-		t.Skip("herdr binary not on PATH")
-	}
-	herdrBinary := labHerdrBinary(t, helper, sessionName)
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git binary is required")
 	}
@@ -398,14 +453,10 @@ func waitFor(t *testing.T, deadline time.Duration, condition func() bool, what s
 //
 //	SOPHON_HERDR_LAB=1 HERDR_LAB_HELPER=/path/to/fm-herdr-lab.sh go test ./cmd/sophon -run TestLiveCommanderDrains -timeout 20m
 func TestLiveCommanderDrainsReadyWorkInHerdrLab(t *testing.T) {
-	_, sessionName := herdrLab(t)
+	herdrBinary, sessionName := herdrLab(t)
 	treehouseBinary, err := exec.LookPath("treehouse")
 	if err != nil {
 		t.Skip("treehouse binary not on PATH")
-	}
-	herdrBinary, err := exec.LookPath("herdr")
-	if err != nil {
-		t.Skip("herdr binary not on PATH")
 	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git binary is required")

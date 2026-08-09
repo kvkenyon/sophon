@@ -34,6 +34,17 @@ func (g *fakeGit) CreateTaskBranch(_ context.Context, worktree, branch string) (
 	return gitcontrol.Snapshot{Head: g.baseSHA, Branch: branch, Clean: true}, nil
 }
 
+func (g *fakeGit) CreateTaskBranchAt(_ context.Context, worktree, branch, publicBranch, baseSHA string) (gitcontrol.Snapshot, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.createErr != nil {
+		return gitcontrol.Snapshot{}, g.createErr
+	}
+	g.branch = branch
+	g.baseSHA = baseSHA
+	return gitcontrol.Snapshot{Head: baseSHA, Branch: branch, Clean: true}, nil
+}
+
 func (g *fakeGit) Snapshot(_ context.Context, worktree string) (gitcontrol.Snapshot, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -157,11 +168,13 @@ func (p *fakePanes) Submit(_ context.Context, session herdr.Session, message str
 
 // fakeDeliveryGit implements DeliveryGit.
 type fakeDeliveryGit struct {
-	repository  string
-	verifyErr   error
-	repositoryE error
-	messages    []string
-	messagesErr error
+	repository    string
+	verifyErr     error
+	repositoryE   error
+	messages      []string
+	messagesErr   error
+	fetchErr      error
+	descendantErr error
 }
 
 func (g *fakeDeliveryGit) CommitMessages(context.Context, string, string, string) ([]string, error) {
@@ -178,6 +191,14 @@ func (g *fakeDeliveryGit) VerifyHead(context.Context, string, string, string) er
 	return g.verifyErr
 }
 
+func (g *fakeDeliveryGit) FetchBranch(context.Context, string, string, string) error {
+	return g.fetchErr
+}
+
+func (g *fakeDeliveryGit) VerifyStrictDescendant(context.Context, string, string, string) error {
+	return g.descendantErr
+}
+
 func (g *fakeDeliveryGit) Repository(context.Context, string) (string, error) {
 	if g.repositoryE != nil {
 		return "", g.repositoryE
@@ -187,19 +208,23 @@ func (g *fakeDeliveryGit) Repository(context.Context, string) (string, error) {
 
 // fakeDeliveryRemote implements DeliveryRemote with a scriptable PR flow.
 type fakeDeliveryRemote struct {
-	mu           sync.Mutex
-	pushErr      error
-	headSHA      string
-	headErr      error
-	pr           *delivery.PullRequest
-	create       delivery.PullRequest
-	createErr    error
-	input        delivery.PullRequestInput
-	branch       string
-	branchExists bool
-	pushes       int
-	creates      int
-	finds        int
+	mu                  sync.Mutex
+	pushErr             error
+	fastForwardWriteErr error
+	headSHA             string
+	headErr             error
+	pr                  *delivery.PullRequest
+	create              delivery.PullRequest
+	createErr           error
+	input               delivery.PullRequestInput
+	branch              string
+	branchExists        bool
+	pushes              int
+	creates             int
+	finds               int
+	fastForwards        int
+	observed            *delivery.PullRequest
+	defaultBranch       string
 }
 
 func (r *fakeDeliveryRemote) Push(_ context.Context, _, _, branch, headSHA string) error {
@@ -214,11 +239,36 @@ func (r *fakeDeliveryRemote) Push(_ context.Context, _, _, branch, headSHA strin
 	return r.pushErr
 }
 
+func (r *fakeDeliveryRemote) PushFastForward(_ context.Context, _, _, branch, baseSHA, headSHA string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fastForwards++
+	if r.pushErr == nil {
+		r.branch = branch
+		r.headSHA = headSHA
+		r.branchExists = true
+		if r.observed != nil {
+			r.observed.HeadSHA = headSHA
+		}
+		if r.pr != nil {
+			r.pr.HeadSHA = headSHA
+		}
+	}
+	if r.fastForwardWriteErr != nil {
+		return r.fastForwardWriteErr
+	}
+	return r.pushErr
+}
+
 func (r *fakeDeliveryRemote) FindPullRequest(context.Context, string, string, string, string) (*delivery.PullRequest, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.finds++
-	return r.pr, nil
+	if r.pr == nil {
+		return nil, nil
+	}
+	copy := r.normalized(*r.pr)
+	return &copy, nil
 }
 
 func (r *fakeDeliveryRemote) CreatePullRequest(_ context.Context, in delivery.PullRequestInput) (delivery.PullRequest, error) {
@@ -229,7 +279,52 @@ func (r *fakeDeliveryRemote) CreatePullRequest(_ context.Context, in delivery.Pu
 	if r.createErr != nil {
 		return delivery.PullRequest{}, r.createErr
 	}
-	return r.create, nil
+	created := r.normalized(r.create)
+	r.observed = &created
+	return created, nil
+}
+
+func (r *fakeDeliveryRemote) ObservePullRequest(context.Context, string, int) (delivery.PullRequest, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.observed != nil {
+		return r.normalized(*r.observed), nil
+	}
+	if r.pr != nil {
+		return r.normalized(*r.pr), nil
+	}
+	return r.normalized(r.create), nil
+}
+
+func (r *fakeDeliveryRemote) DefaultBranch(context.Context, string, string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.defaultBranch == "" {
+		return "main", nil
+	}
+	return r.defaultBranch, nil
+}
+
+func (r *fakeDeliveryRemote) normalized(pr delivery.PullRequest) delivery.PullRequest {
+	if pr.Repository == "" {
+		pr.Repository = testRepo
+	}
+	if pr.Branch == "" {
+		pr.Branch = r.branch
+	}
+	if pr.HeadSHA == "" {
+		pr.HeadSHA = r.headSHA
+	}
+	if pr.BaseRepository == "" {
+		pr.BaseRepository = testRepo
+	}
+	if pr.BaseBranch == "" {
+		pr.BaseBranch = "main"
+	}
+	if pr.State == "" {
+		pr.State = delivery.PullRequestOpen
+	}
+	return pr
 }
 
 func (r *fakeDeliveryRemote) BranchHead(context.Context, string, string, string) (string, bool, error) {

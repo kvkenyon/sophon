@@ -31,8 +31,9 @@ no managed runtime, no resume machinery. Its contract:
   pending configured validation run), then reconcile attention items the
   queue does not cover (`attention`, `invalid-evidence`, lost, or unknown-pane
   tasks), then report. Normal status is operational and filters exact
-  current-attempt releases; `status --all` provides durable cleanup/delivery
-  history without treating release as delivery.
+  ordinary released work while keeping exact open PRs operational;
+  `status --all` provides the complete revision/attempt/cleanup/delivery chain
+  without treating release as delivery.
 - **Outcomes, not mechanics.** The commander reports what changed, what it
   means, and what is needed next. Wake lines in `~/.sophon/state/`, the
   volatile `state/commander.json` registration, and worker notification prose
@@ -45,9 +46,16 @@ no managed runtime, no resume machinery. Its contract:
   commander drains every derived verify-complete/validate action to a fixed
   point before reporting or waiting, and never reports a task as ready for
   its own verification.
-- **Attempt fencing.** Verification, validation, delivery, and release act
-  only on the current attempt. `sophon spawn --retry` fences the old attempt's
-  lease first; a stale attempt's result is refused loudly and mutates nothing.
+- **Revision and attempt fencing.** `spawn --retry` replaces an execution only
+  within the current revision. `sophon revise` alone accepts bounded
+  same-contract feedback over an exact open-PR head and creates the next
+  immutable revision of the same task. Stale attempt/revision evidence is
+  preserved and cannot verify, validate, deliver, or release current work.
+- **Open PR continuation.** Same-contract feedback on an open exact PR uses a
+  correction revision and, after a separately confirmed delivery, an ordinary
+  fast-forward of the same public branch/PR. Unrelated expansion is a new task;
+  merged is terminal; closed-unmerged requires an operator reopen-or-replace
+  decision; identity or head drift requires reconciliation.
 - **Typed attention and safe steering.** A valid current report preserves the
   attempt and dirty work and asks only for the concrete unresolved decision;
   it never becomes a verify/validate action. `sophon send` queues exact literal
@@ -66,6 +74,10 @@ no managed runtime, no resume machinery. Its contract:
   metadata from internal IDs, attempt state, private paths, or prompt prose,
   and never writes Sophon branding or orchestration mechanics to a public Git
   or forge surface.
+- **Human-owned PR metadata after creation.** The public-surface owner renders
+  and preflights first-delivery title/body. Correction delivery preflights its
+  current product evidence but deterministically preserves the existing
+  title/body, including human review edits, and never creates a second PR.
 
 Sparse worker phase transitions arrive as non-authoritative triggers. The
 commander never relays them as truth or operator-facing chatter; it runs status
@@ -82,12 +94,13 @@ Authoritative sources: `prompts/workers/common.md` and
 `prompts/workers/implementation.md`, concatenated into every generated brief
 by `internal/flow/brief.go`.
 
-A worker is an isolated agent session that executes exactly one task attempt
+A worker is an isolated agent session that executes exactly one task revision attempt
 in its own leased Treehouse worktree. Its contract:
 
 - **Bounded written instructions.** The generated brief is the complete
-  authority: mission, task, attempt, worktree, branch, base SHA, validation,
-  delivery mode, permissions, and completion steps. The worker does exactly
+  authority: mission, task, revision, attempt, worktree, branch, base SHA,
+  validation, delivery mode, permissions, and completion steps. A correction
+  brief also pins the exact current PR/base and bounded accepted delta. The worker does exactly
   what it says and never expands scope.
 - **Sparse optional progress.** Meaningful transitions use the generated,
   data-home-pinned `sophon worker progress` form and only the stable phase
@@ -96,7 +109,8 @@ in its own leased Treehouse worktree. Its contract:
 - **Isolated workspace.** All project changes happen inside the assigned
   attempt worktree and nowhere else. The worker never touches leases,
   worktrees, or any shared state — mission or task records, other attempts,
-  outcomes, delivery — and never pushes, opens a PR, delivers, or merges.
+  outcomes, delivery — and never pushes/forces, opens or updates a PR,
+  delivers, or merges.
 - **Structured staging only.** The worker's sole writes outside the worktree
   are the generated completion or report submission files. Completion uses
   version 1 (`version`, `status`, `summary`, `verification`, `changed_files`,

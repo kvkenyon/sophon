@@ -72,6 +72,21 @@ func TestPreflightRejectsOriginalPublicLeak(t *testing.T) {
 	}
 }
 
+func TestCorrectionPreflightRetainsOnlyAnExistingLegacyBranch(t *testing.T) {
+	legacy := "sophon/home-111-tesla-fleet-api-baseclient-taskf0bb/attempt-1"
+	if err := Branch(legacy); err == nil {
+		t.Fatal("new task intake accepted the historical private branch")
+	}
+	if err := PreflightExistingBranch(legacy, "HOME-111 Migrate Tesla Fleet API client",
+		"## Summary\n\nCorrected the client migration.\n", []string{"Correct BaseClient request handling"}); err != nil {
+		t.Fatalf("same-PR correction rejected exact existing branch: %v", err)
+	}
+	if err := PreflightExistingBranch(legacy, "HOME-111 Migrate Tesla Fleet API client",
+		"Sophon task task_f0bbc2200213c81f3b03223fb4dc454c", []string{"Correct request handling"}); err == nil {
+		t.Fatal("correction compatibility bypassed content sanitization")
+	}
+}
+
 func TestPullRequestBodyCuratesPrivateEvidence(t *testing.T) {
 	result := domain.WorkerResult{
 		Summary: "Implemented the fleet client through Sophon task task_f0bbc2200213c81f3b03223fb4dc454c",

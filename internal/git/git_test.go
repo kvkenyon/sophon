@@ -66,6 +66,42 @@ func TestCreateTaskBranchAttachesDetachedWorktreeAtRecordedBase(t *testing.T) {
 	}
 }
 
+func TestCreateTaskBranchAtFetchesExactPublicCorrectionBase(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	runGit(t, root, "init", "--bare", origin)
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "init", "-b", "main")
+	runGit(t, source, "config", "user.name", "Sophon Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	writeFile(t, filepath.Join(source, "file.txt"), "base\n")
+	runGit(t, source, "add", "file.txt")
+	runGit(t, source, "commit", "-m", "base")
+	runGit(t, source, "remote", "add", "origin", origin)
+	runGit(t, source, "push", "origin", "main")
+	runGit(t, source, "switch", "-c", "review/client")
+	writeFile(t, filepath.Join(source, "review.txt"), "review\n")
+	runGit(t, source, "add", "review.txt")
+	runGit(t, source, "commit", "-m", "review head")
+	publicHead := runGit(t, source, "rev-parse", "HEAD")
+	runGit(t, source, "push", "origin", "review/client")
+
+	worker := filepath.Join(root, "worker")
+	runGit(t, root, "clone", origin, worker)
+	runGit(t, worker, "checkout", "--detach", "origin/main")
+	snapshot, err := NewClient().CreateTaskBranchAt(ctx, worker, "private/correction", "review/client", publicHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Head != publicHead || snapshot.Branch != "private/correction" || !snapshot.Clean {
+		t.Fatalf("correction snapshot = %+v, public head %s", snapshot, publicHead)
+	}
+}
+
 func TestVerifyCompletionRejectsUnrelatedHead(t *testing.T) {
 	ctx := context.Background()
 	repo := t.TempDir()

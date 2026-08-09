@@ -48,6 +48,21 @@ func TaskTitle(value string) error {
 // Branch validates an explicit public delivery branch using Git ref rules and
 // the same leak checks applied to every outbound surface.
 func Branch(value string) error {
+	if err := branchSyntax(value); err != nil {
+		return err
+	}
+	return Validate("public delivery branch", value)
+}
+
+// ExistingBranch validates only Git ref safety for an already-public branch
+// whose exact identity is immutable correction input. This compatibility path
+// cannot create or rename a branch; every newly created task still uses Branch
+// and the full leak detector.
+func ExistingBranch(value string) error {
+	return branchSyntax(value)
+}
+
+func branchSyntax(value string) error {
 	if value == "" || value != strings.TrimSpace(value) {
 		return errors.New("public delivery branch must be non-empty with no surrounding whitespace")
 	}
@@ -65,7 +80,7 @@ func Branch(value string) error {
 			return fmt.Errorf("public delivery branch %q is not a valid Git branch", value)
 		}
 	}
-	return Validate("public delivery branch", value)
+	return nil
 }
 
 // Preflight validates the complete set of values that one delivery may make
@@ -74,6 +89,19 @@ func Preflight(branch, title, body string, commitMessages []string) error {
 	if err := Branch(branch); err != nil {
 		return err
 	}
+	return preflightContent(title, body, commitMessages)
+}
+
+// PreflightExistingBranch applies the full outbound content preflight while
+// retaining an exact already-public branch identity for same-PR correction.
+func PreflightExistingBranch(branch, title, body string, commitMessages []string) error {
+	if err := ExistingBranch(branch); err != nil {
+		return err
+	}
+	return preflightContent(title, body, commitMessages)
+}
+
+func preflightContent(title, body string, commitMessages []string) error {
 	if err := TaskTitle(title); err != nil {
 		return err
 	}

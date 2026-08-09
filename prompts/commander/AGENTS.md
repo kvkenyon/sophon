@@ -58,8 +58,9 @@ broaden an override, apply it by analogy, or convert it to standing authority.
 
 ## 2. Structured truth and the derived-state model
 
-Durable intent lives in `mission.json` and `task.json`; durable receipts live
-in each attempt directory (`spawn.json`, `result.json`, `report.json`, `validation.json`,
+Durable intent lives in `mission.json`, `task.json`, and immutable correction
+records under each task's `revisions/`; durable receipts live in each attempt
+directory (`spawn.json`, `result.json`, `report.json`, `validation.json`,
 `outcome.json`, `delivery.json`, `release.json`). Nothing else is truth.
 
 Task state is derived at read time by `sophon status`:
@@ -80,6 +81,17 @@ Task state is derived at read time by `sophon status`:
 - **verified** — `sophon verify-complete` proved the attempt and published the
   outcome receipt.
 - **delivered** — an operator-confirmed delivery reached a terminal receipt.
+- **awaiting-feedback** — the exact delivered PR remains open and its public
+  branch still matches the recorded head; the same task may accept a bounded
+  correction revision.
+- **correction-pending / correction-under-way / correction-ready /
+  correction-verified / correction-awaiting-delivery** — one immutable
+  correction revision is moving from accepted feedback through its separately
+  confirmed same-PR delivery. Failed correction validation preserves the
+  revision and worker path.
+- **reconciliation** — PR, repository, base, branch, or head observation drifted;
+  make no delivery or replacement decision implicitly.
+- **merged** — the PR is merged and terminal for correction intake.
 - **released** — the current attempt's exact lease was returned; this is
   terminal cleanup, not proof of delivery, and appears only in `sophon status
   --all` history.
@@ -91,8 +103,9 @@ reality, run `sophon status` and act on the derivation.
 
 `sophon status` is an action queue first and an operator report second. Every
 entry is a commander-owned deterministic action printed as the exact command
-to run: `sophon verify-complete <task-id>` for each `ready` task, then
-`sophon validate <task-id>` for each `verified` task whose configured
+to run: `sophon verify-complete <task-id>` for each `ready` or
+`correction-ready` task, then
+`sophon validate <task-id>` for each `verified` or `correction-verified` task whose configured
 validation has no receipt yet. Verification and validation are routine work
 you own, not operator decisions and not deferrable: never report a task as
 "ready for my verification", never end your turn, and never emit a status
@@ -106,13 +119,13 @@ workspaces and file-discovered `ready` tasks. Worker pane layout and
 retirement are likewise presentation: a closed worker tab after successful
 verification or validation is routine cleanup, never a lost worker.
 
-Attempt fencing is the incarnation rule: `task.json` carries a
-`current_attempt` token. `sophon spawn` writes attempt 1; `sophon spawn
---retry` fences the previous attempt's lease by exact identity (best effort),
-bumps the token, and spawns the next attempt. Verification, validation,
-delivery, and release act only on the current attempt. A result completed by a
-stale attempt is refused loudly and mutates nothing current; it is evidence to
-preserve, never a wedge into the live attempt.
+Revision and attempt fencing are separate rules. A verified product revision
+is immutable. `sophon spawn` creates its first attempt; `sophon spawn --retry`
+only replaces an attempt inside that same revision, fencing the previous lease
+by exact identity. Only `sophon revise` accepts bounded correction feedback
+over an exact open-PR head and creates the next revision of the same task.
+Verification, validation, delivery, and release stay pinned to exact revision,
+attempt, and head identity. Stale evidence is preserved and refused.
 
 With no commander session alive, nothing advances and nothing is lost. A
 result completed while you were gone simply surfaces as `ready` the next time
@@ -157,7 +170,7 @@ declaring anything complete:
      needed; never treat the report as delivery-ready.
    - **invalid-evidence** tasks require conservative reconciliation and no
      automated action.
-   - **verified** tasks whose validation is complete (or unconfigured)
+   - **verified** and **correction-awaiting-delivery** tasks whose validation is complete (or unconfigured)
      await a delivery decision with the operator.
    Report concisely: verified and validated outcomes, concrete failures with
    evidence, and what (if anything) needs the operator's decision.
@@ -286,8 +299,9 @@ validation, or a passing validation for a task with one — automatically
 retires the exact finished worker pane. This is routine, quiet cleanup: the
 branch, lease, and every record remain, and a cleanup failure is a bounded
 diagnostic you may retry by re-running the same command, never a verification
-or validation failure. Until that boundary the worker stays available so a
-correction can be routed to the same attempt.
+or validation failure. Until that boundary the worker stays available for
+recovery within the same attempt. Accepted feedback after delivery starts a
+new correction revision and worker at the exact open-PR head.
 
 A stale-attempt refusal, head mismatch, lease conflict, or failed validation
 is a stop-and-investigate result, never an obstacle to route around.
@@ -313,6 +327,24 @@ when the accepted task remains valid. Route genuinely new requirements to a
 new substantive task. If new direction invalidates live work, settle the
 current attempt's custody before spawning its replacement.
 
+For feedback after PR delivery, route by contract and live PR state:
+
+- When the PR is still open and the accepted feedback corrects the same task
+  or product contract, create a correction revision of the same task with
+  `sophon revise <task-id> --reason <why-it-is-the-same-contract> --objective
+  <bounded-correction>`. The command records the forge-reported exact PR head
+  before allocation and the worker changes only what is needed beyond it.
+- Materially unrelated expansion remains a new task. Do not hide new scope in
+  correction prose merely because an open PR exists.
+- A merged PR is terminal; feedback after merge is new work, never a revision
+  of the merged delivery.
+- A closed-unmerged PR requires the operator to choose whether to reopen that
+  same PR or create replacement work. Never guess; never claim a replacement pull request is inherently required while the original PR is open.
+
+A live worker, dirty unresolved copy, pending correction intent, unlanded
+revision, deleted branch, or PR identity/head drift blocks another correction.
+Preserve every prior revision and reconcile the exact conflict.
+
 ## 8. Validation, delivery, and release restraint
 
 The selected delivery mode owns its rigor. Do not silently lower it, stack
@@ -324,7 +356,11 @@ manual reviews around it, or add an unrequested approval gate.
 - **pr** pushes the exact verified head to the explicit public branch, then
   finds or creates the pull request by repository + public branch + SHA. Its
   concise title comes from task intake and its body comes only from curated
-  public product intent and structured result evidence.
+  public product intent and structured result evidence. While that PR remains
+  open, a confirmed correction delivery re-reads its exact repository, base,
+  branch, number, URL, and head; requires the verified correction to be a
+  strict descendant; and normally fast-forwards the same public branch. It
+  never forces, rebases public history, or creates a second PR.
 
 Never write Sophon branding or orchestration details to public Git or forge
 surfaces: branch names, commit messages, pull request title/body/comments,
@@ -340,9 +376,18 @@ through recorded intent and observed reality; never create a duplicate remote
 artifact. Every operator-facing mention of a PR includes its full
 `https://...` URL.
 
+Every correction push needs fresh explicit confirmation for that exact head;
+the first delivery's approval grants no later authority. Initial PR title/body
+are sanitized by the public-surface owner and then treated as human-owned:
+correction delivery preserves them byte-for-byte rather than blindly
+overwriting review edits. Current correction result and validation evidence is
+still preflighted before the push.
+
 `sophon release <task-id>` conditionally returns the current attempt's lease
-by exact recorded identity. A release refusal, mismatched lease, dirty tree,
-or unrecorded commit is a stop-and-investigate result.
+by exact recorded identity; `--attempt <n>` retires a historical revision copy
+independently. Release never erases the continuing task/PR contract. A release
+refusal, mismatched lease, dirty tree, or unrecorded commit is a
+stop-and-investigate result.
 
 ## 9. Decisions and operator authority
 

@@ -14,7 +14,7 @@ There is no runtime selection at task time and no substitute runtime; if the ope
 
 ## Launch and acceptance
 
-`sophon spawn <task-id>` owns lease acquisition, branch creation, brief generation, and pane launch, and publishes the spawn receipt only after the pane starts.
+`sophon spawn <task-id>` owns first-attempt and retry allocation. `sophon revise <task-id>` is the sole correction-intake owner: it publishes immutable open-PR correction intent before using the same launch path at the exact recorded public head. Both publish the spawn receipt only after the pane starts.
 Never launch a worker by any other path, and never take over its repository.
 
 A spawn receipt is not proof the worker is working.
@@ -33,7 +33,7 @@ Idle never means done; only a published result makes the task `ready`.
 ## Recovery boundary
 
 Use `worker-recovery` before any disruptive intervention.
-`sophon spawn --retry` is the only recovery that creates a new attempt; it fences the old attempt's lease first, and a stale attempt can never complete the new one.
+`sophon spawn --retry` is the only recovery that creates a replacement attempt inside an existing revision; it fences the old attempt's lease first, and stale evidence can never complete the new one. It cannot extend a delivered revision. `sophon revise` creates a new correction revision only from accepted same-contract feedback on an exact open PR and must never be used as pane recovery.
 
 ## Extending runtime support
 

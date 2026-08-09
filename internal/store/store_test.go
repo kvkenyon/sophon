@@ -166,6 +166,48 @@ func TestBumpAttempt(t *testing.T) {
 	}
 }
 
+func TestCorrectionIntentIsImmutableAndDerivesPendingRevision(t *testing.T) {
+	useHome(t)
+	mission := Mission{ID: "mission_a", ProjectPath: "/repo", Title: "Ship", Objective: "Do it", CreatedAt: time.Now().UTC()}
+	if err := CreateMission(mission); err != nil {
+		t.Fatal(err)
+	}
+	task := sampleTask(mission.ID, "task_a")
+	task.DeliveryMode = domain.DeliveryPR
+	if err := CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AdvanceTask(mission.ID, task.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	accepted := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	correction := Correction{Version: 1, TaskID: task.ID, MissionID: mission.ID,
+		Revision: 2, PriorRevision: 1, PriorAttempt: 1, Reason: "accepted review feedback",
+		Objective: "correct the same behavior", Repository: "github.com/acme/repo",
+		PublicBranch: task.DeliveryBranch, PRURL: "https://github.com/acme/repo/pull/7", PRNumber: 7,
+		BaseRepository: "github.com/acme/repo", BaseBranch: "main",
+		BaseSHA: "1111111111111111111111111111111111111111", AcceptedAt: accepted}
+	if err := CreateCorrection(correction); err != nil {
+		t.Fatal(err)
+	}
+	current, err := AdvanceTask(mission.ID, task.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CreateCorrection(correction); err != nil {
+		t.Fatalf("identical correction retry: %v", err)
+	}
+	different := correction
+	different.Objective = "rewrite the accepted correction"
+	if err := CreateCorrection(different); err == nil {
+		t.Fatal("differing correction overwrote immutable intent")
+	}
+	status, err := Derive(current)
+	if err != nil || status.State != StateCorrectionPending || status.Revision != 2 {
+		t.Fatalf("pending correction status = %+v, %v", status, err)
+	}
+}
+
 func TestDeriveLifecycle(t *testing.T) {
 	home := useHome(t)
 	mission := Mission{ID: "mission_a", CreatedAt: time.Now().UTC()}

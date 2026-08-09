@@ -27,6 +27,11 @@ var requiredCommanderClauses = []string{
 	"--objective <worker-objective>",
 	"--delivery-branch <public-branch>",
 	"Never write Sophon branding or orchestration details to public Git or forge",
+	"sophon revise",
+	"same task",
+	"same public branch",
+	"closed-unmerged",
+	"replacement pull request is inherently required",
 }
 
 // requiredWorkerClauses are the behavioral contracts every worker brief must
@@ -45,6 +50,8 @@ var requiredWorkerClauses = []string{
 	"Never mutate shared state",
 	"Escalate only concrete decisions and blockers",
 	"Treat every commit subject and body as public product history",
+	"exact public correction base",
+	"Do not push, force-push",
 }
 
 // forbiddenBranding must never appear in any shipped prompt or rendered
@@ -85,6 +92,26 @@ func TestCommanderPromptOrdersDrainBeforeReporting(t *testing.T) {
 	report := strings.Index(rest, "Only then")
 	if verify < 0 || validate < 0 || report < 0 || verify > validate || validate > report {
 		t.Errorf("drain ordering broken: verify at %d, validate at %d, report at %d", verify, validate, report)
+	}
+}
+
+func TestCommanderPromptRoutesPostDeliveryFeedbackByContractAndPRState(t *testing.T) {
+	t.Setenv(OverrideEnv, "")
+	body, err := Compose(filepath.Join(t.TempDir(), "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := []string{
+		"When the PR is still open and the accepted feedback corrects the same task",
+		"Materially unrelated expansion remains a new task",
+		"A merged PR is terminal; feedback after merge is new work",
+		"A closed-unmerged PR requires the operator to choose",
+		"never claim a replacement pull request is inherently required while the original PR is open",
+	}
+	for _, route := range routes {
+		if !strings.Contains(body, route) {
+			t.Errorf("rendered commander prompt omitted feedback route %q", route)
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package flow
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -298,6 +299,425 @@ func TestHappyPathPRDelivery(t *testing.T) {
 	}
 }
 
+func TestPR6818HistoricalShapeContinuesAsSamePR(t *testing.T) {
+	home := useHome(t)
+	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "pr-6818-open-correction.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Repository             string `json:"repository"`
+		PublicBranch           string `json:"public_branch"`
+		BaseRepository         string `json:"base_repository"`
+		BaseBranch             string `json:"base_branch"`
+		PRURL                  string `json:"pr_url"`
+		PRNumber               int    `json:"pr_number"`
+		OpenPRHead             string `json:"open_pr_head"`
+		VerifiedCorrectionHead string `json:"verified_correction_head"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	rig := newRig()
+	rig.delGit.repository = fixture.Repository
+	mission, task := rig.createMissionAndTask(t, domain.DeliveryPR, "")
+	spawn, err := rig.flow.Spawn(context.Background(), task.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed the exact historical public identity that predates today's intake
+	// sanitizer. New tasks cannot create this branch; correction can only retain
+	// and normally fast-forward the already-public ref.
+	task, err = store.ReadTask(mission.ID, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Title = "HOME-111: Migrate Tesla Fleet API client to BaseClient"
+	task.DeliveryBranch = fixture.PublicBranch
+	// PR 6818 predates revision pointers and canonical base identity in delivery
+	// receipts. Keep those fields absent so this fixture proves real migration
+	// compatibility instead of silently upgrading the old evidence in place.
+	task.CurrentRevision = 0
+	if err := store.Publish(store.TaskPath(home, mission.ID, task.ID), task); err != nil {
+		t.Fatal(err)
+	}
+	legacySpawn := spawn
+	legacySpawn.Revision = 0
+	if err := store.Publish(store.AttemptPath(home, mission.ID, task.ID, 1, "spawn.json"), legacySpawn); err != nil {
+		t.Fatal(err)
+	}
+	firstDelivery := store.Delivery{TaskID: task.ID, Attempt: 1, Mode: domain.DeliveryPR,
+		Repository: fixture.Repository, Branch: fixture.PublicBranch, HeadSHA: fixture.OpenPRHead,
+		State: store.DeliveryDeliveredPR, PRURL: fixture.PRURL, PRNumber: fixture.PRNumber,
+		IntentAt: time.Now().UTC()}
+	deliveredAt := time.Now().UTC()
+	firstDelivery.DeliveredAt = &deliveredAt
+	if err := store.Publish(store.AttemptPath(home, mission.ID, task.ID, 1, "delivery.json"), firstDelivery); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Publish(store.AttemptPath(home, mission.ID, task.ID, 1, "release.json"), store.Release{
+		TaskID: task.ID, Attempt: 1, LeaseID: spawn.LeaseID,
+		LeaseHolder: spawn.LeaseHolder, ReleasedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rig.remote.headSHA = fixture.OpenPRHead
+	rig.remote.branchExists = true
+	rig.remote.branch = fixture.PublicBranch
+	rig.remote.observed = &delivery.PullRequest{Repository: fixture.Repository, Branch: fixture.PublicBranch,
+		HeadSHA: fixture.OpenPRHead, BaseRepository: fixture.BaseRepository, BaseBranch: fixture.BaseBranch,
+		State: delivery.PullRequestOpen, URL: fixture.PRURL, Number: fixture.PRNumber}
+	legacyDeliveryPath := store.AttemptPath(home, mission.ID, task.ID, 1, "delivery.json")
+	legacyDeliveryBytes, err := os.ReadFile(legacyDeliveryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := rig.flow.Status(context.Background())
+	if err != nil || len(status.Missions) != 1 || len(status.Missions[0].Tasks) != 1 ||
+		status.Missions[0].Tasks[0].State != store.StateAwaitingFeedback {
+		t.Fatalf("legacy PR 6818 operational status = %+v, %v", status, err)
+	}
+
+	correctedSpawn, err := rig.flow.Revise(context.Background(), task.ID, "Accepted review correction",
+		"Apply only the requested BaseClient correction beyond the current PR head.", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if correctedSpawn.Revision != 2 || correctedSpawn.Attempt != 2 || correctedSpawn.BaseSHA != fixture.OpenPRHead {
+		t.Fatalf("PR 6818 correction spawn = %+v", correctedSpawn)
+	}
+	correction, err := store.ReadCorrection(mission.ID, task.ID, 2)
+	if err != nil || correction.BaseRepository != fixture.BaseRepository || correction.BaseBranch != fixture.BaseBranch {
+		t.Fatalf("PR 6818 canonical correction identity = %+v, %v", correction, err)
+	}
+	resultPath := writeResult(t, home, correctedSpawn, validResult)
+	rig.git.headSHA = fixture.VerifiedCorrectionHead
+	if _, err := rig.flow.PublishResult(context.Background(), task.ID, 2, fixture.VerifiedCorrectionHead, resultPath); err != nil {
+		t.Fatal(err)
+	}
+	rig.leaseStatus(correctedSpawn)
+	outcome, err := rig.flow.VerifyComplete(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.HeadSHA != fixture.VerifiedCorrectionHead {
+		t.Fatalf("PR 6818 correction outcome = %+v", outcome)
+	}
+	receipt, err := rig.flow.Deliver(context.Background(), task.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.PRNumber != fixture.PRNumber || receipt.PRURL != fixture.PRURL ||
+		receipt.Branch != fixture.PublicBranch || receipt.PriorHeadSHA != fixture.OpenPRHead ||
+		receipt.HeadSHA != fixture.VerifiedCorrectionHead || rig.remote.creates != 0 || rig.remote.fastForwards != 1 {
+		t.Fatalf("PR 6818 same-PR receipt = %+v, creates=%d ff=%d", receipt, rig.remote.creates, rig.remote.fastForwards)
+	}
+	unchangedDeliveryBytes, err := os.ReadFile(legacyDeliveryPath)
+	if err != nil || string(unchangedDeliveryBytes) != string(legacyDeliveryBytes) {
+		t.Fatalf("legacy PR 6818 delivery evidence changed: %v", err)
+	}
+}
+
+func prepareOpenPRForRevision(t *testing.T) (*testRig, store.Mission, store.Task, store.Spawn, store.Delivery) {
+	t.Helper()
+	useHome(t)
+	rig := newRig()
+	mission, task := rig.createMissionAndTask(t, domain.DeliveryPR, "")
+	spawn, err := rig.flow.Spawn(context.Background(), task.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, _ := datahome.Dir()
+	resultPath := writeResult(t, home, spawn, validResult)
+	if _, err := rig.flow.PublishResult(context.Background(), task.ID, 1, testHeadSHA, resultPath); err != nil {
+		t.Fatal(err)
+	}
+	rig.leaseStatus(spawn)
+	if _, err := rig.flow.VerifyComplete(context.Background(), task.ID); err != nil {
+		t.Fatal(err)
+	}
+	rig.remote.create = delivery.PullRequest{URL: "https://github.com/acme/repo/pull/17", Number: 17}
+	receipt, err := rig.flow.Deliver(context.Background(), task.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rig.panes.observe = herdr.StateLost
+	return rig, mission, task, spawn, receipt
+}
+
+func TestOpenPullRequestStatusDerivesTerminalAndReconciliationStates(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testRig)
+		want   string
+	}{
+		{"merged terminal", func(r *testRig) { r.remote.observed.State = delivery.PullRequestMerged }, store.StateMerged},
+		{"closed unmerged", func(r *testRig) { r.remote.observed.State = delivery.PullRequestClosed }, store.StateReconciliation},
+		{"public head drift", func(r *testRig) {
+			r.remote.headSHA = "3333333333333333333333333333333333333333"
+			r.remote.observed.HeadSHA = r.remote.headSHA
+		}, store.StateReconciliation},
+		{"base drift", func(r *testRig) { r.remote.observed.BaseBranch = "release" }, store.StateReconciliation},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rig, _, _, _, _ := prepareOpenPRForRevision(t)
+			tt.mutate(rig)
+			report, err := rig.flow.Status(context.Background())
+			if err != nil || len(report.Missions) != 1 || len(report.Missions[0].Tasks) != 1 ||
+				report.Missions[0].Tasks[0].State != tt.want {
+				t.Fatalf("status = %+v, %v; want %s", report, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestReviseRefusesExceptionalOpenPRPathsWithoutLosingEvidence(t *testing.T) {
+	newHead := "3333333333333333333333333333333333333333"
+	tests := []struct {
+		name     string
+		mutate   func(*testRig, store.Delivery)
+		accept   bool
+		contains string
+	}{
+		{"merged", func(r *testRig, _ store.Delivery) { r.remote.observed.State = delivery.PullRequestMerged }, false, "merged pull request is terminal"},
+		{"closed", func(r *testRig, _ store.Delivery) { r.remote.observed.State = delivery.PullRequestClosed }, false, "closed-unmerged"},
+		{"deleted branch", func(r *testRig, _ store.Delivery) { r.remote.branchExists = false }, false, "branch was deleted"},
+		{"unaccepted drift", func(r *testRig, _ store.Delivery) { r.remote.headSHA = newHead; r.remote.observed.HeadSHA = newHead }, false, "accept-external-head"},
+		{"wrong repository", func(r *testRig, _ store.Delivery) { r.remote.observed.Repository = "github.com/other/repo" }, false, "identity changed"},
+		{"wrong base", func(r *testRig, _ store.Delivery) { r.remote.observed.BaseBranch = "release" }, false, "identity changed"},
+		{"wrong branch", func(r *testRig, _ store.Delivery) { r.remote.observed.Branch = "other/branch" }, false, "identity changed"},
+		{"non descendant reconciliation", func(r *testRig, _ store.Delivery) {
+			r.remote.headSHA = newHead
+			r.remote.observed.HeadSHA = newHead
+			r.delGit.descendantErr = errors.New("not descendant")
+		}, true, "non-fast-forward public history"},
+		{"dirty prior copy", func(r *testRig, _ store.Delivery) { r.delGit.verifyErr = errors.New("dirty") }, false, "dirty or unresolved"},
+		{"live prior worker", func(r *testRig, _ store.Delivery) { r.panes.observe = herdr.StateRunning }, false, "live delivered worker"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rig, _, task, _, delivered := prepareOpenPRForRevision(t)
+			before, err := store.ReadDelivery(task.MissionID, task.ID, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tt.mutate(rig, delivered)
+			if _, err := rig.flow.Revise(context.Background(), task.ID, "accepted feedback", "bounded correction", tt.accept); err == nil ||
+				!strings.Contains(err.Error(), tt.contains) {
+				t.Fatalf("revise error = %v, want %q", err, tt.contains)
+			}
+			after, err := store.ReadDelivery(task.MissionID, task.ID, 1)
+			if err != nil || after.HeadSHA != before.HeadSHA || after.PRNumber != before.PRNumber || after.State != before.State {
+				t.Fatalf("prior evidence changed: before=%+v after=%+v err=%v", before, after, err)
+			}
+			current, err := store.ReadTask(task.MissionID, task.ID)
+			if err != nil || current.CurrentAttempt != 1 || current.CurrentRevision != 1 {
+				t.Fatalf("refusal advanced task identity: %+v, %v", current, err)
+			}
+		})
+	}
+}
+
+func TestReviseRefusesDuplicateWhileCorrectionIsUnlanded(t *testing.T) {
+	rig, _, task, _, _ := prepareOpenPRForRevision(t)
+	spawn, err := rig.flow.Revise(context.Background(), task.ID, "accepted feedback", "bounded correction", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.ReadCorrection(task.MissionID, task.ID, spawn.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rig.flow.Revise(context.Background(), task.ID, "duplicate", "different correction", false); err == nil ||
+		!strings.Contains(err.Error(), "unlanded revision") {
+		t.Fatalf("duplicate correction error = %v", err)
+	}
+	after, err := store.ReadCorrection(task.MissionID, task.ID, spawn.Revision)
+	if err != nil || after.Reason != before.Reason || after.Objective != before.Objective || !after.AcceptedAt.Equal(before.AcceptedAt) {
+		t.Fatalf("immutable correction changed: before=%+v after=%+v err=%v", before, after, err)
+	}
+}
+
+func TestReviseRecoversExactIntentPublishedBeforeTaskPointer(t *testing.T) {
+	rig, _, task, _, delivered := prepareOpenPRForRevision(t)
+	acceptedAt := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	correction := store.Correction{
+		Version: 1, TaskID: task.ID, MissionID: task.MissionID, Revision: 2,
+		PriorRevision: 1, PriorAttempt: 1, Reason: "accepted feedback", Objective: "bounded correction",
+		Repository: delivered.Repository, PublicBranch: delivered.Branch, PRURL: delivered.PRURL,
+		PRNumber: delivered.PRNumber, BaseRepository: delivered.BaseRepository,
+		BaseBranch: delivered.BaseBranch, BaseSHA: delivered.HeadSHA, AcceptedAt: acceptedAt,
+	}
+	if err := store.CreateCorrection(correction); err != nil {
+		t.Fatal(err)
+	}
+	spawn, err := rig.flow.Revise(context.Background(), task.ID, correction.Reason, correction.Objective, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.ReadCorrection(task.MissionID, task.ID, 2)
+	if err != nil || spawn.Revision != 2 || spawn.Attempt != 2 || !loaded.AcceptedAt.Equal(acceptedAt) {
+		t.Fatalf("recovered intent spawn=%+v correction=%+v err=%v", spawn, loaded, err)
+	}
+}
+
+func TestReviseRefusesDifferentIntentPublishedBeforeTaskPointer(t *testing.T) {
+	rig, _, task, _, delivered := prepareOpenPRForRevision(t)
+	correction := store.Correction{
+		Version: 1, TaskID: task.ID, MissionID: task.MissionID, Revision: 2,
+		PriorRevision: 1, PriorAttempt: 1, Reason: "accepted feedback", Objective: "first bounded correction",
+		Repository: delivered.Repository, PublicBranch: delivered.Branch, PRURL: delivered.PRURL,
+		PRNumber: delivered.PRNumber, BaseRepository: delivered.BaseRepository,
+		BaseBranch: delivered.BaseBranch, BaseSHA: delivered.HeadSHA, AcceptedAt: time.Now().UTC(),
+	}
+	if err := store.CreateCorrection(correction); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rig.flow.Revise(context.Background(), task.ID, correction.Reason, "different correction", false); err == nil ||
+		!strings.Contains(err.Error(), "pending correction intent differs") {
+		t.Fatalf("differing pre-pointer intent error = %v", err)
+	}
+	current, err := store.ReadTask(task.MissionID, task.ID)
+	if err != nil || current.CurrentAttempt != 1 || current.CurrentRevision != 1 {
+		t.Fatalf("differing intent advanced task pointer: %+v, %v", current, err)
+	}
+}
+
+func TestReviseExplicitlyAcceptsProvenExternalFastForwardBeforeIntent(t *testing.T) {
+	rig, _, task, _, _ := prepareOpenPRForRevision(t)
+	externalHead := "3333333333333333333333333333333333333333"
+	rig.remote.headSHA = externalHead
+	rig.remote.observed.HeadSHA = externalHead
+	spawn, err := rig.flow.Revise(context.Background(), task.ID, "reviewed external commit",
+		"apply the bounded correction beyond the reviewed public head", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	correction, err := store.ReadCorrection(task.MissionID, task.ID, spawn.Revision)
+	if err != nil || !strings.EqualFold(spawn.BaseSHA, externalHead) || !strings.EqualFold(correction.BaseSHA, externalHead) {
+		t.Fatalf("accepted external correction base spawn=%+v intent=%+v err=%v", spawn, correction, err)
+	}
+}
+
+func TestCorrectionRetryStaysWithinRevisionAndReusesExactBase(t *testing.T) {
+	rig, _, task, _, _ := prepareOpenPRForRevision(t)
+	first, err := rig.flow.Revise(context.Background(), task.ID, "accepted feedback", "bounded correction", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := rig.flow.Spawn(context.Background(), task.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Attempt != first.Attempt+1 || second.Revision != first.Revision ||
+		!strings.EqualFold(second.BaseSHA, first.BaseSHA) {
+		t.Fatalf("correction retry first=%+v second=%+v", first, second)
+	}
+	if len(rig.leases.releases) == 0 {
+		t.Fatal("correction retry did not fence the prior exact lease")
+	}
+}
+
+func prepareVerifiedCorrection(t *testing.T) (*testRig, store.Task, store.Spawn, string) {
+	t.Helper()
+	rig, _, task, _, _ := prepareOpenPRForRevision(t)
+	spawn, err := rig.flow.Revise(context.Background(), task.ID, "accepted feedback", "bounded correction", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	correctionHead := "3333333333333333333333333333333333333333"
+	home, _ := datahome.Dir()
+	resultPath := writeResult(t, home, spawn, validResult)
+	rig.git.headSHA = correctionHead
+	if _, err := rig.flow.PublishResult(context.Background(), task.ID, spawn.Attempt, correctionHead, resultPath); err != nil {
+		t.Fatal(err)
+	}
+	rig.leaseStatus(spawn)
+	if _, err := rig.flow.VerifyComplete(context.Background(), task.ID); err != nil {
+		t.Fatal(err)
+	}
+	return rig, task, spawn, correctionHead
+}
+
+func TestCorrectionDeliveryRefusesDriftAndNonDescendantBeforePush(t *testing.T) {
+	t.Run("forge identity drift", func(t *testing.T) {
+		rig, task, _, _ := prepareVerifiedCorrection(t)
+		rig.remote.observed.BaseBranch = "release"
+		if _, err := rig.flow.Deliver(context.Background(), task.ID, true); err == nil || !errors.Is(err, ErrReconciliation) {
+			t.Fatalf("delivery drift error = %v", err)
+		}
+		if rig.remote.fastForwards != 0 {
+			t.Fatal("drifted correction was pushed")
+		}
+		pending, err := store.ReadDelivery(task.MissionID, task.ID, 2)
+		if err != nil || pending.State != store.DeliveryPending {
+			t.Fatalf("pending intent not preserved: %+v, %v", pending, err)
+		}
+	})
+	t.Run("non descendant", func(t *testing.T) {
+		rig, task, _, _ := prepareVerifiedCorrection(t)
+		rig.delGit.descendantErr = errors.New("not descendant")
+		if _, err := rig.flow.Deliver(context.Background(), task.ID, true); err == nil || !strings.Contains(err.Error(), "strictly descend") {
+			t.Fatalf("non-descendant delivery error = %v", err)
+		}
+		if rig.remote.fastForwards != 0 {
+			t.Fatal("non-descendant correction was pushed")
+		}
+		if _, err := store.ReadDelivery(task.MissionID, task.ID, 2); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("non-descendant published delivery intent: %v", err)
+		}
+	})
+	t.Run("public preflight", func(t *testing.T) {
+		rig, task, _, _ := prepareVerifiedCorrection(t)
+		rig.delGit.messages = []string{"Sophon task task_f0bbc2200213c81f3b03223fb4dc454c correction"}
+		if _, err := rig.flow.Deliver(context.Background(), task.ID, true); err == nil || !strings.Contains(err.Error(), "public delivery preflight") {
+			t.Fatalf("correction preflight error = %v", err)
+		}
+		if rig.remote.fastForwards != 0 {
+			t.Fatal("unsafe correction was pushed")
+		}
+	})
+}
+
+func TestCorrectionDeliveryRecoversPushBeforeReceiptWithoutDuplicatePush(t *testing.T) {
+	rig, task, _, correctionHead := prepareVerifiedCorrection(t)
+	rig.remote.fastForwardWriteErr = errors.New("process lost response after push")
+	if _, err := rig.flow.Deliver(context.Background(), task.ID, true); err == nil {
+		t.Fatal("ambiguous post-push failure was not surfaced")
+	}
+	pending, err := store.ReadDelivery(task.MissionID, task.ID, 2)
+	if err != nil || pending.State != store.DeliveryPending {
+		t.Fatalf("post-push pending intent = %+v, %v", pending, err)
+	}
+	if pending.PRNumber != 17 || pending.PRURL != "https://github.com/acme/repo/pull/17" ||
+		pending.PriorHeadSHA == "" || pending.BaseRepository == "" || pending.BaseBranch == "" {
+		t.Fatalf("post-push pending intent lacks immutable PR identity: %+v", pending)
+	}
+	if !strings.EqualFold(rig.remote.headSHA, correctionHead) || rig.remote.fastForwards != 1 {
+		t.Fatalf("simulated landed push head=%s calls=%d", rig.remote.headSHA, rig.remote.fastForwards)
+	}
+	report, err := rig.flow.Status(context.Background())
+	if err != nil || len(report.Missions) != 1 || len(report.Missions[0].Tasks) != 1 ||
+		report.Missions[0].Tasks[0].State != store.StateCorrectionAwaitingDelivery ||
+		!strings.Contains(report.Missions[0].Tasks[0].Detail, "receipt pending recovery") {
+		t.Fatalf("post-push recovery status = %+v, %v", report, err)
+	}
+	rig.remote.fastForwardWriteErr = nil
+	receipt, err := rig.flow.Deliver(context.Background(), task.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.State != store.DeliveryDeliveredPR || receipt.PRNumber != 17 || rig.remote.fastForwards != 1 ||
+		!receipt.IntentAt.Equal(pending.IntentAt) {
+		t.Fatalf("recovered correction receipt=%+v calls=%d pending=%+v", receipt, rig.remote.fastForwards, pending)
+	}
+	again, err := rig.flow.Deliver(context.Background(), task.ID, true)
+	if err != nil || !again.DeliveredAt.Equal(*receipt.DeliveredAt) || rig.remote.fastForwards != 1 {
+		t.Fatalf("terminal correction retry=%+v err=%v pushes=%d", again, err, rig.remote.fastForwards)
+	}
+}
+
 func TestDeliverRefusesPublicBranchCollisionBeforeWrite(t *testing.T) {
 	useHome(t)
 	rig := newRig()
@@ -530,7 +950,20 @@ func TestDeliverRequiresPassingValidation(t *testing.T) {
 		!strings.Contains(err.Error(), "validation passed") {
 		t.Fatalf("err = %v", err)
 	}
-	// A passing run unblocks delivery.
+	// A passing replacement attempt unblocks delivery while preserving the
+	// failed validation receipt on attempt 1.
+	second, err := rig.flow.Spawn(ctx, task.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondResult := writeResult(t, home, second, validResult)
+	if _, err := rig.flow.PublishResult(ctx, task.ID, second.Attempt, testHeadSHA, secondResult); err != nil {
+		t.Fatal(err)
+	}
+	rig.leaseStatus(second)
+	if _, err := rig.flow.VerifyComplete(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
 	rig.validate.result = validation.Result{Status: validation.Passed, ExitCode: 0}
 	if _, err := rig.flow.Validate(ctx, task.ID); err != nil {
 		t.Fatal(err)

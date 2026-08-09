@@ -92,15 +92,26 @@ func (f *Flow) AttachCommander(ctx context.Context, in AttachRequest) (store.Com
 // waiting. needsValidation adds the exact validate command for a task with a
 // configured validation command.
 func CommanderWakeMessage(taskID string, attempt int, needsValidation bool) string {
+	return commanderResultWakeMessage(taskID, attempt, needsValidation, "ready")
+}
+
+// CommanderCorrectionWakeMessage is the correction-revision variant of the
+// completion drain trigger. It names the actual derived state while retaining
+// the same exact verification and validation action contract.
+func CommanderCorrectionWakeMessage(taskID string, attempt int, needsValidation bool) string {
+	return commanderResultWakeMessage(taskID, attempt, needsValidation, "correction-ready")
+}
+
+func commanderResultWakeMessage(taskID string, attempt int, needsValidation bool, state string) string {
 	validate := ""
 	if needsValidation {
 		validate = fmt.Sprintf(", then `sophon validate %s`", taskID)
 	}
-	return fmt.Sprintf("Sophon: task %s attempt %d published a durable result and now derives ready. "+
+	return fmt.Sprintf("Sophon: task %s attempt %d published a durable result and now derives %s. "+
 		"This is an action, not a report: before replying or waiting, run `sophon status`, "+
 		"run `sophon verify-complete %s`%s, and keep draining every verify-complete and validate "+
 		"action status lists until none remain. Verification and validation are commander-owned "+
-		"routine work; never report a task as ready for your verification.", taskID, attempt, taskID, validate)
+		"routine work; never report a task as ready for your verification.", taskID, attempt, state, taskID, validate)
 }
 
 // CommanderReportWakeMessage routes durable non-completion evidence without
@@ -149,11 +160,18 @@ func (f *Flow) NotifyCommander(ctx context.Context, taskID string, attempt int) 
 	// The validate clause needs the task record; a lookup failure only narrows
 	// the instruction to the always-required status/verify-complete drain.
 	needsValidation := false
+	correction := false
 	if task, err := store.FindTask(taskID); err == nil {
 		if task.CurrentAttempt != attempt {
 			return nil
 		}
 		needsValidation = strings.TrimSpace(task.ValidationCommand) != ""
+		if spawn, err := store.ReadSpawn(task.MissionID, taskID, attempt); err == nil {
+			correction = spawn.Revision > 1
+		}
+	}
+	if correction {
+		return f.notifyCommander(ctx, CommanderCorrectionWakeMessage(taskID, attempt, needsValidation))
 	}
 	return f.notifyCommander(ctx, CommanderWakeMessage(taskID, attempt, needsValidation))
 }
@@ -258,12 +276,13 @@ func (f *Flow) commanderWorkspace() string {
 // RetireWorker closes the current attempt's exact task-owned worker pane once
 // the attempt holds successful terminal worker evidence: a verified outcome
 // for a task without a validation command, or a passing validation receipt
-// for a task with one. Until that boundary the worker stays available so a
-// correction can be routed to the same attempt. Retirement is presentation
+// for a task with one. Until that boundary the worker stays available for
+// recovery within the same attempt. Retirement is presentation
 // cleanup only — it never touches derived truth, delivery authority, branch
 // or commit identity, the lease, or any record — and it is idempotent: an
 // already-lost exact pane is success. There is deliberately no cleanup
-// receipt: the only external effect (the tab close) is directly observable,
+// receipt: later accepted feedback starts a new revision and a new worker at
+// the exact open-PR head, while the tab close remains directly observable,
 // so a retry converges via reality and no crash window needs typed intent.
 func (f *Flow) RetireWorker(ctx context.Context, taskID string) error {
 	if f.deps.NewSessionPanes == nil {

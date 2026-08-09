@@ -8,6 +8,7 @@ import (
 
 	"sophon/internal/datahome"
 	"sophon/internal/domain"
+	gitcontrol "sophon/internal/git"
 	"sophon/internal/herdr"
 	"sophon/internal/id"
 	"sophon/internal/publicsurface"
@@ -76,10 +77,9 @@ func (f *Flow) CreateTask(ctx context.Context, missionID, title, objective, deli
 	return task, store.CreateTask(task)
 }
 
-// Spawn fences (on retry), bumps the current-attempt token, acquires the
-// lease, creates the task branch, publishes the brief, starts the worker
-// pane, and only then publishes spawn.json. Any failure after lease
-// acquisition conditionally releases that lease best-effort.
+// Spawn creates the first attempt or retries the current product revision.
+// Retry never creates correction authority: a delivered revision must use
+// Revise, while a correction retry reuses that revision's immutable base.
 func (f *Flow) Spawn(ctx context.Context, taskID string, retry bool) (store.Spawn, error) {
 	if f.deps.Git == nil || f.deps.Leases == nil || f.deps.Panes == nil {
 		return store.Spawn{}, errors.New("flow is not fully configured for spawn")
@@ -97,6 +97,11 @@ func (f *Flow) Spawn(ctx context.Context, taskID string, retry bool) (store.Spaw
 		if !retry {
 			return store.Spawn{}, fmt.Errorf("%w (task %s attempt %d)", ErrAttemptsExist, taskID, task.CurrentAttempt)
 		}
+		if delivery, err := store.ReadDelivery(task.MissionID, taskID, task.CurrentAttempt); err == nil && delivery.State.Terminal() {
+			return store.Spawn{}, errors.New("delivered revision cannot be retried; use sophon revise for accepted open-PR feedback")
+		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return store.Spawn{}, err
+		}
 		// Fence the previous attempt's lease by exact identity, best effort: a
 		// mismatch or release failure is never destructive, so continue either way.
 		if previous, err := store.ReadSpawn(task.MissionID, taskID, task.CurrentAttempt); err == nil {
@@ -105,12 +110,27 @@ func (f *Flow) Spawn(ctx context.Context, taskID string, retry bool) (store.Spaw
 			return store.Spawn{}, err
 		}
 	}
-	task, err = store.BumpAttempt(task.MissionID, task.ID)
+	task, err = store.AdvanceTask(task.MissionID, task.ID, false)
 	if err != nil {
 		return store.Spawn{}, err
 	}
+	var correction *store.Correction
+	if task.CurrentRevision > 1 {
+		record, err := store.ReadCorrection(task.MissionID, task.ID, task.CurrentRevision)
+		if err != nil {
+			return store.Spawn{}, fmt.Errorf("retry correction revision %d: %w", task.CurrentRevision, err)
+		}
+		correction = &record
+	}
+	return f.spawnAttemptLocked(ctx, mission, task, correction)
+}
+
+// spawnAttemptLocked performs allocation after the caller has advanced task
+// identity and, for corrections, durably published immutable correction
+// intent. The caller holds the shared mutation lock.
+func (f *Flow) spawnAttemptLocked(ctx context.Context, mission store.Mission, task store.Task, correction *store.Correction) (store.Spawn, error) {
 	attempt := task.CurrentAttempt
-	allocation, err := f.deps.Leases.Acquire(ctx, mission.ProjectPath, LeaseHolder(taskID, attempt))
+	allocation, err := f.deps.Leases.Acquire(ctx, mission.ProjectPath, LeaseHolder(task.ID, attempt))
 	if err != nil {
 		return store.Spawn{}, fmt.Errorf("acquire lease for attempt %d: %w", attempt, err)
 	}
@@ -119,8 +139,14 @@ func (f *Flow) Spawn(ctx context.Context, taskID string, retry bool) (store.Spaw
 		f.deps.Leases.Release(context.Background(), mission.ProjectPath, treehouse.Allocation{
 			WorktreePath: allocation.WorktreePath, LeaseID: allocation.LeaseID, LeaseHolder: allocation.LeaseHolder})
 	}
-	branch := TaskBranch(task.Title, taskID, attempt)
-	snapshot, err := f.deps.Git.CreateTaskBranch(ctx, allocation.WorktreePath, branch)
+	branch := TaskBranch(task.Title, task.ID, attempt)
+	var snapshot gitcontrol.Snapshot
+	if correction == nil {
+		snapshot, err = f.deps.Git.CreateTaskBranch(ctx, allocation.WorktreePath, branch)
+	} else {
+		snapshot, err = f.deps.Git.CreateTaskBranchAt(ctx, allocation.WorktreePath, branch,
+			correction.PublicBranch, correction.BaseSHA)
+	}
 	if err != nil {
 		releaseLease()
 		return store.Spawn{}, fmt.Errorf("create task branch: %w", err)
@@ -134,18 +160,18 @@ func (f *Flow) Spawn(ctx context.Context, taskID string, retry bool) (store.Spaw
 		releaseLease()
 		return store.Spawn{}, err
 	}
-	brief, err := f.renderBrief(homeDir, mission, task, attempt, allocation.WorktreePath, branch, snapshot.Head)
+	brief, err := f.renderBrief(homeDir, mission, task, attempt, allocation.WorktreePath, branch, snapshot.Head, correction)
 	if err != nil {
 		releaseLease()
 		return store.Spawn{}, err
 	}
-	if err := store.PublishBytes(store.AttemptPath(homeDir, task.MissionID, taskID, attempt, "brief.md"), []byte(brief)); err != nil {
+	if err := store.PublishBytes(store.AttemptPath(homeDir, task.MissionID, task.ID, attempt, "brief.md"), []byte(brief)); err != nil {
 		releaseLease()
 		return store.Spawn{}, fmt.Errorf("publish brief: %w", err)
 	}
 	parentWorkspace := f.commanderWorkspace()
 	session, err := f.deps.Panes.StartCodex(ctx, herdr.StartRequest{
-		TaskID: domain.TaskID(taskID), TaskTitle: task.Title, Attempt: attempt,
+		TaskID: domain.TaskID(task.ID), TaskTitle: task.Title, Attempt: attempt,
 		WorktreePath: allocation.WorktreePath, Brief: brief, Model: f.deps.Model,
 		DataHome: homeDir, ParentWorkspace: parentWorkspace})
 	if err != nil {
@@ -153,19 +179,19 @@ func (f *Flow) Spawn(ctx context.Context, taskID string, retry bool) (store.Spaw
 		return store.Spawn{}, fmt.Errorf("start worker pane: %w", err)
 	}
 	spawn := store.Spawn{
-		TaskID: taskID, MissionID: task.MissionID, Attempt: attempt,
+		TaskID: task.ID, MissionID: task.MissionID, Attempt: attempt, Revision: task.CurrentRevision,
 		WorktreePath: allocation.WorktreePath, Branch: branch, BaseSHA: snapshot.Head,
 		LeaseID: allocation.LeaseID, LeaseHolder: allocation.LeaseHolder,
 		Pane: session, AgentRuntime: string(session.Runtime), Model: session.Model,
 		StartedAt: time.Now().UTC(),
 	}
-	if err := store.Publish(store.AttemptPath(homeDir, task.MissionID, taskID, attempt, "spawn.json"), spawn); err != nil {
+	if err := store.Publish(store.AttemptPath(homeDir, task.MissionID, task.ID, attempt, "spawn.json"), spawn); err != nil {
 		releaseLease()
 		return store.Spawn{}, fmt.Errorf("publish spawn receipt: %w", err)
 	}
-	store.AppendWake(taskID, fmt.Sprintf("spawned attempt %d", attempt))
+	store.AppendWake(task.ID, fmt.Sprintf("spawned revision %d attempt %d", task.CurrentRevision, attempt))
 	if parentWorkspace != "" && session.WorkspaceID != parentWorkspace {
-		store.AppendWake(taskID, "registered commander workspace unavailable; worker spawned in an isolated workspace")
+		store.AppendWake(task.ID, "registered commander workspace unavailable; worker spawned in an isolated workspace")
 	}
 	return spawn, nil
 }

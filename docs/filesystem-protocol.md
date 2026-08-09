@@ -19,7 +19,9 @@ attempt each).
   missions/<mission-id>/
     mission.json                        # durable intent: project path, objective
     tasks/<task-id>/
-      task.json                         # public title/branch, private objective + current_attempt
+      task.json                         # public contract + current_revision/current_attempt pointers
+      revisions/<n>/
+        correction.json                # immutable accepted open-PR correction intent (n > 1)
       attempts/<n>/
         brief.md                        # generated work order (input to worker)
         spawn.json                      # spawn receipt (written by sophon spawn)
@@ -65,18 +67,28 @@ attempt each).
    identical re-runs converge, while differing same-kind evidence and
    report-versus-completion conflicts refuse. Workers never write canonical
    truth directly or mutate mission/task intent, outcomes, delivery, or release.
-4. **Attempt fencing.** `task.json.current_attempt` is the incarnation token.
-   `sophon spawn` writes attempt 1; `sophon spawn --retry` fences the previous
-   attempt's lease (conditional release by exact lease id + holder, best
-   effort), bumps `current_attempt`, and spawns the next attempt. Verification
-   and delivery act only on the current attempt; a stale attempt's result is
-   refused loudly without mutating current work.
+4. **Revision and attempt fencing.** The immutable product unit is one verified
+   revision; attempts are replaceable executions within it. `task.json` carries
+   only `current_revision`/`current_attempt` pointers. `sophon spawn` creates
+   revision 1/attempt 1; `spawn --retry` fences the prior exact lease and bumps
+   only the attempt. It cannot extend a delivered revision. `sophon revise`
+   is the sole next-revision owner: after exact open-PR observation it publishes
+   immutable `correction.json`, advances both pointers, then allocates at that
+   recorded head. An exact retry can recover the narrow intent-before-pointer
+   crash window; differing pending intent refuses. A retry inside a correction
+   revision reuses its immutable correction base. Stale revision/attempt
+   evidence is preserved and refused.
 5. **Derived status.** Task state is computed at read time from the exact
    current attempt. A valid exact-identity `release.json` → historical
    `released`; a valid `report.json` → `attention`; a malformed, mismatched, or
    conflicting canonical completion/report/release artifact →
-   `invalid-evidence`; terminal `delivery.json` → `delivered`; `outcome.json` →
-   `verified`; a schema-valid completed `result.json` without outcome → `ready`;
+   `invalid-evidence`; terminal first `delivery.json` → `delivered`; an exact
+   observed open PR → `awaiting-feedback`; correction intent/spawn/result/
+   outcome/validation derive `correction-pending`, `correction-under-way`,
+   `correction-ready`, `correction-verified`, and
+   `correction-awaiting-delivery`; drift → `reconciliation`; a merged PR →
+   `merged`; otherwise `outcome.json` → `verified`; a schema-valid completed
+   `result.json` without outcome → `ready`;
    otherwise the worker pane is observed live → `running`/`idle`/`lost`.
    File presence alone never makes completion ready. Wake lines in
    `state/` are notifications only; absent, duplicated, or contradictory wake
@@ -85,16 +97,18 @@ attempt each).
    to the next session — no recovery transition exists. A fenced attempt's
    result, report, or release never affects the current attempt.
    The same derivation also yields the commander action queue: every `ready`
-   task maps to an exact `sophon verify-complete <task-id>` action and every
-   `verified` task whose configured validation has no receipt yet maps to an
+   or `correction-ready` task maps to an exact `sophon verify-complete
+   <task-id>` action and every `verified` or `correction-verified` task whose
+   configured validation has no receipt yet maps to an
    exact `sophon validate <task-id>` action, printed by `sophon status` as
    the commands to run (verify actions first). An existing validation
    receipt — pass or fail — is terminal for the queue; a failed validation is
    correction routing, never a blind re-run. `attention`, `invalid-evidence`,
    and `released` never emit automated actions.
-   Normal `sophon status` is the operational view: it omits released tasks and
-   missions containing only released tasks. `sophon status --all` retains every
-   durable mission/task and labels released current attempts explicitly;
+   Normal `sophon status` is the operational view: it keeps an exact open PR
+   visible even when its worker copy is released, and omits other released
+   tasks/missions. `sophon status --all` retains the complete revision/attempt
+   chain and labels released attempts explicitly;
    `delivery_state` distinguishes `not-delivered` from terminal delivery
    receipts without implying release performed delivery. No record is deleted
    or compacted. `sophon mission list` remains durable mission history.
@@ -142,25 +156,36 @@ attempt each).
    exact pane is success), refuses malformed recorded identity, and needs no
    cleanup receipt because the tab close is directly observable and a retry
    converges via reality. Until the terminal boundary the worker pane stays
-   available for corrections to the same attempt.
+   available for recovery within the same attempt; accepted feedback after
+   delivery allocates a new revision and worker at the exact open-PR head.
 9. **External boundaries.** The lease boundary uses exact identity guards:
    release is conditional on `(lease_id, holder)` and fences on mismatch. The
-   forge boundary keeps the generated execution branch local and pushes the
-   exact verified SHA to the explicit public delivery branch recorded at task
-   intake. Before intent publication, push, or forge write, one public-surface
-   preflight validates that branch, the concise public title, the curated PR
-   body, and every outgoing commit message. It rejects unmistakable internal
-   branding, record/attempt identity, allocator/runtime details, internal
-   paths, and prompt mechanics while allowing ordinary product terminology.
-   PR bodies are rendered only from the public task title and safe structured
-   result evidence; private verification setup is omitted while preserving a
-   useful pass result. Delivery rejects a pre-existing public branch at a
-   different SHA, and find-or-creates a PR by repository + explicit public
-   branch + exact SHA. Where an external effect creates a real crash
-   window, the command writes typed intent before the effect and a typed
-   receipt after (`delivery.json`, `release.json`); re-running the same command
-   converges to the same result via observed reality. There is no generalized
-   command ledger.
+   forge boundary keeps generated execution branches private and pushes an
+   exact verified SHA to the explicit public delivery branch. Before any push
+   or forge write, the public-surface owner preflights branch identity, concise
+   title, curated body, and every outgoing commit message; initial PR bodies
+   come only from public task intent plus safe structured result evidence.
+   Initial title/body are then human-owned, so corrections preserve them
+   rather than blindly overwriting review edits.
+
+   First PR delivery rejects a public branch at another SHA and find-or-creates
+   by repository + branch + exact SHA. Correction intake and delivery re-read
+   canonical repository/number/URL, base repository/branch, head branch, forge
+   head, and remote head. Intake requires an open PR with matching heads,
+   publishes typed correction intent before allocation, and creates the private
+   branch at that exact SHA. Delivery requires a strict descendant plus a fresh
+   `--confirmed`, publishes revision/attempt intent, rechecks immediately, and
+   uses an ordinary (never force) fast-forward refspec to the same branch/PR.
+   A landed push with a missing receipt converges by observation without a
+   duplicate push or PR. Merged is terminal. Closed-unmerged, deleted,
+   transferred, base/repository/branch drift, post-intent external changes, or
+   non-fast-forward history refuses reconciliation. A reviewed external
+   fast-forward before intake may be accepted with
+   `revise --accept-external-head` only after Git proves descent.
+
+   External effects with crash windows publish typed intent before the effect
+   and a typed receipt after (`delivery.json`, `release.json`); re-running
+   converges from observed reality. There is no generalized command ledger.
 10. **Authority.** A live commander session may verify and validate
    autonomously. Every delivery effect requires operator confirmation, enforced
    mechanically: `sophon deliver` refuses without `--confirmed`. With no
@@ -182,12 +207,14 @@ sophon monitor status [--json]
 sophon monitor stop
 sophon spawn <task-id> [--retry]
 sophon worker progress <task-id> --attempt <n> --phase <phase> [--message <note>]
+sophon revise <task-id> --reason <same-contract-reason>
+                    --objective <bounded-correction> [--accept-external-head]
 sophon worker complete <task-id> --attempt <n> --head-sha <sha> --result <path>
 sophon worker report <task-id> --attempt <n> --head-sha <sha> --report <path>
 sophon verify-complete <task-id>
 sophon validate <task-id>
 sophon deliver <task-id> --confirmed
-sophon release <task-id>
+sophon release <task-id> [--attempt <n>]
 sophon status [--json] [--all]
 sophon send <task-id> <message>
 sophon prompt commander
@@ -201,10 +228,16 @@ single printable public line of at most 120 characters (including an issue
 key naturally when appropriate); `--objective` is the detailed private work
 order; and `--delivery-branch` is a valid, explicitly public-safe Git branch
 used by both branch and PR delivery. No field falls back to another. Records
-created before this schema remain readable historical evidence: an already
-terminal delivery receipt is returned unchanged, while any not-yet-delivered
-record missing safe public intent fails delivery preflight without a migration
-or compatibility fallback.
+created before this schema remain readable historical evidence. An already
+successful delivery receipt for the exact revision/attempt is returned
+unchanged. A historical open PR whose
+exact branch predates the public-name sanitizer may be corrected only by
+retaining that already-public identity; correction title/body/commits still
+pass content preflight, and no new task may create such a branch.
+Historical PR receipts that predate recorded base/revision fields remain
+immutable: intake verifies their recorded repository/branch/number/URL and
+head, reads the missing canonical base identity from the forge, and pins that
+complete identity only in the new correction record.
 
 Spawn resolves the data home once to a clean absolute path and propagates
 that exact non-secret value two ways: as a `SOPHON_DATA_HOME` environment
@@ -231,6 +264,8 @@ environment; no other environment values cross the launch boundary.
 - Worker tab grouping and pane retirement are presentation only. Layout never
   participates in correctness, and retirement never releases a lease or
   discards work.
-- Validation is re-run on demand; there is no content-addressed cache.
+- Validation receipts are immutable per attempt. A failed receipt keeps that
+  attempt's evidence and worker path; a replacement attempt within the same
+  revision is required for a new verified head and validation receipt.
 - Single operator, single machine. No multi-machine, remote workers, or
   auto-merge.

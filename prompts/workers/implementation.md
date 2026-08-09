@@ -4,6 +4,7 @@ You produce the repository change described by the task brief.
 This overlay extends the common worker prompt.
 
 Start from the assigned base SHA and preserve all pre-existing work.
+When the brief identifies an existing open PR, treat that exact PR head as immutable history and add only a strict-descendant correction commit; do not recreate the original change or prepare a replacement PR.
 Implement the smallest evidence-supported change that satisfies the brief's objective.
 Add or update behavioral regression coverage when the repository has an executable contract.
 Do not use a technically convenient change to broaden product behavior or compatibility.

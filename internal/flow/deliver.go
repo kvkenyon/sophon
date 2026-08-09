@@ -14,10 +14,9 @@ import (
 	"sophon/internal/store"
 )
 
-// Deliver executes the operator-confirmed delivery for the current attempt.
-// It publishes typed intent before any external effect and a receipt after,
-// so re-running converges: a terminal receipt for the same head returns
-// unchanged, and a pending intent is completed from observed reality.
+// Deliver executes one explicitly confirmed delivery effect for the current
+// attempt/revision. First delivery creates the public surface; correction
+// delivery only fast-forwards the exact existing open PR branch.
 func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (store.Delivery, error) {
 	if !confirmed {
 		return store.Delivery{}, ErrNotConfirmed
@@ -64,7 +63,6 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 				ErrHeadMismatch, existing.HeadSHA, outcome.HeadSHA)
 		}
 		if existing.State.Terminal() {
-			// Idempotent re-run: the same attempt and head already delivered.
 			return existing, nil
 		}
 		prior = &existing
@@ -74,6 +72,18 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 	spawn, err := store.ReadSpawn(task.MissionID, taskID, attempt)
 	if err != nil {
 		return store.Delivery{}, err
+	}
+	if outcome.TaskID != taskID || outcome.Attempt != attempt ||
+		(outcome.Revision != 0 && outcome.Revision != spawn.Revision) {
+		return store.Delivery{}, fmt.Errorf("%w: outcome identity does not match current revision", ErrEvidenceConflict)
+	}
+	revision := spawn.Revision
+	if revision == 0 {
+		revision = store.CurrentRevision(task)
+	}
+	correction, correctionErr := store.ReadCorrection(task.MissionID, taskID, revision)
+	if correctionErr != nil && !errors.Is(correctionErr, store.ErrNotFound) {
+		return store.Delivery{}, correctionErr
 	}
 	if err := f.deps.DeliveryGit.VerifyHead(ctx, spawn.WorktreePath, spawn.Branch, outcome.HeadSHA); err != nil {
 		return store.Delivery{}, err
@@ -87,7 +97,11 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 	if err != nil {
 		return store.Delivery{}, err
 	}
-	if err := publicsurface.Preflight(task.DeliveryBranch, task.Title, body, commitMessages); err != nil {
+	preflight := publicsurface.Preflight
+	if correctionErr == nil {
+		preflight = publicsurface.PreflightExistingBranch
+	}
+	if err := preflight(task.DeliveryBranch, task.Title, body, commitMessages); err != nil {
 		return store.Delivery{}, fmt.Errorf("public delivery preflight refused: %w", err)
 	}
 	if prior != nil && prior.State == store.DeliveryPending &&
@@ -101,9 +115,29 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 	if prior != nil && prior.State == store.DeliveryPending && prior.Repository != repository {
 		return store.Delivery{}, errors.New("pending delivery intent does not match current repository")
 	}
-	// Read-only collision observation precedes the typed intent. Every external
-	// write follows it; a pending intent for the same head keeps its original
-	// timestamp while converging.
+	if prior != nil && prior.State == store.DeliveryPending &&
+		(prior.TaskID != task.ID || prior.Attempt != attempt ||
+			(prior.Revision != 0 && prior.Revision != revision)) {
+		return store.Delivery{}, errors.New("pending delivery intent does not match current revision and attempt")
+	}
+	var receipt store.Delivery
+	if correctionErr == nil {
+		receipt, err = f.deliverCorrection(ctx, task, spawn, outcome, correction, prior, repository, deliveryPath)
+	} else {
+		receipt, err = f.deliverFirst(ctx, task, spawn, outcome, prior, repository, body, deliveryPath)
+	}
+	if err != nil {
+		return store.Delivery{}, err
+	}
+	if err := store.Publish(deliveryPath, receipt); err != nil {
+		return store.Delivery{}, fmt.Errorf("publish delivery receipt: %w", err)
+	}
+	store.AppendWake(taskID, fmt.Sprintf("delivered: revision %d attempt %d (%s)", revision, attempt, receipt.State))
+	return receipt, nil
+}
+
+func (f *Flow) deliverFirst(ctx context.Context, task store.Task, spawn store.Spawn, outcome store.Outcome,
+	prior *store.Delivery, repository, body, deliveryPath string) (store.Delivery, error) {
 	remoteHead, branchExists, err := f.deps.DeliveryRemote.BranchHead(ctx, repository, spawn.WorktreePath, task.DeliveryBranch)
 	if err != nil {
 		return store.Delivery{}, err
@@ -111,11 +145,25 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 	if branchExists && !strings.EqualFold(remoteHead, outcome.HeadSHA) {
 		return store.Delivery{}, fmt.Errorf("public delivery branch %q already exists at a different head", task.DeliveryBranch)
 	}
-	intent := store.Delivery{TaskID: taskID, Attempt: attempt, Mode: task.DeliveryMode,
+	baseBranch := ""
+	if task.DeliveryMode == domain.DeliveryPR {
+		if prior != nil && prior.BaseBranch != "" {
+			baseBranch = prior.BaseBranch
+		} else {
+			baseBranch, err = f.deps.DeliveryRemote.DefaultBranch(ctx, repository, spawn.WorktreePath)
+			if err != nil {
+				return store.Delivery{}, err
+			}
+		}
+	}
+	intent := store.Delivery{TaskID: task.ID, Attempt: spawn.Attempt, Revision: spawn.Revision, Mode: task.DeliveryMode,
 		Repository: repository, Branch: task.DeliveryBranch, HeadSHA: outcome.HeadSHA,
-		State: store.DeliveryPending, IntentAt: time.Now().UTC()}
+		BaseRepository: repository, BaseBranch: baseBranch, State: store.DeliveryPending, IntentAt: time.Now().UTC()}
 	if prior != nil && prior.State == store.DeliveryPending {
 		intent.IntentAt = prior.IntentAt
+		if prior.BaseRepository != "" {
+			intent.BaseRepository = prior.BaseRepository
+		}
 	}
 	if err := store.Publish(deliveryPath, intent); err != nil {
 		return store.Delivery{}, fmt.Errorf("publish delivery intent: %w", err)
@@ -139,9 +187,13 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 	case domain.DeliveryBranch:
 		receipt.State = store.DeliveryDeliveredBranch
 	case domain.DeliveryPR:
-		pr, err := f.findOrCreatePullRequest(ctx, task, repository, spawn.WorktreePath, outcome.HeadSHA, body)
+		pr, err := f.findOrCreatePullRequest(ctx, task, repository, spawn.WorktreePath, outcome.HeadSHA, body, baseBranch)
 		if err != nil {
 			return store.Delivery{}, err
+		}
+		if pr.Repository != repository || pr.Branch != task.DeliveryBranch || pr.BaseRepository != repository ||
+			pr.BaseBranch != baseBranch || !strings.EqualFold(pr.HeadSHA, outcome.HeadSHA) {
+			return store.Delivery{}, fmt.Errorf("%w: created pull request identity does not match delivery intent", ErrReconciliation)
 		}
 		receipt.State = store.DeliveryDeliveredPR
 		receipt.PRURL = pr.URL
@@ -149,10 +201,68 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 	default:
 		return store.Delivery{}, fmt.Errorf("unknown delivery mode %q", task.DeliveryMode)
 	}
-	if err := store.Publish(deliveryPath, receipt); err != nil {
-		return store.Delivery{}, fmt.Errorf("publish delivery receipt: %w", err)
+	return receipt, nil
+}
+
+func (f *Flow) deliverCorrection(ctx context.Context, task store.Task, spawn store.Spawn, outcome store.Outcome,
+	correction store.Correction, prior *store.Delivery, repository, deliveryPath string) (store.Delivery, error) {
+	if task.DeliveryMode != domain.DeliveryPR || repository != correction.Repository ||
+		spawn.Revision != correction.Revision || !strings.EqualFold(spawn.BaseSHA, correction.BaseSHA) {
+		return store.Delivery{}, fmt.Errorf("%w: correction spawn does not match immutable correction intent", ErrReconciliation)
 	}
-	store.AppendWake(taskID, fmt.Sprintf("delivered: attempt %d (%s)", attempt, receipt.State))
+	if err := f.deps.DeliveryGit.VerifyStrictDescendant(ctx, spawn.WorktreePath, correction.BaseSHA, outcome.HeadSHA); err != nil {
+		return store.Delivery{}, fmt.Errorf("correction head must strictly descend from exact PR head: %w", err)
+	}
+	intent := store.Delivery{TaskID: task.ID, Attempt: spawn.Attempt, Revision: correction.Revision, Mode: domain.DeliveryPR,
+		Repository: repository, Branch: correction.PublicBranch, HeadSHA: outcome.HeadSHA, PriorHeadSHA: correction.BaseSHA,
+		BaseRepository: correction.BaseRepository, BaseBranch: correction.BaseBranch,
+		PRURL: correction.PRURL, PRNumber: correction.PRNumber,
+		State: store.DeliveryPending, IntentAt: time.Now().UTC()}
+	if prior != nil && prior.State == store.DeliveryPending {
+		if prior.PriorHeadSHA != intent.PriorHeadSHA || prior.BaseRepository != intent.BaseRepository ||
+			prior.BaseBranch != intent.BaseBranch || prior.PRURL != intent.PRURL || prior.PRNumber != intent.PRNumber {
+			return store.Delivery{}, errors.New("pending correction delivery intent does not match immutable PR identity")
+		}
+		intent.IntentAt = prior.IntentAt
+	}
+	if err := store.Publish(deliveryPath, intent); err != nil {
+		return store.Delivery{}, fmt.Errorf("publish correction delivery intent: %w", err)
+	}
+	expected := store.Delivery{Repository: correction.Repository, Branch: correction.PublicBranch,
+		HeadSHA: correction.BaseSHA, BaseRepository: correction.BaseRepository, BaseBranch: correction.BaseBranch,
+		PRURL: correction.PRURL, PRNumber: correction.PRNumber, State: store.DeliveryDeliveredPR}
+	pr, remoteHead, err := f.observeExactPR(ctx, spawn.WorktreePath, expected)
+	if err != nil {
+		return store.Delivery{}, err
+	}
+	if pr.State != delivery.PullRequestOpen {
+		if pr.State == delivery.PullRequestMerged {
+			return store.Delivery{}, errors.New("pull request merged before correction delivery; no push performed")
+		}
+		return store.Delivery{}, errors.New("pull request closed before correction delivery; operator reconciliation required")
+	}
+	switch {
+	case strings.EqualFold(remoteHead, correction.BaseSHA):
+		if err := f.deps.DeliveryRemote.PushFastForward(ctx, repository, spawn.WorktreePath,
+			correction.PublicBranch, correction.BaseSHA, outcome.HeadSHA); err != nil {
+			return store.Delivery{}, fmt.Errorf("fast-forward existing pull request branch: %w", err)
+		}
+	case prior != nil && prior.State == store.DeliveryPending && strings.EqualFold(remoteHead, outcome.HeadSHA):
+		// Crash recovery: the ordinary fast-forward already landed.
+	default:
+		return store.Delivery{}, fmt.Errorf("%w: correction base %s, current public head %s", ErrReconciliation, correction.BaseSHA, remoteHead)
+	}
+	pr, remoteHead, err = f.observeExactPR(ctx, spawn.WorktreePath, expected)
+	if err != nil {
+		return store.Delivery{}, err
+	}
+	if pr.State != delivery.PullRequestOpen || !strings.EqualFold(remoteHead, outcome.HeadSHA) {
+		return store.Delivery{}, fmt.Errorf("%w: existing pull request did not converge to correction head", ErrReconciliation)
+	}
+	now := time.Now().UTC()
+	receipt := intent
+	receipt.State = store.DeliveryDeliveredPR
+	receipt.DeliveredAt = &now
 	return receipt, nil
 }
 
@@ -160,7 +270,7 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 // creating it when absent and reconciling through observed reality when the
 // create races an existing PR.
 func (f *Flow) findOrCreatePullRequest(ctx context.Context, task store.Task,
-	repository, worktree, headSHA, body string) (*delivery.PullRequest, error) {
+	repository, worktree, headSHA, body, baseBranch string) (*delivery.PullRequest, error) {
 	branch := task.DeliveryBranch
 	pr, err := f.deps.DeliveryRemote.FindPullRequest(ctx, repository, worktree, branch, headSHA)
 	if err != nil {
@@ -171,10 +281,13 @@ func (f *Flow) findOrCreatePullRequest(ctx context.Context, task store.Task,
 	}
 	created, err := f.deps.DeliveryRemote.CreatePullRequest(ctx, delivery.PullRequestInput{
 		Repository: repository, Worktree: worktree, Branch: branch,
-		HeadSHA: headSHA, Title: task.Title,
-		Body: body})
+		HeadSHA: headSHA, Base: baseBranch, Title: task.Title, Body: body})
 	if err == nil {
-		return &created, nil
+		observed, observeErr := f.deps.DeliveryRemote.ObservePullRequest(ctx, repository, created.Number)
+		if observeErr != nil {
+			return nil, observeErr
+		}
+		return &observed, nil
 	}
 	if reconciled, findErr := f.deps.DeliveryRemote.FindPullRequest(ctx, repository, worktree,
 		branch, headSHA); findErr == nil && reconciled != nil {

@@ -43,6 +43,20 @@ func (f *Flow) Validate(ctx context.Context, taskID string) (store.Validation, e
 	if err != nil {
 		return store.Validation{}, err
 	}
+	if outcome.TaskID != taskID || outcome.Attempt != attempt ||
+		(outcome.Revision != 0 && outcome.Revision != spawn.Revision) {
+		return store.Validation{}, fmt.Errorf("%w: outcome identity does not match current revision", ErrEvidenceConflict)
+	}
+	if existing, err := store.ReadValidation(task.MissionID, taskID, attempt); err == nil {
+		if existing.TaskID != taskID || existing.Attempt != attempt ||
+			(existing.Revision != 0 && existing.Revision != spawn.Revision) ||
+			existing.Command != task.ValidationCommand || !strings.EqualFold(existing.HeadSHA, outcome.HeadSHA) {
+			return store.Validation{}, fmt.Errorf("%w: existing validation identity does not match current revision", ErrEvidenceConflict)
+		}
+		return existing, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return store.Validation{}, err
+	}
 	result, err := f.deps.NewValidator(task.ValidationCommand).Run(ctx, spawn.WorktreePath)
 	if err != nil {
 		return store.Validation{}, fmt.Errorf("run validation: %w", err)
@@ -55,7 +69,7 @@ func (f *Flow) Validate(ctx context.Context, taskID string) (store.Validation, e
 	if !strings.EqualFold(snapshot.Head, outcome.HeadSHA) {
 		return store.Validation{}, fmt.Errorf("%w: head moved to %s during validation", ErrHeadMismatch, snapshot.Head)
 	}
-	record := store.Validation{TaskID: taskID, Attempt: attempt, Command: task.ValidationCommand,
+	record := store.Validation{TaskID: taskID, Attempt: attempt, Revision: spawn.Revision, Command: task.ValidationCommand,
 		HeadSHA: outcome.HeadSHA, ExitCode: result.ExitCode,
 		Passed: result.Status == validation.Passed, RanAt: time.Now().UTC()}
 	homeDir, err := datahome.Dir()

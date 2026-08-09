@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"sophon/internal/datahome"
+	"sophon/internal/delivery"
+	"sophon/internal/domain"
 	"sophon/internal/store"
 	"sophon/internal/treehouse"
 )
@@ -16,6 +18,13 @@ import (
 // recorded identity and publishes release.json. Re-running returns the
 // existing receipt without touching Treehouse.
 func (f *Flow) ReleaseLease(ctx context.Context, taskID string) (store.Release, error) {
+	return f.ReleaseLeaseAttempt(ctx, taskID, 0)
+}
+
+// ReleaseLeaseAttempt retires one exact immutable attempt copy. attempt zero
+// selects the current attempt; an explicit historical attempt lets revisions
+// be cleaned up independently without changing task/PR continuation truth.
+func (f *Flow) ReleaseLeaseAttempt(ctx context.Context, taskID string, requestedAttempt int) (store.Release, error) {
 	if f.deps.Leases == nil {
 		return store.Release{}, errors.New("flow is not fully configured for lease release")
 	}
@@ -28,16 +37,21 @@ func (f *Flow) ReleaseLease(ctx context.Context, taskID string) (store.Release, 
 	if err != nil {
 		return store.Release{}, err
 	}
-	attempt, err := currentAttempt(task)
-	if err != nil {
-		return store.Release{}, err
+	attempt := requestedAttempt
+	if attempt == 0 {
+		attempt, err = currentAttempt(task)
+		if err != nil {
+			return store.Release{}, err
+		}
+	} else if attempt < 1 || attempt > task.CurrentAttempt {
+		return store.Release{}, fmt.Errorf("release attempt %d is outside task history", attempt)
 	}
 	spawn, err := store.ReadSpawn(task.MissionID, taskID, attempt)
 	if err != nil {
 		return store.Release{}, err
 	}
 	if existing, err := store.ReadRelease(task.MissionID, taskID, attempt); err == nil {
-		if existing.TaskID != taskID || existing.Attempt != attempt || existing.LeaseID != spawn.LeaseID ||
+		if existing.TaskID != taskID || existing.Attempt != attempt || (existing.Revision != 0 && existing.Revision != spawn.Revision) || existing.LeaseID != spawn.LeaseID ||
 			existing.LeaseHolder != spawn.LeaseHolder || existing.ReleasedAt.IsZero() {
 			return store.Release{}, fmt.Errorf("%w: existing release receipt does not match current spawn identity", ErrEvidenceConflict)
 		}
@@ -52,7 +66,7 @@ func (f *Flow) ReleaseLease(ctx context.Context, taskID string) (store.Release, 
 		return store.Release{}, fmt.Errorf("release lease %s/%s for attempt %d: %w",
 			spawn.LeaseID, spawn.LeaseHolder, attempt, err)
 	}
-	record := store.Release{TaskID: taskID, Attempt: attempt, LeaseID: spawn.LeaseID,
+	record := store.Release{TaskID: taskID, Attempt: attempt, Revision: spawn.Revision, LeaseID: spawn.LeaseID,
 		LeaseHolder: spawn.LeaseHolder, ReleasedAt: time.Now().UTC()}
 	homeDir, err := datahome.Dir()
 	if err != nil {
@@ -127,16 +141,30 @@ func (f *Flow) Status(ctx context.Context, includeReleased ...bool) (Report, err
 			}
 			if status.State == store.StateActive {
 				status = f.augmentActive(ctx, status)
+			} else if status.State == store.StateCorrectionActive {
+				live := status
+				live.State = store.StateActive
+				live = f.augmentActive(ctx, live)
+				status.Detail = "worker=" + live.State
+			}
+			if task.DeliveryMode == domain.DeliveryPR {
+				status = f.augmentPullRequest(ctx, mission, status)
+			}
+			if showAll {
+				status.Revisions, err = store.DeriveHistory(task)
+				if err != nil {
+					return Report{}, err
+				}
 			}
 			if status.State == store.StateReleased && !showAll {
 				continue
 			}
 			entry.Tasks = append(entry.Tasks, status)
 			switch {
-			case status.State == store.StateReady:
+			case status.State == store.StateReady || status.State == store.StateCorrectionReady:
 				verify = append(verify, Action{TaskID: task.ID, Kind: ActionVerifyComplete,
 					Command: "sophon verify-complete " + task.ID})
-			case status.State == store.StateVerified && strings.TrimSpace(task.ValidationCommand) != "":
+			case (status.State == store.StateVerified || status.State == store.StateCorrectionVerified) && strings.TrimSpace(task.ValidationCommand) != "":
 				if _, err := store.ReadValidation(task.MissionID, task.ID, status.Attempt); errors.Is(err, store.ErrNotFound) {
 					validate = append(validate, Action{TaskID: task.ID, Kind: ActionValidate,
 						Command: "sophon validate " + task.ID})
@@ -151,6 +179,84 @@ func (f *Flow) Status(ctx context.Context, includeReleased ...bool) (Report, err
 	}
 	report.Actions = append(verify, validate...)
 	return report, nil
+}
+
+// augmentPullRequest derives the live continuation/reconciliation state from
+// typed identity plus a fresh forge and remote observation. Merged PRs become
+// terminal; an open exact PR remains an operational delivery surface even
+// after its worker copy was released.
+func (f *Flow) augmentPullRequest(ctx context.Context, mission store.Mission, status store.TaskStatus) store.TaskStatus {
+	if f.deps.DeliveryRemote == nil {
+		return status
+	}
+	task := status.Task
+	currentDelivery, deliveryErr := store.ReadDelivery(task.MissionID, task.ID, status.Attempt)
+	if deliveryErr == nil && currentDelivery.State == store.DeliveryDeliveredPR {
+		delivered := currentDelivery
+		pr, head, observeErr := f.observeExactPR(ctx, mission.ProjectPath, delivered)
+		if observeErr != nil {
+			status.State = store.StateReconciliation
+			status.Detail = observeErr.Error()
+			return status
+		}
+		if !strings.EqualFold(head, delivered.HeadSHA) {
+			status.State = store.StateReconciliation
+			status.Detail = fmt.Sprintf("public head %s differs from delivered revision head %s", head, delivered.HeadSHA)
+			return status
+		}
+		switch pr.State {
+		case delivery.PullRequestOpen:
+			status.State = store.StateAwaitingFeedback
+			status.Detail = "open pull request awaiting feedback: " + delivered.PRURL
+		case delivery.PullRequestMerged:
+			if _, releaseErr := store.ReadRelease(task.MissionID, task.ID, status.Attempt); releaseErr == nil {
+				status.State = store.StateReleased
+				status.DeliveryState = string(delivered.State)
+				status.Detail = "merged pull request; lease returned"
+			} else {
+				status.State = store.StateMerged
+				status.Detail = "pull request merged: " + delivered.PRURL
+			}
+		case delivery.PullRequestClosed:
+			status.State = store.StateReconciliation
+			status.Detail = "pull request closed without merge; operator must choose reopen or replacement"
+		}
+		return status
+	} else if deliveryErr != nil && !errors.Is(deliveryErr, store.ErrNotFound) {
+		status.State = store.StateReconciliation
+		status.Detail = "cannot read current delivery identity: " + deliveryErr.Error()
+		return status
+	}
+
+	correction, err := store.ReadCorrection(task.MissionID, task.ID, status.Revision)
+	if errors.Is(err, store.ErrNotFound) {
+		return status
+	}
+	if err != nil {
+		status.State = store.StateReconciliation
+		status.Detail = "cannot read correction identity: " + err.Error()
+		return status
+	}
+	expected := store.Delivery{Repository: correction.Repository, Branch: correction.PublicBranch,
+		HeadSHA: correction.BaseSHA, BaseRepository: correction.BaseRepository, BaseBranch: correction.BaseBranch,
+		PRURL: correction.PRURL, PRNumber: correction.PRNumber, State: store.DeliveryDeliveredPR}
+	pr, head, observeErr := f.observeExactPR(ctx, mission.ProjectPath, expected)
+	if observeErr == nil && pr.State == delivery.PullRequestOpen && deliveryErr == nil &&
+		currentDelivery.State == store.DeliveryPending && strings.EqualFold(currentDelivery.PriorHeadSHA, correction.BaseSHA) &&
+		strings.EqualFold(head, currentDelivery.HeadSHA) {
+		status.State = store.StateCorrectionAwaitingDelivery
+		status.Detail = "correction push observed at exact head; delivery receipt pending recovery"
+		return status
+	}
+	if observeErr != nil || pr.State != delivery.PullRequestOpen || !strings.EqualFold(head, correction.BaseSHA) {
+		status.State = store.StateReconciliation
+		if observeErr != nil {
+			status.Detail = observeErr.Error()
+		} else {
+			status.Detail = fmt.Sprintf("correction base drifted: state=%s head=%s expected=%s", pr.State, head, correction.BaseSHA)
+		}
+	}
+	return status
 }
 
 // augmentActive observes the current attempt's pane live; adapter failures

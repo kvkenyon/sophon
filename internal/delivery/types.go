@@ -10,12 +10,21 @@ var (
 )
 
 type PullRequest struct {
-	Repository string `json:"repository"`
-	Branch     string `json:"branch"`
-	HeadSHA    string `json:"head_sha"`
-	URL        string `json:"url"`
-	Number     int    `json:"number"`
+	Repository     string `json:"repository"`
+	Branch         string `json:"branch"`
+	HeadSHA        string `json:"head_sha"`
+	BaseRepository string `json:"base_repository"`
+	BaseBranch     string `json:"base_branch"`
+	State          string `json:"state"`
+	URL            string `json:"url"`
+	Number         int    `json:"number"`
 }
+
+const (
+	PullRequestOpen   = "open"
+	PullRequestClosed = "closed"
+	PullRequestMerged = "merged"
+)
 
 type PullRequestInput struct {
 	Repository string

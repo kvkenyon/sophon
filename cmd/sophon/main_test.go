@@ -68,6 +68,7 @@ func newCLIFixture(t *testing.T) *cliFixture {
 	runCLIGit(t, project, "commit", "-m", "base")
 	runCLIGit(t, project, "remote", "add", "origin", origin)
 	runCLIGit(t, project, "push", "-u", "origin", "main")
+	runCLIGit(t, origin, "symbolic-ref", "HEAD", "refs/heads/main")
 
 	// The fake git wrapper delegates everything to the real binary except the
 	// delivery repository identity, which must normalize to host/owner/repo.
@@ -172,13 +173,18 @@ state=%s
 paneclosed() {
   n=${1##*:p}
   [ "$n" != "$1" ] || return 1
-  [ "$n" = 1 ] && return 1
   max=$(cat "$state/tabs" 2>/dev/null || echo 1)
   [ "$n" -le "$max" ] 2>/dev/null || return 0
   grep -qx "w1:t$n" "$state/closed" 2>/dev/null
 }
 case "$1 $2" in
-  "workspace create") printf 'workspace-create cwd=%%s label=%%s\n' "$4" "$6" >> "$log"; printf '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}\n' ;;
+  "workspace create")
+    printf 'workspace-create cwd=%%s label=%%s\n' "$4" "$6" >> "$log"
+    n=$(cat "$state/tabs" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "$state/tabs"
+    printf '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t%%s"},"root_pane":{"pane_id":"w1:p%%s"}}}\n' "$n" "$n"
+    ;;
   "tab create")
     printf 'tab-create workspace=%%s cwd=%%s label=%%s\n' "$4" "$6" "$8" >> "$log"
     n=$(cat "$state/tabs" 2>/dev/null || echo 1)
@@ -214,8 +220,15 @@ prstate=%s
 titlefile=%s
 bodyfile=%s
 headfile=%s
+origin=%s
+realgit=%s
 printf '%%s\n' "$*" >> "$log"
 case "${1:-} ${2:-}" in
+	"api /repos/acme/product/pulls/7")
+		branch=$(cat "$headfile")
+		head=$($realgit --git-dir "$origin" rev-parse "refs/heads/$branch")
+		printf 'api_response:\n  body: "7|https://github.com/acme/product/pull/7|open|false|%%s|%%s|acme/product|main|acme/product"\n  truncated: false\n' "$head" "$branch"
+		;;
   "pr list")
     if [ -f "$prstate" ]; then
       printf 'pull_requests[0]{number,url}\n7,https://github.com/acme/product/pull/7\n'
@@ -241,7 +254,7 @@ case "${1:-} ${2:-}" in
     ;;
   *) exit 2 ;;
 esac
-`, shellQuote(ghLog), shellQuote(prState), shellQuote(ghTitle), shellQuote(ghBody), shellQuote(ghHead)), 0o700)
+`, shellQuote(ghLog), shellQuote(prState), shellQuote(ghTitle), shellQuote(ghBody), shellQuote(ghHead), shellQuote(origin), shellQuote(realGit)), 0o700)
 
 	return &cliFixture{home: home, project: project, git: gitBinary, gitLog: gitLog,
 		treehouse: treehouseBinary, herdr: herdrBinary, ghAxi: ghBinary, ghLog: ghLog,
@@ -293,7 +306,7 @@ func (f *cliFixture) spawnTask(t *testing.T, taskID string, extra ...string) sto
 	if err := json.Unmarshal(output, &spawned); err != nil {
 		t.Fatal(err)
 	}
-	if spawned.Pane.PaneID != "w1:p1" || spawned.LeaseID == "" {
+	if spawned.Pane.PaneID == "" || spawned.LeaseID == "" {
 		t.Fatalf("spawned = %+v", spawned)
 	}
 	return spawned
@@ -351,7 +364,8 @@ func (f *cliFixture) verifyComplete(t *testing.T, taskID string) store.Outcome {
 
 func (f *cliFixture) statusReport(t *testing.T) flow.Report {
 	t.Helper()
-	output := runCLI(t, "status", "--json", "--herdr", f.herdr, "--herdr-session", "fm-lab-cli-test")
+	output := runCLI(t, "status", "--json", "--herdr", f.herdr, "--herdr-session", "fm-lab-cli-test",
+		"--git", f.git, "--gh-axi", f.ghAxi)
 	var report flow.Report
 	if err := json.Unmarshal(output, &report); err != nil {
 		t.Fatal(err)
@@ -375,7 +389,8 @@ func (f *cliFixture) taskStatus(t *testing.T, taskID string) store.TaskStatus {
 
 func (f *cliFixture) taskStatusAll(t *testing.T, taskID string) store.TaskStatus {
 	t.Helper()
-	output := runCLI(t, "status", "--json", "--all", "--herdr", f.herdr, "--herdr-session", "fm-lab-cli-test")
+	output := runCLI(t, "status", "--json", "--all", "--herdr", f.herdr, "--herdr-session", "fm-lab-cli-test",
+		"--git", f.git, "--gh-axi", f.ghAxi)
 	var report flow.Report
 	if err := json.Unmarshal(output, &report); err != nil {
 		t.Fatal(err)
@@ -717,6 +732,146 @@ func TestCLIPullRequestDeliveryIsIdempotent(t *testing.T) {
 		t.Fatalf("gh-axi pr create calls = %d, want 1", count)
 	}
 	assertNoDatabaseFiles(t, fixture.home)
+}
+
+func TestCLIOpenPullRequestCorrectionFastForwardsSamePR(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "Open PR correction")
+	task := fixture.createTask(t, mission.ID, "--delivery", "pr", "--validate", "test -f change-1.txt")
+	firstSpawn := fixture.spawnTask(t, task.ID)
+	firstHead := fixture.completeWorker(t, mission.ID, task.ID, 1)
+	fixture.verifyComplete(t, task.ID)
+	runCLI(t, "validate", task.ID, "--git", fixture.git, "--herdr", fixture.herdr)
+	firstJSON := runCLI(t, "deliver", task.ID, "--confirmed", "--git", fixture.git, "--gh-axi", fixture.ghAxi)
+	var first store.Delivery
+	if err := json.Unmarshal(firstJSON, &first); err != nil {
+		t.Fatal(err)
+	}
+	if first.PRNumber != 7 || first.PRURL != "https://github.com/acme/product/pull/7" || first.Revision != 1 {
+		t.Fatalf("first PR delivery = %+v", first)
+	}
+	if status := fixture.taskStatus(t, task.ID); status.State != store.StateAwaitingFeedback {
+		t.Fatalf("open PR status = %+v", status)
+	}
+
+	oldEvidence := make(map[string][]byte)
+	for _, name := range []string{"spawn.json", "result.json", "outcome.json", "validation.json", "delivery.json"} {
+		path := store.AttemptPath(fixture.home, mission.ID, task.ID, 1, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldEvidence[path] = data
+	}
+
+	revisedJSON := runCLI(t, "revise", task.ID,
+		"--reason", "Accepted review feedback corrects the same client migration contract.",
+		"--objective", "Adjust the migration beyond the current pull request head and add regression coverage.",
+		"--herdr", fixture.herdr, "--treehouse", fixture.treehouse, "--git", fixture.git,
+		"--gh-axi", fixture.ghAxi, "--herdr-session", "fm-lab-cli-test")
+	var revised store.Spawn
+	if err := json.Unmarshal(revisedJSON, &revised); err != nil {
+		t.Fatal(err)
+	}
+	if revised.Attempt != 2 || revised.Revision != 2 || !strings.EqualFold(revised.BaseSHA, firstHead) {
+		t.Fatalf("correction spawn = %+v, first head %s", revised, firstHead)
+	}
+	correction, err := store.ReadCorrection(mission.ID, task.ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if correction.PriorRevision != 1 || correction.PriorAttempt != 1 || correction.PRNumber != first.PRNumber ||
+		correction.PRURL != first.PRURL || correction.PublicBranch != task.DeliveryBranch ||
+		!strings.EqualFold(correction.BaseSHA, firstHead) {
+		t.Fatalf("correction intent = %+v", correction)
+	}
+	brief, err := os.ReadFile(store.AttemptPath(fixture.home, mission.ID, task.ID, 2, "brief.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{first.PRURL, firstHead, "Accepted correction feedback", "strict descendant", "Do not push, update the pull request"} {
+		if !strings.Contains(string(brief), want) {
+			t.Fatalf("correction brief missing %q:\n%s", want, brief)
+		}
+	}
+	if status := fixture.taskStatus(t, task.ID); status.State != store.StateCorrectionActive {
+		t.Fatalf("active correction status = %+v", status)
+	}
+
+	secondHead := fixture.completeWorker(t, mission.ID, task.ID, 2)
+	if status := fixture.taskStatus(t, task.ID); status.State != store.StateCorrectionReady {
+		t.Fatalf("completed correction status = %+v", status)
+	}
+	readyReport := fixture.statusReport(t)
+	if len(readyReport.Actions) != 1 || readyReport.Actions[0].Kind != flow.ActionVerifyComplete || readyReport.Actions[0].TaskID != task.ID {
+		t.Fatalf("correction verify action queue = %+v", readyReport.Actions)
+	}
+	fixture.verifyComplete(t, task.ID)
+	if status := fixture.taskStatus(t, task.ID); status.State != store.StateCorrectionVerified {
+		t.Fatalf("verified correction status = %+v", status)
+	}
+	verifiedReport := fixture.statusReport(t)
+	if len(verifiedReport.Actions) != 1 || verifiedReport.Actions[0].Kind != flow.ActionValidate || verifiedReport.Actions[0].TaskID != task.ID {
+		t.Fatalf("correction validation action queue = %+v", verifiedReport.Actions)
+	}
+	runCLI(t, "validate", task.ID, "--git", fixture.git, "--herdr", fixture.herdr)
+	if status := fixture.taskStatus(t, task.ID); status.State != store.StateCorrectionAwaitingDelivery {
+		t.Fatalf("validated correction status = %+v", status)
+	}
+	if _, err := runCLIErr(t, "deliver", task.ID, "--git", fixture.git, "--gh-axi", fixture.ghAxi); err == nil ||
+		!strings.Contains(err.Error(), "--confirmed") {
+		t.Fatalf("unconfirmed correction delivery error = %v", err)
+	}
+	secondJSON := runCLI(t, "deliver", task.ID, "--confirmed", "--git", fixture.git, "--gh-axi", fixture.ghAxi)
+	var second store.Delivery
+	if err := json.Unmarshal(secondJSON, &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.PRNumber != first.PRNumber || second.PRURL != first.PRURL || second.Revision != 2 ||
+		!strings.EqualFold(second.PriorHeadSHA, firstHead) || !strings.EqualFold(second.HeadSHA, secondHead) {
+		t.Fatalf("correction delivery = %+v", second)
+	}
+	remoteHead := runCLIGit(t, filepath.Join(filepath.Dir(fixture.project), "origin.git"), "rev-parse", "refs/heads/"+task.DeliveryBranch)
+	if !strings.EqualFold(remoteHead, secondHead) {
+		t.Fatalf("same public branch head = %s, want %s", remoteHead, secondHead)
+	}
+	forgeCalls, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(forgeCalls), "pr create") != 1 || strings.Contains(string(forgeCalls), "pr edit") {
+		t.Fatalf("same-PR forge calls = %q", forgeCalls)
+	}
+	gitCalls, err := os.ReadFile(fixture.gitLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushLines := strings.Split(strings.TrimSpace(string(gitCalls)), "\n")
+	if len(pushLines) != 2 || !strings.Contains(pushLines[0], "--force-with-lease") || strings.Contains(pushLines[1], "force") {
+		t.Fatalf("push calls = %#v; correction must be ordinary fast-forward", pushLines)
+	}
+	for path, before := range oldEvidence {
+		after, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(before, after) {
+			t.Fatalf("prior revision evidence changed at %s: %v", path, err)
+		}
+	}
+	firstRelease := runCLI(t, "release", task.ID, "--attempt", "1", "--treehouse", fixture.treehouse)
+	secondRelease := runCLI(t, "release", task.ID, "--attempt", "2", "--treehouse", fixture.treehouse)
+	if !strings.Contains(string(firstRelease), `"attempt": 1`) || !strings.Contains(string(secondRelease), `"attempt": 2`) {
+		t.Fatalf("revision releases:\n%s\n%s", firstRelease, secondRelease)
+	}
+	all := fixture.taskStatusAll(t, task.ID)
+	if len(all.Revisions) != 2 || len(all.Revisions[0].Attempts) != 1 || len(all.Revisions[1].Attempts) != 1 ||
+		all.Revisions[0].Revision != 1 || all.Revisions[1].Revision != 2 {
+		t.Fatalf("revision history = %+v", all.Revisions)
+	}
+	if status := fixture.taskStatus(t, task.ID); status.State != store.StateAwaitingFeedback {
+		t.Fatalf("corrected open PR status = %+v", status)
+	}
+	if firstSpawn.Branch == task.DeliveryBranch || revised.Branch == task.DeliveryBranch {
+		t.Fatal("private execution branch became the public PR branch")
+	}
 }
 
 func TestCLIPublicDeliveryRefusesHistoricalLeakBeforeExternalWrites(t *testing.T) {

@@ -41,11 +41,15 @@ var (
 	// ErrEvidenceConflict refuses differing or completion-vs-report evidence
 	// for the same attempt. The command never chooses by timestamp.
 	ErrEvidenceConflict = errors.New("worker evidence conflict")
+	// ErrReconciliation marks public PR/branch state that no longer matches the
+	// exact continuation identity Sophon recorded.
+	ErrReconciliation = errors.New("open pull request requires reconciliation")
 )
 
 // Git is the subset of internal/git.Client the flow needs.
 type Git interface {
 	CreateTaskBranch(context.Context, string, string) (gitcontrol.Snapshot, error)
+	CreateTaskBranchAt(context.Context, string, string, string, string) (gitcontrol.Snapshot, error)
 	Snapshot(context.Context, string) (gitcontrol.Snapshot, error)
 	VerifyCompletion(context.Context, string, string) (gitcontrol.Completion, error)
 }
@@ -55,15 +59,20 @@ type DeliveryGit interface {
 	VerifyHead(context.Context, string, string, string) error
 	Repository(context.Context, string) (string, error)
 	CommitMessages(context.Context, string, string, string) ([]string, error)
+	FetchBranch(context.Context, string, string, string) error
+	VerifyStrictDescendant(context.Context, string, string, string) error
 }
 
 // DeliveryRemote matches internal/delivery.CommandRemote's forge boundary.
 type DeliveryRemote interface {
 	Push(context.Context, string, string, string, string) error
+	PushFastForward(context.Context, string, string, string, string, string) error
 	FindPullRequest(context.Context, string, string, string, string) (*delivery.PullRequest, error)
 	CreatePullRequest(context.Context, delivery.PullRequestInput) (delivery.PullRequest, error)
+	ObservePullRequest(context.Context, string, int) (delivery.PullRequest, error)
 	HeadSHA(context.Context, string, string, string) (string, error)
 	BranchHead(context.Context, string, string, string) (string, bool, error)
+	DefaultBranch(context.Context, string, string) (string, error)
 }
 
 // Validator runs the task's validation command in a worktree.

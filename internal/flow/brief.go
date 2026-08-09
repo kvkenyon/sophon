@@ -18,7 +18,7 @@ import (
 // a runtime that drops inherited environment still publishes to the assigned
 // store.
 func (f *Flow) renderBrief(homeDir string, mission store.Mission, task store.Task, attempt int,
-	worktree, branch, baseSHA string) (string, error) {
+	worktree, branch, baseSHA string, correction *store.Correction) (string, error) {
 	skillDir := store.WorkerSkillDir(homeDir, task.ID, attempt)
 	if err := runtimeprompts.MaterializeSkills(skillDir, runtimeprompts.WorkerSkills); err != nil {
 		return "", fmt.Errorf("materialize worker skills: %w", err)
@@ -47,6 +47,7 @@ func (f *Flow) renderBrief(homeDir string, mission store.Mission, task store.Tas
 	fmt.Fprintf(&body, "- Task: `%s` — %s\n", task.ID, cleanLine(task.Title))
 	fmt.Fprintf(&body, "- Public delivery title: %s\n", cleanLine(task.Title))
 	fmt.Fprintf(&body, "- Public delivery branch: `%s`\n", task.DeliveryBranch)
+	fmt.Fprintf(&body, "- Revision: `%d`\n", task.CurrentRevision)
 	fmt.Fprintf(&body, "- Attempt: `%d`\n", attempt)
 	fmt.Fprintf(&body, "- Project: `%s`\n", mission.ProjectPath)
 	fmt.Fprintf(&body, "- Worktree: `%s`\n", worktree)
@@ -56,13 +57,22 @@ func (f *Flow) renderBrief(homeDir string, mission store.Mission, task store.Tas
 	fmt.Fprintf(&body, "- Validation command: `%s`\n", validationCommand)
 	body.WriteString("\n## Objective\n\n")
 	body.WriteString(strings.TrimSpace(task.Objective))
+	if correction != nil {
+		body.WriteString("\n\n## Accepted correction feedback\n\n")
+		body.WriteString(strings.TrimSpace(correction.Objective))
+		body.WriteString("\n\n## Correction boundary\n\n")
+		fmt.Fprintf(&body, "- Continue the existing pull request `%s` from exact public head `%s`.\n", correction.PRURL, correction.BaseSHA)
+		fmt.Fprintf(&body, "- Make only the bounded correction beyond revision %d; do not recreate or rebase the already-delivered history.\n", correction.PriorRevision)
+		body.WriteString("- The result must be a strict descendant of the exact correction base above.\n")
+		body.WriteString("- Do not push, update the pull request, deliver, force-push, or create a replacement pull request.\n")
+	}
 	body.WriteString("\n\n## Permissions\n\n")
 	body.WriteString("- Modify and commit files only in the assigned worktree.\n")
 	fmt.Fprintf(&body, "- Write a structured completion submission only to `%s`, or typed non-completion submission only to `%s`; these staging artifacts are the sole writes permitted outside the worktree.\n", resultPath, reportPath)
 	body.WriteString("- Run non-destructive local validation required by the project.\n")
 	body.WriteString("\n## Forbidden actions\n\n")
 	body.WriteString("- Do not create, return, or alter Treehouse leases or worktrees.\n")
-	body.WriteString("- Do not push, merge, open a PR, or contact the operator.\n")
+	body.WriteString("- Do not push, force-push, merge, open or update a PR, or contact the operator.\n")
 	body.WriteString("- Do not write project changes outside the assigned worktree.\n")
 	body.WriteString("- Do not submit completion from any attempt other than the one above.\n")
 	body.WriteString("- Do not put Sophon branding, task/attempt IDs, private paths, runtime details, or orchestration prose in commit messages; commits must read as ordinary public-quality product history.\n")

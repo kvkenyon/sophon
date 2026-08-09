@@ -76,6 +76,11 @@ rules, terminal delivery/release fields, and the digest; then coalesces the
 trigger. Publication always happens before this request, and rejection never
 rolls publication back.
 
+The attempt's canonical `spawn.json` supplies its immutable revision identity.
+A correction completion therefore uses the same method and fencing as initial
+work; forwarding re-derives `correction-ready` and drains the ordinary
+verify-complete/validate action queue. The monitor adds no revision authority.
+
 ### `monitor.shutdown`
 
 Params: `protocol_version`, `generation`. The server acknowledges before

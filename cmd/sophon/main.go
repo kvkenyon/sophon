@@ -53,6 +53,8 @@ func run(ctx context.Context, args []string) error {
 		return taskCommand(ctx, args[1:])
 	case "spawn":
 		return spawnCommand(ctx, args[1:])
+	case "revise":
+		return reviseCommand(ctx, args[1:])
 	case "worker":
 		return workerCommand(ctx, args[1:])
 	case "commander":
@@ -262,6 +264,27 @@ func spawnCommand(ctx context.Context, args []string) error {
 		return errors.New("spawn requires exactly one task ID")
 	}
 	spawned, err := tools.flow().Spawn(ctx, positional[0], *retry)
+	if err != nil {
+		return err
+	}
+	return encode(spawned)
+}
+
+func reviseCommand(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("revise", flag.ContinueOnError)
+	reason := flags.String("reason", "", "why the accepted feedback corrects the same product contract")
+	objective := flags.String("objective", "", "bounded correction objective beyond the current PR head")
+	acceptExternal := flags.Bool("accept-external-head", false, "explicitly accept a reviewed external fast-forward as the correction base")
+	tools.bind(flags, "herdr", "treehouse", "git", "gh-axi", "herdr-session")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("revise requires exactly one task ID")
+	}
+	spawned, err := tools.flow().Revise(ctx, positional[0], *reason, *objective, *acceptExternal)
 	if err != nil {
 		return err
 	}
@@ -749,6 +772,7 @@ func deliverCommand(ctx context.Context, args []string) error {
 func releaseCommand(ctx context.Context, args []string) error {
 	tools := defaultTools()
 	flags := flag.NewFlagSet("release", flag.ContinueOnError)
+	attempt := flags.Int("attempt", 0, "exact attempt copy to release (default current)")
 	tools.bind(flags, "treehouse")
 	positional, err := parseFlags(flags, args)
 	if err != nil {
@@ -757,7 +781,7 @@ func releaseCommand(ctx context.Context, args []string) error {
 	if len(positional) != 1 {
 		return errors.New("release requires exactly one task ID")
 	}
-	released, err := tools.flow().ReleaseLease(ctx, positional[0])
+	released, err := tools.flow().ReleaseLeaseAttempt(ctx, positional[0], *attempt)
 	if err != nil {
 		return err
 	}
@@ -770,7 +794,7 @@ func statusCommand(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("status", flag.ContinueOnError)
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	all := flags.Bool("all", false, "include released task and mission history")
-	tools.bind(flags, "herdr", "herdr-session")
+	tools.bind(flags, "herdr", "herdr-session", "git", "gh-axi")
 	positional, err := parseFlags(flags, args)
 	if err != nil {
 		return err
@@ -789,6 +813,13 @@ func statusCommand(ctx context.Context, args []string) error {
 	for _, mission := range report.Missions {
 		for _, task := range mission.Tasks {
 			fmt.Printf("%s\t%s\t%s\t%d\t%s\n", mission.Mission.ID, task.Task.ID, task.State, task.Attempt, task.Detail)
+			if *all {
+				for _, revision := range task.Revisions {
+					for _, attempt := range revision.Attempts {
+						fmt.Printf("REVISION\t%s\t%d\t%d\t%s\t%s\n", task.Task.ID, revision.Revision, attempt.Attempt, attempt.State, attempt.Detail)
+					}
+				}
+			}
 		}
 	}
 	// The action queue is the primary output: a commander drains every listed
@@ -866,6 +897,7 @@ func usage() {
   sophon mission list [--json]
   sophon task create --mission ID --title PUBLIC_TITLE --objective WORKER_OBJECTIVE --delivery-branch PUBLIC_BRANCH [--kind KIND] [--delivery branch|pr] [--validate COMMAND]
   sophon spawn TASK [--retry] [--herdr BIN] [--treehouse BIN] [--git BIN] [--herdr-session NAME]
+  sophon revise TASK --reason REASON --objective CORRECTION [--accept-external-head] [--herdr BIN] [--treehouse BIN] [--git BIN] [--gh-axi BIN] [--herdr-session NAME]
   sophon worker complete TASK --attempt N --head-sha SHA --result FILE [--git BIN] [--herdr BIN]
   sophon worker report TASK --attempt N --head-sha SHA --report FILE [--git BIN] [--herdr BIN]
   sophon worker progress TASK --attempt N --phase PHASE [--message NOTE]
@@ -876,8 +908,8 @@ func usage() {
   sophon verify-complete TASK [--git BIN] [--treehouse BIN] [--herdr BIN]
   sophon validate TASK [--git BIN] [--herdr BIN]
   sophon deliver TASK --confirmed [--git BIN] [--gh-axi BIN]
-  sophon release TASK [--treehouse BIN]
-  sophon status [--json] [--all] [--herdr BIN] [--herdr-session NAME]
+  sophon release TASK [--attempt N] [--treehouse BIN]
+  sophon status [--json] [--all] [--herdr BIN] [--git BIN] [--gh-axi BIN] [--herdr-session NAME]
   sophon send TASK MESSAGE [--herdr BIN] [--herdr-session NAME]
   sophon prompt commander`)
 }

@@ -211,6 +211,14 @@ func TestNotifyCommanderIsBestEffort(t *testing.T) {
 		t.Fatalf("validated task wake = %v", fake.submissions)
 	}
 
+	// Correction publications name their distinct derived state while using
+	// the same action-drain path as initial work.
+	if got := CommanderCorrectionWakeMessage(validated.ID, 2, true); !strings.Contains(got, "derives correction-ready") ||
+		!strings.Contains(got, "sophon verify-complete "+validated.ID) ||
+		!strings.Contains(got, "sophon validate "+validated.ID) {
+		t.Fatalf("correction wake = %q", got)
+	}
+
 	// Delivery failure surfaces as a bounded diagnostic error.
 	fake.submitErr = errFake
 	if err := rig.flow.NotifyCommander(ctx, "task_x", 2); !errors.Is(err, errFake) {
@@ -281,9 +289,6 @@ func TestRetireWorkerBoundaries(t *testing.T) {
 	}
 
 	// A failed validation keeps the correction path open.
-	if _, err := rig.flow.Validate(ctx, gated.ID); err != nil {
-		t.Fatal(err)
-	}
 	rig.validate.result.Status = "failed"
 	rig.validate.result.ExitCode = 1
 	if _, err := rig.flow.Validate(ctx, gated.ID); err != nil {
@@ -296,7 +301,21 @@ func TestRetireWorkerBoundaries(t *testing.T) {
 		t.Fatalf("failed validation retired the worker: %v", fake.stops)
 	}
 
-	// A passing validation is terminal: the exact tab closes.
+	// A passing validation on a replacement attempt is terminal: the exact tab
+	// closes, while the failed receipt above remains immutable history.
+	replacementSpawn, err := rig.flow.Spawn(ctx, gated.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatedSpawn = replacementSpawn
+	resultPath := writeResult(t, home, gatedSpawn, validResult)
+	if _, err := rig.flow.PublishResult(ctx, gated.ID, gatedSpawn.Attempt, testHeadSHA, resultPath); err != nil {
+		t.Fatal(err)
+	}
+	rig.leaseStatus(gatedSpawn)
+	if _, err := rig.flow.VerifyComplete(ctx, gated.ID); err != nil {
+		t.Fatal(err)
+	}
 	rig.validate.result.Status = "passed"
 	rig.validate.result.ExitCode = 0
 	if _, err := rig.flow.Validate(ctx, gated.ID); err != nil {
@@ -314,7 +333,7 @@ func TestRetireWorkerBoundaries(t *testing.T) {
 	if err := rig.flow.RetireWorker(ctx, gated.ID); !errors.Is(err, errFake) {
 		t.Fatalf("retirement with failing close = %v", err)
 	}
-	if _, err := store.ReadOutcome(gated.MissionID, gated.ID, 1); err != nil {
+	if _, err := store.ReadOutcome(gated.MissionID, gated.ID, 2); err != nil {
 		t.Fatalf("outcome was affected by cleanup failure: %v", err)
 	}
 	fake.stopErr = nil

@@ -12,7 +12,9 @@ Sophon's only state model is a filesystem protocol: durable typed records under 
 - **Commander** — the agent session the operator talks to; plans, delegates, verifies, and reports.
 - **Worker** — an isolated agent session that executes one task attempt.
 - **Mission** — the durable objective: project path plus intent.
-- **Task** — one substantive unit of work; attempts are fenced incarnations of it.
+- **Task** — one substantive product contract with immutable revisions.
+- **Revision / attempt** — a verified product increment and its replaceable,
+  fenced worker execution.
 - **Lease** — Treehouse worktree ownership for one task attempt.
 
 ## Install
@@ -59,14 +61,21 @@ sophon validate <task-id>
 # 6. Deliver only with explicit operator confirmation.
 sophon deliver <task-id> --confirmed
 
-# 7. Return the lease when the delivered branch no longer needs it.
+# 7. If review feedback corrects the same contract while the PR is open,
+#    start the next revision at the forge-reported exact PR head.
+sophon revise <task-id> --reason "Accepted review correction" \
+  --objective "Apply the bounded correction beyond the current PR head"
+#    Complete/verify/validate the correction, then obtain separate approval:
+sophon deliver <task-id> --confirmed
+
+# 8. Return revision copies independently when they no longer need leases.
 sophon release <task-id>
 
-# 8. Inspect durable history, including released tasks filtered from normal status.
+# 9. Inspect the complete immutable revision/attempt history.
 sophon status --all
 ```
 
-Other commands: `sophon monitor run|start|status --json|stop` (direct lifecycle for the optional private JSON-RPC notification transport), `sophon commander attach` (register the live commander's volatile Herdr wake/placement address so publications wake it and workers group into its workspace as tabs), `sophon worker progress` (send one sparse non-authoritative phase transition), `sophon spawn <task-id> --retry` (fence the current attempt and spawn the next), `sophon send <task-id> <message>` (queue an exact steer to an idle or running current worker), `sophon mission list` (durable mission history, unlike filtered operational status), `sophon version`.
+Other commands: `sophon monitor run|start|status --json|stop` (direct lifecycle for the optional private JSON-RPC notification transport), `sophon commander attach` (register the live commander's volatile Herdr wake/placement address so publications wake it and workers group into its workspace as tabs), `sophon worker progress` (send one sparse non-authoritative phase transition), `sophon spawn <task-id> --retry` (replace an attempt inside the current revision), `sophon release <task-id> --attempt <n>` (retire one historical copy), `sophon send <task-id> <message>` (queue an exact steer to an idle or running current worker), `sophon mission list` (durable mission history, unlike filtered operational status), `sophon version`.
 
 Workers write completion JSON only to the generated staging path. The CLI validates the complete schema and live head before atomically publishing canonical `result.json`:
 
@@ -86,9 +95,15 @@ After durable publication the CLI asks the healthy monitor to coalesce and forwa
 
 - **Derived state despite monitor loss.** The optional monitor carries no truth and performs no recovery or lifecycle transitions. With no monitor or commander session alive, nothing advances and nothing is lost — completed work waits on disk and surfaces as `ready` to the next status run.
 - **Structured evidence, not prose.** Strict completion and typed non-completion schemas are pinned to the live worktree HEAD. Workers write staging files; only validated CLI publication creates canonical truth. Worker prose and notification lines are never state.
-- **Attempt fencing.** Retry fences the old attempt's lease by exact identity before the next attempt exists; stale results are refused loudly.
+- **Revision and attempt fencing.** Retry stays within a revision; only
+  `revise` creates the next correction revision from an exact open-PR head.
+  Stale evidence is preserved and refused loudly.
 - **Operator authority at the boundary.** Verification and validation are autonomous; every delivery effect requires `--confirmed`. There is no merge path.
 - **Crash-safe external effects.** Delivery and release write typed intent before the effect and a receipt after; re-running converges to the same result.
+- **One continuing open PR.** A confirmed first delivery creates the PR. Each
+  accepted same-contract correction needs new confirmation and normally
+  fast-forwards the same branch/PR without force or replacement. Merged is
+  terminal; closed or drifted identity stops for reconciliation.
 - **Operational status plus durable history.** Normal status filters exact current-attempt releases and released-only missions; `status --all` shows immutable history and distinguishes released-delivered from released-undelivered work. No records are deleted.
 - **Volatile liveness routing, never truth.** `sophon commander attach` records only a best-effort wake/placement address; publication wakes, grouped worker tabs, and retired worker panes are liveness and presentation, while every fact still derives from files.
 - **Hard public boundary.** Task intake records a concise public title and
