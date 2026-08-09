@@ -122,6 +122,20 @@ type Release struct {
 	ReleasedAt  time.Time `json:"released_at"`
 }
 
+// CommanderRegistration is the volatile wake and placement address of the
+// currently attached commander: its exact Herdr session, workspace, tab, and
+// pane. It is liveness and presentation routing only — never task truth,
+// never canonical state, and never ownership of the commander. A fresh
+// attach atomically replaces it; nothing reads it to derive status.
+type CommanderRegistration struct {
+	Session     string    `json:"session"`
+	WorkspaceID string    `json:"workspace_id,omitempty"`
+	TabID       string    `json:"tab_id,omitempty"`
+	PaneID      string    `json:"pane_id"`
+	Runtime     string    `json:"runtime,omitempty"`
+	AttachedAt  time.Time `json:"attached_at"`
+}
+
 // home resolves the data home; SOPHON_DATA_HOME wins so tests are hermetic.
 func home() (string, error) {
 	return datahome.Dir()
@@ -169,6 +183,12 @@ func LockDir(home string) string { return filepath.Join(StateDir(home), ".lock")
 // WakePath is one task's volatile wake-line file; never truth.
 func WakePath(home, taskID string) string {
 	return filepath.Join(StateDir(home), taskID+".status")
+}
+
+// CommanderPath is the volatile commander registration file; liveness and
+// presentation routing only, never truth.
+func CommanderPath(home string) string {
+	return filepath.Join(StateDir(home), "commander.json")
 }
 
 // WorkerSkillDir is the per-attempt materialized skill directory.
@@ -343,6 +363,32 @@ func ReadRelease(missionID, taskID string, attempt int) (Release, error) {
 		return release, err
 	}
 	return release, read(AttemptPath(homeDir, missionID, taskID, attempt, "release.json"), &release)
+}
+
+// ReadCommander loads the volatile commander registration, mapping absence to
+// ErrNotFound like every other record. Callers must treat the value as a
+// best-effort notification address, never as state.
+func ReadCommander() (CommanderRegistration, error) {
+	var registration CommanderRegistration
+	homeDir, err := home()
+	if err != nil {
+		return registration, err
+	}
+	return registration, read(CommanderPath(homeDir), &registration)
+}
+
+// PublishCommander atomically replaces the volatile commander registration.
+// The caller holds the shared-mutation lock. Replacement is the only
+// transition: no recovery, no task-truth mutation.
+func PublishCommander(registration CommanderRegistration) error {
+	homeDir, err := home()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(StateDir(homeDir), 0o700); err != nil {
+		return fmt.Errorf("create state directory: %w", err)
+	}
+	return Publish(CommanderPath(homeDir), registration)
 }
 
 // CreateMission publishes a new mission's intent record.

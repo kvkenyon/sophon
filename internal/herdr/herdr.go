@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"sophon/internal/datahome"
 	"sophon/internal/domain"
 	"sophon/internal/naming"
 )
@@ -55,6 +56,18 @@ type StartRequest struct {
 	Runtime      Runtime
 	Model        string
 
+	// DataHome is the exact resolved Sophon data home propagated into the
+	// runtime launch environment. It is non-secret configuration; no other
+	// environment values cross this boundary.
+	DataHome string
+
+	// ParentWorkspace optionally groups the agent as a new tab inside this
+	// exact Herdr workspace (the attached commander's workspace) instead of
+	// creating an isolated workspace. Presentation only; never inferred by
+	// label. When the registered workspace is gone, Start falls back to an
+	// isolated workspace and the returned Session records actual placement.
+	ParentWorkspace string
+
 	// PiExtensionPath is the absolute path to the Pi lifecycle extension.
 	// Pi project extensions are trust-gated, so this file must be outside the
 	// task worktree and is passed explicitly with -e.
@@ -71,6 +84,7 @@ type Session struct {
 	PaneID          string
 	WorktreePath    string
 	Model           string
+	DataHome        string
 	PiExtensionPath string
 }
 
@@ -397,30 +411,6 @@ func (a *CommandAdapter) Start(ctx context.Context, in StartRequest) (Session, e
 	if err := validateRuntimeRequest(runtime, in); err != nil {
 		return Session{}, err
 	}
-	label := strings.TrimSpace(a.WorkspaceLabel)
-	if label == "" {
-		label = "sophon"
-	}
-	stdout, stderr, err := a.run(ctx, "workspace", "create", "--cwd", in.WorktreePath, "--label", label, "--no-focus")
-	if err != nil {
-		return Session{}, commandError("create workspace", err, stderr)
-	}
-	var created struct {
-		Result struct {
-			Workspace struct {
-				ID string `json:"workspace_id"`
-			} `json:"workspace"`
-			Tab struct {
-				ID string `json:"tab_id"`
-			} `json:"tab"`
-			RootPane struct {
-				ID string `json:"pane_id"`
-			} `json:"root_pane"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(stdout, &created); err != nil {
-		return Session{}, fmt.Errorf("decode Herdr workspace response: %w", err)
-	}
 	name := strings.TrimSpace(in.AgentName)
 	if name == "" {
 		name = agentName(in.TaskTitle, in.TaskID, in.Attempt)
@@ -430,16 +420,20 @@ func (a *CommandAdapter) Start(ctx context.Context, in StartRequest) (Session, e
 	if name == "" {
 		return Session{}, errors.New("Herdr agent name is empty after normalization")
 	}
+	workspaceID, tabID, paneID, labeled, err := a.placeAgent(ctx, in, name)
+	if err != nil {
+		return Session{}, err
+	}
 	session := Session{
 		Runtime: runtime, AgentName: name, SessionName: a.SessionName,
-		WorkspaceID: created.Result.Workspace.ID, TabID: created.Result.Tab.ID, PaneID: created.Result.RootPane.ID,
-		WorktreePath: in.WorktreePath, Model: strings.TrimSpace(in.Model), PiExtensionPath: strings.TrimSpace(in.PiExtensionPath),
+		WorkspaceID: workspaceID, TabID: tabID, PaneID: paneID,
+		WorktreePath: in.WorktreePath, Model: strings.TrimSpace(in.Model),
+		DataHome: strings.TrimSpace(in.DataHome), PiExtensionPath: strings.TrimSpace(in.PiExtensionPath),
 	}
-	if session.WorkspaceID == "" || session.TabID == "" || session.PaneID == "" {
-		return Session{}, errors.New("Herdr workspace response omitted stable identifiers")
-	}
-	if _, stderr, err := a.run(ctx, "tab", "rename", session.TabID, session.AgentName); err != nil {
-		return session, commandError("label task tab", err, stderr)
+	if !labeled {
+		if _, stderr, err := a.run(ctx, "tab", "rename", session.TabID, session.AgentName); err != nil {
+			return session, commandError("label task tab", err, stderr)
+		}
 	}
 
 	command, positionalPrompt, err := initialCommand(runtime, in)
@@ -462,6 +456,79 @@ func (a *CommandAdapter) Start(ctx context.Context, in StartRequest) (Session, e
 		return session, err
 	}
 	return session, nil
+}
+
+// placeAgent chooses the agent's Herdr placement. With an explicit parent
+// workspace the agent becomes a labeled tab inside that exact workspace; a
+// parent that Herdr reports as missing falls back visibly to an isolated
+// workspace, and the returned identifiers always record actual placement.
+// The labeled result reports whether the tab label was set at creation.
+func (a *CommandAdapter) placeAgent(ctx context.Context, in StartRequest, name string) (workspaceID, tabID, paneID string, labeled bool, err error) {
+	if workspace := strings.TrimSpace(in.ParentWorkspace); workspace != "" {
+		stdout, stderr, tabErr := a.run(ctx, "tab", "create", "--workspace", workspace,
+			"--cwd", in.WorktreePath, "--label", name, "--no-focus")
+		if tabErr == nil {
+			var created struct {
+				Result struct {
+					Tab struct {
+						ID string `json:"tab_id"`
+					} `json:"tab"`
+					RootPane struct {
+						ID string `json:"pane_id"`
+					} `json:"root_pane"`
+				} `json:"result"`
+			}
+			if err := json.Unmarshal(stdout, &created); err != nil {
+				return "", "", "", false, fmt.Errorf("decode Herdr tab response: %w", err)
+			}
+			if created.Result.Tab.ID == "" || created.Result.RootPane.ID == "" {
+				return "", "", "", false, errors.New("Herdr tab response omitted stable identifiers")
+			}
+			return workspace, created.Result.Tab.ID, created.Result.RootPane.ID, true, nil
+		}
+		if !isWorkspaceMissing(stdout, stderr) {
+			return "", "", "", false, commandError("create agent tab in commander workspace", tabErr, stderr)
+		}
+		// The registered commander workspace is gone. Falling back to an
+		// isolated workspace touches no unrelated target; the caller sees the
+		// actual placement in the returned session.
+	}
+	label := strings.TrimSpace(a.WorkspaceLabel)
+	if label == "" {
+		label = "sophon"
+	}
+	stdout, stderr, err := a.run(ctx, "workspace", "create", "--cwd", in.WorktreePath, "--label", label, "--no-focus")
+	if err != nil {
+		return "", "", "", false, commandError("create workspace", err, stderr)
+	}
+	var created struct {
+		Result struct {
+			Workspace struct {
+				ID string `json:"workspace_id"`
+			} `json:"workspace"`
+			Tab struct {
+				ID string `json:"tab_id"`
+			} `json:"tab"`
+			RootPane struct {
+				ID string `json:"pane_id"`
+			} `json:"root_pane"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(stdout, &created); err != nil {
+		return "", "", "", false, fmt.Errorf("decode Herdr workspace response: %w", err)
+	}
+	if created.Result.Workspace.ID == "" || created.Result.Tab.ID == "" || created.Result.RootPane.ID == "" {
+		return "", "", "", false, errors.New("Herdr workspace response omitted stable identifiers")
+	}
+	return created.Result.Workspace.ID, created.Result.Tab.ID, created.Result.RootPane.ID, false, nil
+}
+
+// isWorkspaceMissing reports whether a failed tab-create response says the
+// exact parent workspace does not exist. Only that answer permits the
+// isolated-workspace fallback; any other failure is an error.
+func isWorkspaceMissing(stdout, stderr []byte) bool {
+	return bytes.Contains(stdout, []byte("workspace_not_found")) ||
+		bytes.Contains(stderr, []byte("workspace_not_found"))
 }
 
 func (a *CommandAdapter) launchRuntimeInPane(ctx context.Context, session Session, command string, waitForBanner bool) error {
@@ -696,11 +763,30 @@ func (a *CommandAdapter) Cancel(ctx context.Context, session Session) error {
 }
 
 func (a *CommandAdapter) Observe(ctx context.Context, session Session) (State, error) {
+	registered, state, err := a.identify(ctx, session)
+	if err != nil {
+		return "", err
+	}
+	if registered != "" && registered != sessionRuntime(session) {
+		return "", fmt.Errorf("Herdr pane registered %s, want %s", registered, sessionRuntime(session))
+	}
+	return state, nil
+}
+
+// Identify reports the exact pane's registered runtime and liveness state
+// without imposing an expected runtime. Commander attach uses it to record
+// the ambient identity it was handed; steering paths keep Observe's strict
+// runtime check.
+func (a *CommandAdapter) Identify(ctx context.Context, session Session) (Runtime, State, error) {
+	return a.identify(ctx, session)
+}
+
+func (a *CommandAdapter) identify(ctx context.Context, session Session) (Runtime, State, error) {
 	if a == nil || a.runner == nil || strings.TrimSpace(a.SessionName) == "" || session.PaneID == "" {
-		return "", errors.New("Herdr observation requires an explicit session and pane")
+		return "", "", errors.New("Herdr observation requires an explicit session and pane")
 	}
 	if session.SessionName != "" && session.SessionName != a.SessionName {
-		return "", errors.New("Herdr observation session identity mismatch")
+		return "", "", errors.New("Herdr observation session identity mismatch")
 	}
 	runtime := sessionRuntime(session)
 	stdout, stderr, runErr := a.run(ctx, "pane", "get", session.PaneID)
@@ -720,21 +806,21 @@ func (a *CommandAdapter) Observe(ctx context.Context, session Session) (State, e
 	}
 	if err := json.Unmarshal(body, &paneResponse); err != nil {
 		if runErr != nil {
-			return "", commandError("probe "+string(runtime)+" pane", runErr, stderr)
+			return "", "", commandError("probe "+string(runtime)+" pane", runErr, stderr)
 		}
-		return "", fmt.Errorf("decode Herdr pane response: %w", err)
+		return "", "", fmt.Errorf("decode Herdr pane response: %w", err)
 	}
 	if paneResponse.Error.Code == "pane_not_found" {
-		return StateLost, nil
+		return "", StateLost, nil
 	}
 	if paneResponse.Error.Code != "" {
-		return "", fmt.Errorf("probe %s pane: Herdr error %s", runtime, paneResponse.Error.Code)
+		return "", "", fmt.Errorf("probe %s pane: Herdr error %s", runtime, paneResponse.Error.Code)
 	}
 	if runErr != nil {
-		return "", commandError("probe "+string(runtime)+" pane", runErr, stderr)
+		return "", "", commandError("probe "+string(runtime)+" pane", runErr, stderr)
 	}
 	if paneResponse.Result.Pane.PaneID != session.PaneID {
-		return "", errors.New("Herdr pane response did not preserve pane identity")
+		return "", "", errors.New("Herdr pane response did not preserve pane identity")
 	}
 
 	stdout, stderr, runErr = a.run(ctx, "agent", "get", session.PaneID)
@@ -757,41 +843,39 @@ func (a *CommandAdapter) Observe(ctx context.Context, session Session) (State, e
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
 		if runErr != nil {
-			return "", commandError("observe "+string(runtime), runErr, stderr)
+			return "", "", commandError("observe "+string(runtime), runErr, stderr)
 		}
-		return "", fmt.Errorf("decode Herdr agent response: %w", err)
+		return "", "", fmt.Errorf("decode Herdr agent response: %w", err)
 	}
 	switch response.Error.Code {
 	case "agent_not_found":
-		return StateHusk, nil
+		return "", StateHusk, nil
 	case "pane_not_found":
-		return StateLost, nil
+		return "", StateLost, nil
 	case "":
 	default:
-		return "", fmt.Errorf("observe %s: Herdr error %s", runtime, response.Error.Code)
+		return "", "", fmt.Errorf("observe %s: Herdr error %s", runtime, response.Error.Code)
 	}
 	if runErr != nil {
-		return "", commandError("observe "+string(runtime), runErr, stderr)
+		return "", "", commandError("observe "+string(runtime), runErr, stderr)
 	}
 	if response.Result.Agent.PaneID != session.PaneID {
-		return "", errors.New("Herdr agent response did not preserve pane identity")
+		return "", "", errors.New("Herdr agent response did not preserve pane identity")
 	}
-	if response.Result.Agent.Runtime != "" && response.Result.Agent.Runtime != string(runtime) {
-		return "", fmt.Errorf("Herdr pane registered %s, want %s", response.Result.Agent.Runtime, runtime)
-	}
+	registered := Runtime(strings.TrimSpace(response.Result.Agent.Runtime))
 	if response.Result.Agent.StateChangeSeq < 1 {
 		// Herdr 0.7.3 may restore the last agent/session presentation with
 		// sequence zero even though the harness process and live registration
 		// are gone. This is a husk, not a promptable idle agent.
-		return StateHusk, nil
+		return "", StateHusk, nil
 	}
 	switch response.Result.Agent.Status {
 	case "working":
-		return StateRunning, nil
+		return registered, StateRunning, nil
 	case "idle", "done", "blocked":
-		return StateIdle, nil
+		return registered, StateIdle, nil
 	default:
-		return "", fmt.Errorf("unknown Herdr agent status %q", response.Result.Agent.Status)
+		return "", "", fmt.Errorf("unknown Herdr agent status %q", response.Result.Agent.Status)
 	}
 }
 
@@ -916,22 +1000,33 @@ func validatePiExtension(worktreePath, extensionPath string) error {
 func initialCommand(runtime Runtime, in StartRequest) (command string, positionalPrompt bool, err error) {
 	switch runtime {
 	case RuntimeCodex:
-		return "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust", false, nil
+		return dataHomePrefix(in.DataHome) + "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust", false, nil
 	case RuntimeClaude:
 		args := []string{"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false", "claude", "--dangerously-skip-permissions"}
 		if model := strings.TrimSpace(in.Model); model != "" {
 			args = append(args, "--model", shellQuote(model))
 		}
 		args = append(args, shellQuote(in.Brief))
-		return strings.Join(args, " "), true, nil
+		return dataHomePrefix(in.DataHome) + strings.Join(args, " "), true, nil
 	case RuntimePi:
-		return strings.Join([]string{
+		return dataHomePrefix(in.DataHome) + strings.Join([]string{
 			"FM_PI_HARNESS=pi", "pi", "--model", shellQuote(strings.TrimSpace(in.Model)),
 			"-e", shellQuote(strings.TrimSpace(in.PiExtensionPath)), shellQuote(in.Brief),
 		}, " "), true, nil
 	default:
 		return "", false, fmt.Errorf("unsupported Herdr runtime %q", runtime)
 	}
+}
+
+// dataHomePrefix renders the exact assigned Sophon data home as a leading
+// environment assignment so the runtime process and every command it runs
+// select the same store without relying on inherited environment.
+func dataHomePrefix(home string) string {
+	home = strings.TrimSpace(home)
+	if home == "" {
+		return ""
+	}
+	return datahome.OverrideEnv + "=" + shellQuote(home) + " "
 }
 
 func resumeCommand(session Session) (string, error) {
@@ -941,14 +1036,14 @@ func resumeCommand(session Session) (string, error) {
 	}
 	switch runtime {
 	case RuntimeCodex:
-		return "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume " + session.AgentSessionID, nil
+		return dataHomePrefix(session.DataHome) + "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume " + session.AgentSessionID, nil
 	case RuntimeClaude:
 		args := []string{"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false", "claude", "--dangerously-skip-permissions"}
 		if model := strings.TrimSpace(session.Model); model != "" {
 			args = append(args, "--model", shellQuote(model))
 		}
 		args = append(args, "--resume", session.AgentSessionID)
-		return strings.Join(args, " "), nil
+		return dataHomePrefix(session.DataHome) + strings.Join(args, " "), nil
 	case RuntimePi:
 		if strings.TrimSpace(session.Model) == "" {
 			return "", errors.New("resume Pi requires its launch model")
@@ -956,7 +1051,7 @@ func resumeCommand(session Session) (string, error) {
 		if err := validatePiExtension(session.WorktreePath, session.PiExtensionPath); err != nil {
 			return "", err
 		}
-		return strings.Join([]string{
+		return dataHomePrefix(session.DataHome) + strings.Join([]string{
 			"FM_PI_HARNESS=pi", "pi", "--model", shellQuote(strings.TrimSpace(session.Model)),
 			"-e", shellQuote(strings.TrimSpace(session.PiExtensionPath)),
 			"--session", shellQuote(session.AgentSessionID),

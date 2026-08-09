@@ -117,12 +117,16 @@ func (f *Flow) Spawn(ctx context.Context, taskID string, retry bool) (store.Spaw
 		releaseLease()
 		return store.Spawn{}, fmt.Errorf("create task branch: %w", err)
 	}
-	brief, err := f.renderBrief(mission, task, attempt, allocation.WorktreePath, branch, snapshot.Head)
+	// Resolve the data home once to a clean absolute path. The exact value is
+	// published into the brief, propagated into the worker runtime's launch
+	// environment, and used for every record this spawn writes, so the worker
+	// never depends on ambient environment to find the assigned store.
+	homeDir, err := datahome.AbsDir()
 	if err != nil {
 		releaseLease()
 		return store.Spawn{}, err
 	}
-	homeDir, err := datahome.Dir()
+	brief, err := f.renderBrief(homeDir, mission, task, attempt, allocation.WorktreePath, branch, snapshot.Head)
 	if err != nil {
 		releaseLease()
 		return store.Spawn{}, err
@@ -131,9 +135,11 @@ func (f *Flow) Spawn(ctx context.Context, taskID string, retry bool) (store.Spaw
 		releaseLease()
 		return store.Spawn{}, fmt.Errorf("publish brief: %w", err)
 	}
+	parentWorkspace := f.commanderWorkspace()
 	session, err := f.deps.Panes.StartCodex(ctx, herdr.StartRequest{
 		TaskID: domain.TaskID(taskID), TaskTitle: task.Title, Attempt: attempt,
-		WorktreePath: allocation.WorktreePath, Brief: brief, Model: f.deps.Model})
+		WorktreePath: allocation.WorktreePath, Brief: brief, Model: f.deps.Model,
+		DataHome: homeDir, ParentWorkspace: parentWorkspace})
 	if err != nil {
 		releaseLease()
 		return store.Spawn{}, fmt.Errorf("start worker pane: %w", err)
@@ -150,6 +156,9 @@ func (f *Flow) Spawn(ctx context.Context, taskID string, retry bool) (store.Spaw
 		return store.Spawn{}, fmt.Errorf("publish spawn receipt: %w", err)
 	}
 	store.AppendWake(taskID, fmt.Sprintf("spawned attempt %d", attempt))
+	if parentWorkspace != "" && session.WorkspaceID != parentWorkspace {
+		store.AppendWake(taskID, "registered commander workspace unavailable; worker spawned in an isolated workspace")
+	}
 	return spawn, nil
 }
 

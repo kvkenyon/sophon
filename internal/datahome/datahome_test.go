@@ -51,3 +51,15 @@ func TestDirIgnoresLegacyDirectory(t *testing.T) {
 		t.Fatalf("Dir = %q, want under home %q", dir, home)
 	}
 }
+
+func TestAbsDirResolvesCleanAbsolutePath(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv(OverrideEnv, filepath.Join(base, "smoke home", "..", "smoke home"))
+	dir, err := AbsDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(base, "smoke home"); dir != want {
+		t.Fatalf("AbsDir = %q, want %q", dir, want)
+	}
+}

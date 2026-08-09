@@ -50,6 +50,8 @@ Completion is accepted only through `sophon worker complete` for the exact task 
 sophon worker complete TASK --attempt N --head-sha "$(git rev-parse HEAD)" --result PATH
 ```
 
+The generated brief renders the exact command for your attempt, prefixed with the `SOPHON_DATA_HOME` assignment that pins your assigned store. Submit that exact command verbatim, including the environment assignment — do not drop it or substitute a different data home.
+
 The result JSON is the strict version 1 schema with exactly these fields: `version`, `status`, `summary`, `verification`, `changed_files`, and `risks`.
 Report truthfully: what changed, the exact verification commands and their exit codes, the files touched, residual risks, and any unresolved decisions.
 

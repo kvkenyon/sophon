@@ -53,13 +53,15 @@ sophon deliver <task-id> --confirmed
 sophon release <task-id>
 ```
 
-Other commands: `sophon spawn <task-id> --retry` (fence the current attempt and spawn the next), `sophon send <task-id> <message>` (steer a live worker), `sophon mission list`, `sophon version`.
+Other commands: `sophon commander attach` (register the live commander's volatile Herdr wake/placement address so completions wake it and workers group into its workspace as tabs), `sophon spawn <task-id> --retry` (fence the current attempt and spawn the next), `sophon send <task-id> <message>` (steer a live worker), `sophon mission list`, `sophon version`.
 
-Workers finish by publishing their structured result:
+Workers finish by publishing their structured result with the exact command the generated brief renders (including its `SOPHON_DATA_HOME` assignment pinning the assigned store):
 
 ```bash
-sophon worker complete <task-id> --attempt <n> --head-sha "$(git rev-parse HEAD)" --result <path>
+SOPHON_DATA_HOME=<assigned-home> sophon worker complete <task-id> --attempt <n> --head-sha "$(git rev-parse HEAD)" --result <path>
 ```
+
+After durable publication the CLI best-effort wakes the attached commander. Once terminal worker evidence lands (verification, plus a passing validation when configured), the exact finished worker pane is closed as routine cleanup; the branch and lease remain until delivery and explicit release.
 
 ## What it guarantees
 
@@ -68,6 +70,7 @@ sophon worker complete <task-id> --attempt <n> --head-sha "$(git rev-parse HEAD)
 - **Attempt fencing.** Retry fences the old attempt's lease by exact identity before the next attempt exists; stale results are refused loudly.
 - **Operator authority at the boundary.** Verification and validation are autonomous; every delivery effect requires `--confirmed`. There is no merge path.
 - **Crash-safe external effects.** Delivery and release write typed intent before the effect and a receipt after; re-running converges to the same result.
+- **Volatile liveness routing, never truth.** `sophon commander attach` records only a best-effort wake/placement address; completion wakes, grouped worker tabs, and retired worker panes are liveness and presentation, while every fact still derives from files.
 
 ## Documentation
 

@@ -1032,3 +1032,166 @@ func waitForHerdrState(t *testing.T, adapter *CommandAdapter, session Session, w
 		}
 	}
 }
+
+func TestInitialCommandPinsDataHomeForEveryRuntime(t *testing.T) {
+	piWorktree, piExtension := piFixture(t)
+	home := "/Users/kevin/sophon smoke's home"
+	prefix := "SOPHON_DATA_HOME=" + shellQuote(home) + " "
+
+	codex, _, err := initialCommand(RuntimeCodex, StartRequest{DataHome: home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(codex, prefix+"codex --dangerously") {
+		t.Fatalf("codex launch = %q", codex)
+	}
+	claude, _, err := initialCommand(RuntimeClaude, StartRequest{DataHome: home, Brief: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(claude, prefix+"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude ") {
+		t.Fatalf("claude launch = %q", claude)
+	}
+	pi, _, err := initialCommand(RuntimePi, StartRequest{DataHome: home, Brief: "b",
+		Model: "kimi-coding/k3-256k", WorktreePath: piWorktree, PiExtensionPath: piExtension})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(pi, prefix+"FM_PI_HARNESS=pi pi ") {
+		t.Fatalf("pi launch = %q", pi)
+	}
+
+	// Without an assigned home there is no ambient fallback and no assignment.
+	bare, _, err := initialCommand(RuntimeCodex, StartRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(bare, "SOPHON_DATA_HOME") {
+		t.Fatalf("launch without assigned data home = %q", bare)
+	}
+
+	// Resume keeps the recorded home so a husk replacement still publishes to
+	// the assigned store.
+	resume, err := resumeCommand(Session{Runtime: RuntimeCodex, AgentSessionID: "codex-session-1", DataHome: home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(resume, prefix+"codex --dangerously") {
+		t.Fatalf("codex resume = %q", resume)
+	}
+}
+
+func TestCommandAdapterGroupsAgentTabIntoParentWorkspace(t *testing.T) {
+	runner := &fakeRunner{responses: []runnerResponse{
+		{stdout: `{"result":{"tab":{"tab_id":"w9:t7"},"root_pane":{"pane_id":"w9:p7"}}}`},
+		{stdout: `{"result":{"type":"command_started"}}`},
+		{stdout: `{"result":{"pane":{"pane_id":"w9:p7"}}}`},
+		{stdout: `{"result":{"agent":{"pane_id":"w9:p7","agent_status":"idle","state_change_seq":1}}}`},
+		{stdout: `OpenAI Codex`},
+		{stdout: `{"result":{"agent":{"pane_id":"w9:p7","agent_session":{"value":"codex-session-7"}},"type":"prompt_sent"}}`},
+	}}
+	adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
+	session, err := adapter.StartCodex(context.Background(), StartRequest{
+		TaskID: "tsk_group", TaskTitle: "Group into commander", Attempt: 1,
+		WorktreePath: "/worktrees/group", Brief: "complete generated brief", ParentWorkspace: "w9",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.WorkspaceID != "w9" || session.TabID != "w9:t7" || session.PaneID != "w9:p7" {
+		t.Fatalf("grouped session = %+v", session)
+	}
+	want := [][]string{
+		{"tab", "create", "--workspace", "w9", "--cwd", "/worktrees/group", "--label", session.AgentName, "--no-focus", "--session", "fm-lab-contract"},
+		{"pane", "run", "w9:p7", "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust", "--session", "fm-lab-contract"},
+		{"pane", "get", "w9:p7", "--session", "fm-lab-contract"},
+		{"agent", "get", "w9:p7", "--session", "fm-lab-contract"},
+		{"pane", "read", "w9:p7", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+		{"agent", "prompt", "w9:p7", "complete generated brief", "--wait", "--until", "working", "--timeout", "30000", "--session", "fm-lab-contract"},
+	}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("Herdr calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
+func TestCommandAdapterFallsBackWhenParentWorkspaceIsGone(t *testing.T) {
+	responses := []runnerResponse{
+		{stderr: `{"error":{"code":"workspace_not_found"}}`, err: errors.New("exit 1")},
+		{stdout: `{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}`},
+		{stdout: `{"result":{"tab":{"tab_id":"w1:t1"}}}`},
+		{stdout: `{"result":{"type":"command_started"}}`},
+		{stdout: `{"result":{"pane":{"pane_id":"w1:p1"}}}`},
+		{stdout: `{"result":{"agent":{"pane_id":"w1:p1","agent_status":"idle","state_change_seq":1}}}`},
+		{stdout: `OpenAI Codex`},
+		{stdout: `{"result":{"agent":{"pane_id":"w1:p1","agent_session":{"value":"codex-session-1"}},"type":"prompt_sent"}}`},
+	}
+	runner := &fakeRunner{responses: responses}
+	adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
+	session, err := adapter.StartCodex(context.Background(), StartRequest{
+		TaskID: "tsk_fallback", TaskTitle: "Fallback", Attempt: 1,
+		WorktreePath: "/worktrees/fallback", Brief: "complete generated brief", ParentWorkspace: "w9",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.WorkspaceID != "w1" || session.PaneID != "w1:p1" {
+		t.Fatalf("fallback session = %+v, want isolated workspace w1", session)
+	}
+	if got := runner.calls[0]; !reflect.DeepEqual(got,
+		[]string{"tab", "create", "--workspace", "w9", "--cwd", "/worktrees/fallback", "--label", session.AgentName, "--no-focus", "--session", "fm-lab-contract"}) {
+		t.Fatalf("first call = %#v", got)
+	}
+	if got := runner.calls[1]; !reflect.DeepEqual(got,
+		[]string{"workspace", "create", "--cwd", "/worktrees/fallback", "--label", "sophon", "--no-focus", "--session", "fm-lab-contract"}) {
+		t.Fatalf("fallback call = %#v", got)
+	}
+}
+
+func TestCommandAdapterRefusesParentWorkspaceOtherFailure(t *testing.T) {
+	runner := &fakeRunner{responses: []runnerResponse{
+		{stderr: `{"error":{"code":"internal"}}`, err: errors.New("exit 1")},
+	}}
+	adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
+	_, err := adapter.StartCodex(context.Background(), StartRequest{
+		TaskID: "tsk_refuse", TaskTitle: "Refuse", Attempt: 1,
+		WorktreePath: "/worktrees/refuse", Brief: "complete generated brief", ParentWorkspace: "w9",
+	})
+	if err == nil || !strings.Contains(err.Error(), "commander workspace") {
+		t.Fatalf("Start error = %v", err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("a non-missing-workspace failure must not fall back: %#v", runner.calls)
+	}
+}
+
+func TestCommandAdapterIdentifyReportsRegisteredRuntime(t *testing.T) {
+	runner := &fakeRunner{responses: []runnerResponse{
+		{stdout: `{"result":{"pane":{"pane_id":"w9:p1"}}}`},
+		{stdout: `{"result":{"agent":{"agent":"claude","pane_id":"w9:p1","agent_status":"idle","state_change_seq":1}}}`},
+		{stdout: `{"result":{"pane":{"pane_id":"w9:p1"}}}`},
+		{stdout: `{"result":{"agent":{"agent":"claude","pane_id":"w9:p1","agent_status":"idle","state_change_seq":1}}}`},
+		{stdout: `{"result":{"pane":{"pane_id":"w9:p1"}}}`},
+		{stdout: `{"error":{"code":"agent_not_found"}}`, err: errors.New("exit 1")},
+	}}
+	adapter := NewCommandAdapterWithRunner("fm-lab-contract", "", runner)
+	runtime, state, err := adapter.Identify(context.Background(), Session{PaneID: "w9:p1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime != RuntimeClaude || state != StateIdle {
+		t.Fatalf("Identify = %s/%s, want claude/idle", runtime, state)
+	}
+	// The same pane under Observe's strict check is a mismatch for a codex worker.
+	if _, err := adapter.Observe(context.Background(), Session{Runtime: RuntimeCodex, PaneID: "w9:p1"}); err == nil ||
+		!strings.Contains(err.Error(), "registered claude, want codex") {
+		t.Fatalf("Observe mismatch error = %v", err)
+	}
+	// A husk has no runtime to register.
+	runtime, state, err = adapter.Identify(context.Background(), Session{PaneID: "w9:p1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime != "" || state != StateHusk {
+		t.Fatalf("Identify husk = %q/%s", runtime, state)
+	}
+}

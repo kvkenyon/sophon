@@ -71,6 +71,11 @@ type Deps struct {
 	DeliveryGit    DeliveryGit
 	DeliveryRemote DeliveryRemote
 	NewValidator   func(command string) Validator
+	// HerdrSession is the explicit Herdr session spawn placements target.
+	HerdrSession string
+	// NewSessionPanes builds an exact-session pane boundary for volatile
+	// commander routing and worker pane retirement. Nil disables both.
+	NewSessionPanes func(session string) SessionPanes
 	// Model optionally selects the worker runtime model.
 	Model string
 }

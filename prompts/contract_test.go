@@ -14,6 +14,7 @@ var requiredCommanderClauses = []string{
 	"restart is a non-event",
 	"outcomes, not mechanics",
 	"notifications, never state",
+	"sophon commander attach",
 	"--confirmed",
 	"operator confirmation",
 }

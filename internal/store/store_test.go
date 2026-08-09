@@ -303,3 +303,39 @@ func TestLockRefusesUnreadableOwner(t *testing.T) {
 		t.Fatalf("err = %v, want conservative ErrLocked", err)
 	}
 }
+
+func TestCommanderRegistrationRoundTrip(t *testing.T) {
+	home := useHome(t)
+	if _, err := ReadCommander(); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ReadCommander without registration = %v, want ErrNotFound", err)
+	}
+	registration := CommanderRegistration{
+		Session: "fm-lab-x", WorkspaceID: "w9", TabID: "w9:t1", PaneID: "w9:p1",
+		Runtime: "claude", AttachedAt: time.Now().UTC().Truncate(time.Second),
+	}
+	if err := PublishCommander(registration); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := ReadCommander()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded != registration {
+		t.Fatalf("loaded = %+v, want %+v", loaded, registration)
+	}
+	// A fresh attach atomically replaces only the volatile address.
+	replacement := CommanderRegistration{Session: "fm-lab-y", PaneID: "w2:p1", AttachedAt: registration.AttachedAt}
+	if err := PublishCommander(replacement); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = ReadCommander()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded != replacement {
+		t.Fatalf("replaced registration = %+v, want %+v", loaded, replacement)
+	}
+	if _, err := os.Stat(CommanderPath(home)); err != nil {
+		t.Fatal(err)
+	}
+}

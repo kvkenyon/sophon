@@ -13,13 +13,12 @@ import (
 
 // renderBrief builds the worker's work order: the workers prompt overlays,
 // materialized-skill triggers, and a generated section pinning the mission,
-// attempt, Git identity, permissions, and the completion contract.
-func (f *Flow) renderBrief(mission store.Mission, task store.Task, attempt int,
+// attempt, Git identity, permissions, and the completion contract. homeDir is
+// the exact resolved data home; the completion command pins it explicitly so
+// a runtime that drops inherited environment still publishes to the assigned
+// store.
+func (f *Flow) renderBrief(homeDir string, mission store.Mission, task store.Task, attempt int,
 	worktree, branch, baseSHA string) (string, error) {
-	homeDir, err := datahome.Dir()
-	if err != nil {
-		return "", err
-	}
 	skillDir := store.WorkerSkillDir(homeDir, task.ID, attempt)
 	if err := runtimeprompts.MaterializeSkills(skillDir, runtimeprompts.WorkerSkills); err != nil {
 		return "", fmt.Errorf("materialize worker skills: %w", err)
@@ -67,8 +66,9 @@ func (f *Flow) renderBrief(mission store.Mission, task store.Task, attempt int,
 	fmt.Fprintf(&body, "1. Commit at least one new descendant of `%s` on `%s`.\n", baseSHA, branch)
 	body.WriteString("2. Run the required validation and ensure the Git worktree is clean.\n")
 	fmt.Fprintf(&body, "3. Write version 1 completion JSON to `%s` with exactly these fields: `version`, `status`, `summary`, `verification`, `changed_files`, and `risks`.\n", resultPath)
-	body.WriteString("4. Finish by submitting exactly once:\n\n```bash\n")
-	fmt.Fprintf(&body, "sophon worker complete %s --attempt %d --head-sha \"$(git rev-parse HEAD)\" --result %q\n", task.ID, attempt, resultPath)
+	body.WriteString("4. Finish by submitting exactly once, with this exact command (it pins the assigned Sophon data home):\n\n```bash\n")
+	fmt.Fprintf(&body, "%s=%s sophon worker complete %s --attempt %d --head-sha \"$(git rev-parse HEAD)\" --result %s\n",
+		datahome.OverrideEnv, shellQuote(homeDir), task.ID, attempt, shellQuote(resultPath))
 	body.WriteString("```\n")
 	return body.String(), nil
 }
@@ -91,4 +91,10 @@ func workerPromptOverlays() (string, string, error) {
 
 func cleanLine(value string) string {
 	return strings.Join(strings.Fields(value), " ")
+}
+
+// shellQuote renders a value as a single POSIX-shell-quoted word so paths
+// containing spaces or shell metacharacters survive verbatim.
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }

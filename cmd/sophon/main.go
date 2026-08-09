@@ -47,6 +47,8 @@ func run(ctx context.Context, args []string) error {
 		return spawnCommand(ctx, args[1:])
 	case "worker":
 		return workerCommand(ctx, args[1:])
+	case "commander":
+		return commanderCommand(ctx, args[1:])
 	case "verify-complete":
 		return verifyCompleteCommand(ctx, args[1:])
 	case "validate":
@@ -122,7 +124,13 @@ func (t *toolConfig) bind(flags *flag.FlagSet, names ...string) {
 
 func (t toolConfig) flow() *flow.Flow {
 	panes := herdr.NewCommandAdapter(t.herdr, t.herdrSession, "sophon")
-	return flow.New(flow.ProductionDeps(t.git, t.treehouse, t.ghAxi, panes))
+	deps := flow.ProductionDeps(t.git, t.treehouse, t.ghAxi, panes)
+	deps.HerdrSession = t.herdrSession
+	binary := t.herdr
+	deps.NewSessionPanes = func(session string) flow.SessionPanes {
+		return herdr.NewCommandAdapter(binary, session, "sophon")
+	}
+	return flow.New(deps)
 }
 
 // parseFlags parses interspersed flags and positionals: the standard flag
@@ -261,7 +269,7 @@ func workerComplete(ctx context.Context, args []string) error {
 	attempt := flags.Int("attempt", 0, "task attempt")
 	headSHA := flags.String("head-sha", "", "immutable completed head SHA")
 	resultPath := flags.String("result", "", "structured result JSON path inside the attempt directory")
-	tools.bind(flags, "git")
+	tools.bind(flags, "git", "herdr")
 	positional, err := parseFlags(flags, args)
 	if err != nil {
 		return err
@@ -273,13 +281,50 @@ func workerComplete(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// The result is durable. The commander wake is liveness only: a missing,
+	// dead, or unreachable target is a bounded diagnostic, never a failure.
+	if err := tools.flow().NotifyCommander(ctx, positional[0], *attempt); err != nil {
+		fmt.Fprintf(os.Stderr, "sophon: commander wake undelivered (completion is durable): %v\n", err)
+	}
 	return encode(map[string]any{"task_id": positional[0], "attempt": *attempt, "result_sha256": digest})
+}
+
+func commanderCommand(ctx context.Context, args []string) error {
+	if len(args) >= 1 && args[0] == "attach" {
+		return commanderAttach(ctx, args[1:])
+	}
+	return &exitError{2, errors.New("expected: sophon commander attach [--pane ID --workspace ID --tab ID]")}
+}
+
+// commanderAttach registers the volatile wake/placement address of the live
+// commander. Ambient Herdr pane environment supplies the identity when the
+// commander runs inside Herdr; flags override it explicitly.
+func commanderAttach(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("commander attach", flag.ContinueOnError)
+	pane := flags.String("pane", strings.TrimSpace(os.Getenv("HERDR_PANE_ID")), "Herdr pane ID (env HERDR_PANE_ID)")
+	workspace := flags.String("workspace", strings.TrimSpace(os.Getenv("HERDR_WORKSPACE_ID")), "Herdr workspace ID (env HERDR_WORKSPACE_ID)")
+	tab := flags.String("tab", strings.TrimSpace(os.Getenv("HERDR_TAB_ID")), "Herdr tab ID (env HERDR_TAB_ID)")
+	tools.bind(flags, "herdr", "herdr-session")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 0 {
+		return errors.New("commander attach does not accept positional arguments")
+	}
+	registration, err := tools.flow().AttachCommander(ctx, flow.AttachRequest{
+		Session: tools.herdrSession, WorkspaceID: *workspace, TabID: *tab, PaneID: *pane})
+	if err != nil {
+		return err
+	}
+	return encode(registration)
 }
 
 func verifyCompleteCommand(ctx context.Context, args []string) error {
 	tools := defaultTools()
 	flags := flag.NewFlagSet("verify-complete", flag.ContinueOnError)
-	tools.bind(flags, "git", "treehouse")
+	tools.bind(flags, "git", "treehouse", "herdr")
 	positional, err := parseFlags(flags, args)
 	if err != nil {
 		return err
@@ -291,13 +336,18 @@ func verifyCompleteCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return encode(outcome)
+	if err := encode(outcome); err != nil {
+		return err
+	}
+	// Successful verification of a no-validation task is terminal worker
+	// evidence; retirement is quiet cleanup and never a verification failure.
+	return retireWorkerQuietly(ctx, tools.flow(), positional[0])
 }
 
 func validateCommand(ctx context.Context, args []string) error {
 	tools := defaultTools()
 	flags := flag.NewFlagSet("validate", flag.ContinueOnError)
-	tools.bind(flags, "git")
+	tools.bind(flags, "git", "herdr")
 	positional, err := parseFlags(flags, args)
 	if err != nil {
 		return err
@@ -314,6 +364,17 @@ func validateCommand(ctx context.Context, args []string) error {
 	}
 	if !record.Passed {
 		return errors.New("validation failed")
+	}
+	// A passing validation is terminal worker evidence; retire the pane.
+	return retireWorkerQuietly(ctx, tools.flow(), positional[0])
+}
+
+// retireWorkerQuietly runs terminal-evidence worker pane retirement as
+// bounded cleanup: failure is a stderr diagnostic and never rewrites the
+// successful verification or validation it follows.
+func retireWorkerQuietly(ctx context.Context, f *flow.Flow, taskID string) error {
+	if err := f.RetireWorker(ctx, taskID); err != nil {
+		fmt.Fprintf(os.Stderr, "sophon: worker pane cleanup incomplete (durable evidence is unaffected): %v\n", err)
 	}
 	return nil
 }
@@ -449,9 +510,10 @@ func usage() {
   sophon mission list [--json]
   sophon task create --mission ID --title TITLE [--kind KIND] [--delivery branch|pr] [--validate COMMAND]
   sophon spawn TASK [--retry] [--herdr BIN] [--treehouse BIN] [--git BIN] [--herdr-session NAME]
-  sophon worker complete TASK --attempt N --head-sha SHA --result FILE [--git BIN]
-  sophon verify-complete TASK [--git BIN] [--treehouse BIN]
-  sophon validate TASK [--git BIN]
+  sophon worker complete TASK --attempt N --head-sha SHA --result FILE [--git BIN] [--herdr BIN]
+  sophon commander attach [--pane ID] [--workspace ID] [--tab ID] [--herdr BIN] [--herdr-session NAME]
+  sophon verify-complete TASK [--git BIN] [--treehouse BIN] [--herdr BIN]
+  sophon validate TASK [--git BIN] [--herdr BIN]
   sophon deliver TASK --confirmed [--git BIN] [--gh-axi BIN]
   sophon release TASK [--treehouse BIN]
   sophon status [--json] [--herdr BIN] [--herdr-session NAME]

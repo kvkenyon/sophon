@@ -30,6 +30,7 @@ type cliFixture struct {
 	herdr     string
 	ghAxi     string
 	ghLog     string
+	herdrLog  string
 }
 
 func newCLIFixture(t *testing.T) *cliFixture {
@@ -37,6 +38,9 @@ func newCLIFixture(t *testing.T) *cliFixture {
 	home := t.TempDir()
 	t.Setenv("SOPHON_DATA_HOME", home)
 	t.Setenv("HERDR_SESSION", "")
+	t.Setenv("HERDR_PANE_ID", "")
+	t.Setenv("HERDR_WORKSPACE_ID", "")
+	t.Setenv("HERDR_TAB_ID", "")
 	t.Setenv("SOPHON_PROMPT_DIR", "")
 	root := t.TempDir()
 	realGit, err := exec.LookPath("git")
@@ -144,19 +148,47 @@ case "$cmd" in
 esac
 `, shellQuote(state), shellQuote(worktrees), shellQuote(realGit)), 0o700)
 
+	herdrLog := filepath.Join(root, "herdr-calls")
+	herdrState := filepath.Join(root, "herdr-state")
+	if err := os.MkdirAll(herdrState, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	herdrBinary := filepath.Join(root, "fake-herdr")
-	writeCLIFile(t, herdrBinary, `#!/bin/sh
+	writeCLIFile(t, herdrBinary, fmt.Sprintf(`#!/bin/sh
 set -eu
+log=%s
+state=%s
+paneclosed() {
+  n=${1##*:p}
+  [ "$n" != "$1" ] || return 1
+  [ "$n" = 1 ] && return 1
+  max=$(cat "$state/tabs" 2>/dev/null || echo 1)
+  [ "$n" -le "$max" ] 2>/dev/null || return 0
+  grep -qx "w1:t$n" "$state/closed" 2>/dev/null
+}
 case "$1 $2" in
-  "workspace create") printf '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}\n' ;;
-  "pane run"|"tab rename"|"agent rename") printf '{"result":{"ok":true}}\n' ;;
+  "workspace create") printf 'workspace-create cwd=%%s label=%%s\n' "$4" "$6" >> "$log"; printf '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}\n' ;;
+  "tab create")
+    printf 'tab-create workspace=%%s cwd=%%s label=%%s\n' "$4" "$6" "$8" >> "$log"
+    n=$(cat "$state/tabs" 2>/dev/null || echo 1)
+    n=$((n + 1))
+    echo "$n" > "$state/tabs"
+    printf '{"result":{"tab":{"tab_id":"w1:t%%s"},"root_pane":{"pane_id":"w1:p%%s"}}}\n' "$n" "$n"
+    ;;
+  "tab close") printf 'tab-close %%s\n' "$3" >> "$log"; echo "$3" >> "$state/closed"; printf '{"result":{"ok":true}}\n' ;;
+  "pane run") printf 'run %%s %%s\n' "$3" "$4" >> "$log"; printf '{"result":{"ok":true}}\n' ;;
+  "tab rename"|"agent rename") printf '{"result":{"ok":true}}\n' ;;
   "pane read") printf 'OpenAI Codex\n' ;;
-  "pane get") printf '{"result":{"pane":{"pane_id":"w1:p1"}}}\n' ;;
-  "agent get") printf '{"result":{"agent":{"pane_id":"w1:p1","agent_status":"idle","state_change_seq":1}}}\n' ;;
-  "agent prompt") printf '{"result":{"agent":{"pane_id":"w1:p1","agent_session":{"value":"codex-session-cli"}},"ok":true}}\n' ;;
+  "pane get")
+    if paneclosed "$3"; then printf '{"error":{"code":"pane_not_found"}}\n'; else printf '{"result":{"pane":{"pane_id":"%%s"}}}\n' "$3"; fi
+    ;;
+  "agent get")
+    if paneclosed "$3"; then printf '{"error":{"code":"pane_not_found"}}\n'; else printf '{"result":{"agent":{"pane_id":"%%s","agent_status":"idle","state_change_seq":1}}}\n' "$3"; fi
+    ;;
+  "agent prompt") printf 'prompt %%s %%.160s\n' "$3" "$4" >> "$log"; printf '{"result":{"agent":{"pane_id":"%%s","agent_session":{"value":"codex-session-cli"}},"ok":true}}\n' "$3" ;;
   *) exit 2 ;;
 esac
-`, 0o700)
+`, shellQuote(herdrLog), shellQuote(herdrState)), 0o700)
 
 	ghLog := filepath.Join(root, "gh-axi-calls")
 	prState := filepath.Join(root, "gh-axi-pr")
@@ -186,7 +218,7 @@ esac
 `, shellQuote(ghLog), shellQuote(prState)), 0o700)
 
 	return &cliFixture{home: home, project: project, git: gitBinary,
-		treehouse: treehouseBinary, herdr: herdrBinary, ghAxi: ghBinary, ghLog: ghLog}
+		treehouse: treehouseBinary, herdr: herdrBinary, ghAxi: ghBinary, ghLog: ghLog, herdrLog: herdrLog}
 }
 
 func shellQuote(value string) string {
@@ -261,7 +293,7 @@ func (f *cliFixture) completeWorker(t *testing.T, missionID, taskID string, atte
 		t.Fatal(err)
 	}
 	output := runCLI(t, "worker", "complete", taskID, "--attempt", fmt.Sprint(attempt),
-		"--head-sha", head, "--result", resultPath, "--git", f.git)
+		"--head-sha", head, "--result", resultPath, "--git", f.git, "--herdr", f.herdr)
 	var completion struct {
 		ResultSHA256 string `json:"result_sha256"`
 	}
@@ -276,7 +308,7 @@ func (f *cliFixture) completeWorker(t *testing.T, missionID, taskID string, atte
 
 func (f *cliFixture) verifyComplete(t *testing.T, taskID string) store.Outcome {
 	t.Helper()
-	output := runCLI(t, "verify-complete", taskID, "--git", f.git, "--treehouse", f.treehouse)
+	output := runCLI(t, "verify-complete", taskID, "--git", f.git, "--treehouse", f.treehouse, "--herdr", f.herdr)
 	var outcome store.Outcome
 	if err := json.Unmarshal(output, &outcome); err != nil {
 		t.Fatal(err)
@@ -326,7 +358,7 @@ func TestCLIHappyPathMissionToRelease(t *testing.T) {
 	if !strings.EqualFold(outcome.HeadSHA, head) {
 		t.Fatalf("outcome = %+v, want head %s", outcome, head)
 	}
-	validated := runCLI(t, "validate", task.ID, "--git", fixture.git)
+	validated := runCLI(t, "validate", task.ID, "--git", fixture.git, "--herdr", fixture.herdr)
 	var validation store.Validation
 	if err := json.Unmarshal(validated, &validation); err != nil {
 		t.Fatal(err)
@@ -465,7 +497,7 @@ func TestCLIDeliverRefusals(t *testing.T) {
 		!strings.Contains(err.Error(), "validation") {
 		t.Fatalf("deliver without validation error = %v", err)
 	}
-	if _, err := runCLIErr(t, "validate", gated.ID, "--git", fixture.git); err == nil ||
+	if _, err := runCLIErr(t, "validate", gated.ID, "--git", fixture.git, "--herdr", fixture.herdr); err == nil ||
 		!strings.Contains(err.Error(), "validation failed") {
 		t.Fatalf("failing validate error = %v", err)
 	}
@@ -572,6 +604,7 @@ func TestCLIDispatchAndUsageErrors(t *testing.T) {
 		{"mission subcommand", []string{"mission"}, "expected: sophon mission"},
 		{"task subcommand", []string{"task"}, "expected: sophon task"},
 		{"worker subcommand", []string{"worker"}, "expected: sophon worker"},
+		{"commander subcommand", []string{"commander"}, "expected: sophon commander"},
 		{"prompt subcommand", []string{"prompt"}, "expected: sophon prompt"},
 		{"mission create missing fields", []string{"mission", "create", "--project", fixture.project}, "required argument is empty"},
 		{"task create unknown mission", []string{"task", "create", "--mission", "mission_missing", "--title", "x"}, "not found"},

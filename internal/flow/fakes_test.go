@@ -101,6 +101,7 @@ type fakePanes struct {
 	mu         sync.Mutex
 	session    herdr.Session
 	startErr   error
+	starts     []herdr.StartRequest
 	observe    herdr.State
 	observeErr error
 	wakes      []string
@@ -109,6 +110,7 @@ type fakePanes struct {
 func (p *fakePanes) StartCodex(_ context.Context, in herdr.StartRequest) (herdr.Session, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.starts = append(p.starts, in)
 	if p.startErr != nil {
 		return herdr.Session{}, p.startErr
 	}
@@ -119,6 +121,12 @@ func (p *fakePanes) StartCodex(_ context.Context, in herdr.StartRequest) (herdr.
 		session.PaneID = "pane-1"
 	}
 	return session, nil
+}
+
+func (p *fakePanes) lastStart() herdr.StartRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.starts[len(p.starts)-1]
 }
 
 func (p *fakePanes) Observe(_ context.Context, session herdr.Session) (herdr.State, error) {
@@ -215,6 +223,72 @@ type fakeValidator struct {
 func (v *fakeValidator) Run(context.Context, string) (validation.Result, error) {
 	v.runs++
 	return v.result, v.err
+}
+
+// fakeSessionPanes implements SessionPanes with scripted answers and capture.
+type fakeSessionPanes struct {
+	mu          sync.Mutex
+	runtime     herdr.Runtime
+	state       herdr.State
+	identifyErr error
+	observeErr  error
+	submitErr   error
+	stopErr     error
+	submissions []string
+	stops       []herdr.Session
+}
+
+func (p *fakeSessionPanes) Identify(context.Context, herdr.Session) (herdr.Runtime, herdr.State, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.identifyErr != nil {
+		return "", "", p.identifyErr
+	}
+	state := p.state
+	if state == "" {
+		state = herdr.StateIdle
+	}
+	return p.runtime, state, nil
+}
+
+func (p *fakeSessionPanes) Observe(_ context.Context, session herdr.Session) (herdr.State, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.observeErr != nil {
+		return "", p.observeErr
+	}
+	if p.state == "" {
+		return herdr.StateIdle, nil
+	}
+	return p.state, nil
+}
+
+func (p *fakeSessionPanes) Submit(_ context.Context, session herdr.Session, message string) (herdr.Session, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.submitErr != nil {
+		return herdr.Session{}, p.submitErr
+	}
+	p.submissions = append(p.submissions, session.PaneID+": "+message)
+	return session, nil
+}
+
+func (p *fakeSessionPanes) Stop(_ context.Context, session herdr.Session) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stopErr != nil {
+		return p.stopErr
+	}
+	p.stops = append(p.stops, session)
+	return nil
+}
+
+// sessionPanesFactory records every requested session and serves the fake.
+func sessionPanesFactory(p *fakeSessionPanes, requested *[]string) func(string) SessionPanes {
+	return func(session string) SessionPanes {
+		*requested = append(*requested, session)
+		return p
+	}
 }
 
 var (

@@ -79,6 +79,14 @@ duplicated, or contradictory wake lines change nothing; never relay worker
 notification prose as current truth. When a decision depends on current
 reality, run `sophon status` and act on the derivation.
 
+`state/commander.json` is the volatile attach registration: it routes
+completion wakes to your pane and groups new worker tabs into your workspace.
+It is liveness and presentation routing only, never truth; a fresh attach
+replaces it, and a stale or missing one quietly degrades to isolated worker
+workspaces and file-discovered `ready` tasks. Worker pane layout and
+retirement are likewise presentation: a closed worker tab after successful
+verification or validation is routine cleanup, never a lost worker.
+
 Attempt fencing is the incarnation rule: `task.json` carries a
 `current_attempt` token. `sophon spawn` writes attempt 1; `sophon spawn
 --retry` fences the previous attempt's lease by exact identity (best effort),
@@ -96,8 +104,14 @@ anyone runs `sophon status`.
 At session start, before dispatching, steering, retrying, delivering, or
 declaring anything complete:
 
-1. Run `sophon status` (add `--json` when you need machine-readable detail).
-2. Reconcile every attention item the derivation surfaces:
+1. Run `sophon commander attach` so worker completions can wake you and new
+   workers can join your Herdr workspace as task tabs. When you run inside
+   Herdr, the ambient environment supplies your exact session, workspace, tab,
+   and pane identity; pass the `--pane`/`--workspace`/`--tab` flags only when
+   it is missing. Attach records a volatile notification and placement
+   address only — never state, never ownership of anything.
+2. Run `sophon status` (add `--json` when you need machine-readable detail).
+3. Reconcile every attention item the derivation surfaces:
    - **ready** tasks await verification: inspect the result and run
      `sophon verify-complete`.
    - **unknown-pane** or **lost** tasks need reconciliation before any
@@ -105,7 +119,7 @@ declaring anything complete:
    - **verified** tasks with a configured validation command need
      `sophon validate`; verified tasks otherwise await a delivery decision
      with the operator.
-3. Report to the operator concisely: what state the work is in, what you are
+4. Report to the operator concisely: what state the work is in, what you are
    doing about it, and what (if anything) needs their decision.
 
 If there is no mission yet, greet the operator briefly and ask what we are
@@ -173,7 +187,10 @@ frameworks beyond accepted intent.
 
 After spawning, confirm through `sophon status` that the task is active and
 the pane is observed. A spawn receipt alone is not proof the worker is
-working; live observation is.
+working; live observation is. When you are attached, workers open as task
+tabs inside your Herdr workspace; otherwise each worker gets an isolated
+workspace. That layout is presentation only — it never factors into status,
+verification, or any other truth.
 
 Use `sophon send <task-id> <message>` for short, task-scoped steering. Put
 long durable context in the task record itself. Workers own execution in their
@@ -206,6 +223,14 @@ Completion review begins when a task derives `ready`:
    require a passing receipt against the verified head.
 4. Evaluate every acceptance criterion against the verified evidence before
    telling the operator the work is done.
+
+Successful terminal worker evidence — verification for a task without
+validation, or a passing validation for a task with one — automatically
+retires the exact finished worker pane. This is routine, quiet cleanup: the
+branch, lease, and every record remain, and a cleanup failure is a bounded
+diagnostic you may retry by re-running the same command, never a verification
+or validation failure. Until that boundary the worker stays available so a
+correction can be routed to the same attempt.
 
 A stale-attempt refusal, head mismatch, lease conflict, or failed validation
 is a stop-and-investigate result, never an obstacle to route around.

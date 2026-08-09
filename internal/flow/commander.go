@@ -1,0 +1,208 @@
+package flow
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+
+	"sophon/internal/herdr"
+	"sophon/internal/store"
+)
+
+// SessionPanes is the explicit-Herdr-session boundary used for volatile
+// commander routing and exact task-owned worker pane retirement. Every call
+// is scoped to one exact session; nothing here reads or writes task truth.
+type SessionPanes interface {
+	Identify(context.Context, herdr.Session) (herdr.Runtime, herdr.State, error)
+	Observe(context.Context, herdr.Session) (herdr.State, error)
+	Submit(context.Context, herdr.Session, string) (herdr.Session, error)
+	Stop(context.Context, herdr.Session) error
+}
+
+// Exact Herdr identity syntax. Registration and cleanup validate these so a
+// malformed or attacker-influenced value can never route a Herdr call to an
+// unrelated session, workspace, tab, or pane.
+var (
+	safeHerdrSession = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	safeHerdrID      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+)
+
+// AttachRequest is the exact ambient Herdr identity of the live commander
+// running `sophon commander attach`.
+type AttachRequest struct {
+	Session     string
+	WorkspaceID string
+	TabID       string
+	PaneID      string
+}
+
+// AttachCommander registers the volatile wake and placement address of the
+// current unmanaged Herdr commander. It claims no ownership, performs no
+// recovery, and mutates no task truth: it verifies the exact pane is a live
+// registered agent, then atomically replaces the volatile registration.
+func (f *Flow) AttachCommander(ctx context.Context, in AttachRequest) (store.CommanderRegistration, error) {
+	if f.deps.NewSessionPanes == nil {
+		return store.CommanderRegistration{}, errors.New("flow is not fully configured for commander attach")
+	}
+	if !safeHerdrSession.MatchString(in.Session) {
+		return store.CommanderRegistration{}, fmt.Errorf("invalid Herdr session syntax %q", in.Session)
+	}
+	if !safeHerdrID.MatchString(in.PaneID) {
+		return store.CommanderRegistration{}, fmt.Errorf("invalid Herdr pane syntax %q", in.PaneID)
+	}
+	if (in.WorkspaceID == "") != (in.TabID == "") {
+		return store.CommanderRegistration{}, errors.New("Herdr workspace and tab identity must attach together")
+	}
+	if in.WorkspaceID != "" && !safeHerdrID.MatchString(in.WorkspaceID) {
+		return store.CommanderRegistration{}, fmt.Errorf("invalid Herdr workspace syntax %q", in.WorkspaceID)
+	}
+	if in.TabID != "" && !safeHerdrID.MatchString(in.TabID) {
+		return store.CommanderRegistration{}, fmt.Errorf("invalid Herdr tab syntax %q", in.TabID)
+	}
+	panes := f.deps.NewSessionPanes(in.Session)
+	runtime, state, err := panes.Identify(ctx, herdr.Session{SessionName: in.Session, PaneID: in.PaneID})
+	if err != nil {
+		return store.CommanderRegistration{}, fmt.Errorf("verify commander pane: %w", err)
+	}
+	if state != herdr.StateIdle && state != herdr.StateRunning {
+		return store.CommanderRegistration{}, fmt.Errorf("commander pane %s is %s, not a live registered agent", in.PaneID, state)
+	}
+	registration := store.CommanderRegistration{
+		Session: in.Session, WorkspaceID: in.WorkspaceID, TabID: in.TabID,
+		PaneID: in.PaneID, Runtime: string(runtime), AttachedAt: time.Now().UTC(),
+	}
+	release, err := store.Acquire(ctx, "commander attach")
+	if err != nil {
+		return store.CommanderRegistration{}, err
+	}
+	defer release()
+	if err := store.PublishCommander(registration); err != nil {
+		return store.CommanderRegistration{}, err
+	}
+	return registration, nil
+}
+
+// CommanderWakeMessage is the fixed Sophon-generated wake delivered after a
+// durable result publication. Workers never author operator-facing prose;
+// the message only identifies the task and points at derived status.
+func CommanderWakeMessage(taskID string, attempt int) string {
+	return fmt.Sprintf("Sophon: task %s attempt %d published a durable result and now derives ready. "+
+		"Run `sophon status` and continue supervision (verify-complete, validation, delivery decision).", taskID, attempt)
+}
+
+// NotifyCommander best-effort wakes the registered commander after a durable
+// result publication. It is liveness only: a missing, malformed, stale, dead,
+// or unreachable target is a bounded diagnostic to the caller, never a task
+// failure, and never changes the durable completion.
+func (f *Flow) NotifyCommander(ctx context.Context, taskID string, attempt int) error {
+	if f.deps.NewSessionPanes == nil {
+		return nil
+	}
+	registration, err := store.ReadCommander()
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read commander registration: %w", err)
+	}
+	if !safeHerdrSession.MatchString(registration.Session) || !safeHerdrID.MatchString(registration.PaneID) {
+		return fmt.Errorf("commander registration has invalid Herdr identity syntax (session %q pane %q); re-run sophon commander attach",
+			registration.Session, registration.PaneID)
+	}
+	panes := f.deps.NewSessionPanes(registration.Session)
+	session := herdr.Session{SessionName: registration.Session, PaneID: registration.PaneID,
+		Runtime: herdr.Runtime(registration.Runtime)}
+	if _, err := panes.Submit(ctx, session, CommanderWakeMessage(taskID, attempt)); err != nil {
+		return fmt.Errorf("wake commander pane %s in session %s: %w", registration.PaneID, registration.Session, err)
+	}
+	return nil
+}
+
+// commanderWorkspace returns the attached commander's registered workspace
+// when a syntactically valid registration targets the same explicit Herdr
+// session this spawn uses. Anything missing, malformed, or foreign yields
+// the documented isolated-workspace fallback and never another target.
+func (f *Flow) commanderWorkspace() string {
+	if f.deps.HerdrSession == "" {
+		return ""
+	}
+	registration, err := store.ReadCommander()
+	if err != nil || registration.Session != f.deps.HerdrSession {
+		return ""
+	}
+	if !safeHerdrID.MatchString(registration.WorkspaceID) {
+		return ""
+	}
+	return registration.WorkspaceID
+}
+
+// RetireWorker closes the current attempt's exact task-owned worker pane once
+// the attempt holds successful terminal worker evidence: a verified outcome
+// for a task without a validation command, or a passing validation receipt
+// for a task with one. Until that boundary the worker stays available so a
+// correction can be routed to the same attempt. Retirement is presentation
+// cleanup only — it never touches derived truth, delivery authority, branch
+// or commit identity, the lease, or any record — and it is idempotent: an
+// already-lost exact pane is success. There is deliberately no cleanup
+// receipt: the only external effect (the tab close) is directly observable,
+// so a retry converges via reality and no crash window needs typed intent.
+func (f *Flow) RetireWorker(ctx context.Context, taskID string) error {
+	if f.deps.NewSessionPanes == nil {
+		return nil
+	}
+	task, err := store.FindTask(taskID)
+	if err != nil {
+		return err
+	}
+	attempt, err := currentAttempt(task)
+	if err != nil {
+		return err
+	}
+	if _, err := store.ReadOutcome(task.MissionID, taskID, attempt); errors.Is(err, store.ErrNotFound) {
+		return nil // no terminal worker evidence yet
+	} else if err != nil {
+		return err
+	}
+	if strings.TrimSpace(task.ValidationCommand) != "" {
+		validation, err := store.ReadValidation(task.MissionID, taskID, attempt)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil // verification alone is not terminal for validated tasks
+		}
+		if err != nil {
+			return err
+		}
+		if !validation.Passed {
+			return nil // a failed validation keeps the worker available for correction
+		}
+	}
+	spawn, err := store.ReadSpawn(task.MissionID, taskID, attempt)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(spawn.Pane.SessionName) == "" || strings.TrimSpace(spawn.Pane.TabID) == "" {
+		return nil
+	}
+	if !safeHerdrSession.MatchString(spawn.Pane.SessionName) || !safeHerdrID.MatchString(spawn.Pane.TabID) {
+		return fmt.Errorf("spawn receipt has invalid Herdr identity syntax (session %q tab %q); refusing worker cleanup",
+			spawn.Pane.SessionName, spawn.Pane.TabID)
+	}
+	panes := f.deps.NewSessionPanes(spawn.Pane.SessionName)
+	state, err := panes.Observe(ctx, spawn.Pane)
+	if err != nil {
+		return fmt.Errorf("observe worker pane %s before retirement: %w", spawn.Pane.PaneID, err)
+	}
+	if state == herdr.StateLost {
+		return nil // already retired; cleanup converges idempotently
+	}
+	if err := panes.Stop(ctx, spawn.Pane); err != nil {
+		return fmt.Errorf("close worker tab %s in session %s: %w", spawn.Pane.TabID, spawn.Pane.SessionName, err)
+	}
+	store.AppendWake(taskID, fmt.Sprintf("retired: worker pane closed (attempt %d)", attempt))
+	return nil
+}

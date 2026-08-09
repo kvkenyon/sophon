@@ -26,3 +26,15 @@ func Dir() (string, error) {
 	}
 	return filepath.Join(home, dirName), nil
 }
+
+// AbsDir returns Dir resolved to a clean absolute path. Spawn propagates this
+// exact value into worker runtime processes and the generated brief so the
+// worker's own commands never depend on ambient environment or working
+// directory.
+func AbsDir() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(dir)
+}

@@ -29,6 +29,7 @@ attempt each).
         release.json                    # conditional lease-release receipt (sophon release)
   state/
     <task-id>.status                    # VOLATILE wake lines; never truth
+    commander.json                      # VOLATILE commander wake/placement address; never truth
     .lock/                              # shared-mutation lock (mkdir) with owner.json
   skills/                               # per-session materialized runtime skills
 ```
@@ -63,7 +64,30 @@ attempt each).
    lines never change derived status. A result completed while no commander
    session exists simply waits on disk and surfaces as `ready` to the next
    session — no recovery transition exists.
-6. **External boundaries.** The lease boundary uses exact identity guards:
+6. **Volatile commander routing.** `sophon commander attach` records the live
+   commander's exact Herdr session/workspace/tab/pane in
+   `state/commander.json`. The record is liveness and presentation routing
+   only: after `sophon worker complete` durably publishes `result.json`, the
+   CLI best-effort submits a fixed Sophon-generated wake (task identity plus
+   "run derived status") to the registered pane, and `sophon spawn` groups a
+   new worker as a tab in the registered workspace of the same explicit Herdr
+   session. A missing, malformed, stale, dead, or duplicate target is a
+   bounded diagnostic, never a task failure; spawn then falls back to an
+   isolated workspace and the completion still derives `ready` from disk. A
+   fresh attach replaces only this volatile address — no recovery transition,
+   no task-truth mutation. Workers never author the wake prose; the binary
+   generates it.
+7. **Worker pane retirement.** Successful terminal worker evidence — a
+   verified outcome for a task without validation, or a passing validation
+   receipt for a task with one — closes the exact session/tab recorded in the
+   current attempt's spawn receipt. Retirement is presentation cleanup only:
+   it never changes derived truth, delivery authority, branch or commit
+   identity, the lease, or any record. It is idempotent (an already-lost
+   exact pane is success), refuses malformed recorded identity, and needs no
+   cleanup receipt because the tab close is directly observable and a retry
+   converges via reality. Until the terminal boundary the worker pane stays
+   available for corrections to the same attempt.
+8. **External boundaries.** The lease boundary uses exact identity guards:
    release is conditional on `(lease_id, holder)` and fences on mismatch. The
    forge boundary pushes an exact SHA and find-or-creates the PR by
    repository + branch + SHA. Where an external effect creates a real crash
@@ -71,7 +95,7 @@ attempt each).
    receipt after (`delivery.json`, `release.json`); re-running the same command
    converges to the same result via observed reality. There is no generalized
    command ledger.
-7. **Authority.** A live commander session may verify and validate
+9. **Authority.** A live commander session may verify and validate
    autonomously. Every delivery effect requires operator confirmation, enforced
    mechanically: `sophon deliver` refuses without `--confirmed`. With no
    commander session alive, nothing advances and nothing is lost.
@@ -84,6 +108,7 @@ sophon mission create --project <path> --title <t> --objective <o>
 sophon mission list [--json]
 sophon task create --mission <id> --title <t> [--kind implementation]
                    [--delivery branch|pr] [--validate <command>]
+sophon commander attach [--pane <id>] [--workspace <id>] [--tab <id>]
 sophon spawn <task-id> [--retry]
 sophon worker complete <task-id> --attempt <n> --head-sha <sha> --result <path>
 sophon verify-complete <task-id>
@@ -98,6 +123,13 @@ sophon prompt commander
 Binary paths for external tools (`--herdr`, `--treehouse`, `--git`, `--gh-axi`)
 are flags on the commands that need them, defaulting to PATH lookup.
 
+Spawn resolves the data home once to a clean absolute path and propagates
+that exact non-secret value two ways: as a `SOPHON_DATA_HOME` environment
+assignment on the worker runtime's launch command (all supported runtimes),
+and pinned into the brief's generated completion command. A worker therefore
+publishes to the assigned store even when its runtime drops inherited
+environment; no other environment values cross the launch boundary.
+
 ## Explicit limitations
 
 - Sophon does not move unless a commander session (or the operator) invokes
@@ -108,6 +140,11 @@ are flags on the commands that need them, defaulting to PATH lookup.
   refusal, never silent takeover.
 - `state/*.status` wake lines are best-effort notifications. Liveness of
   notification is a commander-prompt concern, not a correctness mechanism.
+- `state/commander.json` is volatile liveness/presentation routing. Nothing
+  reads it for truth; deleting it costs only wake delivery and tab grouping.
+- Worker tab grouping and pane retirement are presentation only. Layout never
+  participates in correctness, and retirement never releases a lease or
+  discards work.
 - Validation is re-run on demand; there is no content-addressed cache.
 - Single operator, single machine. No multi-machine, remote workers, or
   auto-merge.

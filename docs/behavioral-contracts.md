@@ -23,12 +23,15 @@ no managed runtime, no resume machinery. Its contract:
 - **Durable-state reconstruction.** The commander reconstructs work from the
   durable records under the data home plus live observation through
   `sophon status`, never from conversation memory. A restart is a non-event:
-  session start is `sophon status`, reconcile attention items (ready tasks
-  awaiting verification, lost or unknown-pane tasks), then report.
+  session start is `sophon commander attach` (registering the volatile
+  wake/placement address so completions can wake the session and new workers
+  can join its Herdr workspace as tabs), then `sophon status`, reconcile
+  attention items (ready tasks awaiting verification, lost or unknown-pane
+  tasks), then report.
 - **Outcomes, not mechanics.** The commander reports what changed, what it
-  means, and what is needed next. Wake lines in `~/.sophon/state/` and worker
-  notification prose are notifications, never state, and are never relayed as
-  current truth.
+  means, and what is needed next. Wake lines in `~/.sophon/state/`, the
+  volatile `state/commander.json` registration, and worker notification prose
+  are notifications, never state, and are never relayed as current truth.
 - **Bounded authority.** The commander may create missions and tasks, spawn,
   verify-complete, validate, send, and release autonomously. Every delivery
   effect requires explicit operator confirmation, enforced mechanically by
@@ -36,6 +39,13 @@ no managed runtime, no resume machinery. Its contract:
 - **Attempt fencing.** Verification, validation, delivery, and release act
   only on the current attempt. `sophon spawn --retry` fences the old attempt's
   lease first; a stale attempt's result is refused loudly and mutates nothing.
+- **Routine worker cleanup.** Successful terminal worker evidence — a verified
+  outcome, plus a passing validation when one is configured — retires the
+  exact finished worker pane automatically. This is quiet presentation
+  cleanup: branch, lease, and records remain until operator-confirmed
+  delivery and explicit release, and a cleanup failure is a bounded
+  diagnostic, never a verification failure. Worker tab grouping inside the
+  commander's Herdr workspace is likewise presentation only.
 
 Conditional procedures live in the materialized skills under `prompts/skills/`
 (recap, status, operator-authority, decision-lifecycle, diagnostic-reasoning,
@@ -61,9 +71,11 @@ in its own leased Treehouse worktree. Its contract:
   outcomes, delivery — and never pushes, opens a PR, delivers, or merges.
 - **Structured result only.** The worker's sole write outside the worktree is
   the version 1 result JSON (`version`, `status`, `summary`, `verification`,
-  `changed_files`, `risks`), published exactly once through
-  `sophon worker complete <task-id> --attempt <n> --head-sha $(git rev-parse HEAD) --result <path>`.
-  Completion prose is never completion.
+  `changed_files`, `risks`), published exactly once through the brief's exact
+  completion command — `sophon worker complete <task-id> --attempt <n>
+  --head-sha $(git rev-parse HEAD) --result <path>` prefixed with the
+  `SOPHON_DATA_HOME` assignment that pins the assigned store. Completion prose
+  is never completion.
 - **Concrete escalation only.** A worker escalates only genuine decisions and
   blockers it cannot resolve within the brief, by stopping, preserving work,
   and reporting the evidence — never by addressing the operator, and never by
