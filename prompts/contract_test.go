@@ -20,6 +20,9 @@ var requiredCommanderClauses = []string{
 	"action queue first",
 	"Drain the action queue to a fixed point",
 	"ready for my verification",
+	"sophon status --all",
+	"invalid-evidence",
+	"already-running",
 }
 
 // requiredWorkerClauses are the behavioral contracts every worker brief must
@@ -29,6 +32,10 @@ var requiredWorkerClauses = []string{
 	"sophon worker complete",
 	"--head-sha",
 	"--result",
+	"sophon worker report",
+	"completion-submission.json",
+	"report-submission.json",
+	"scope-mismatch",
 	"Never mutate shared state",
 	"Escalate only concrete decisions and blockers",
 }

@@ -15,7 +15,8 @@ Recovery restores supervised ownership of accepted work; it never creates a para
 ## Reconcile before intervention
 
 Treat pane loss as a presence fact, not proof that task work disappeared.
-Run `sophon status --json` for the current derivation, then read the current attempt's records — `spawn.json`, `result.json`, `outcome.json` — before touching anything.
+Run `sophon status --json` for the current derivation, then read the current attempt's records — `spawn.json`, `result.json`, `report.json`, `outcome.json`, and `release.json` — before touching anything.
+A valid `attention` report is decision or blocker reconciliation on the preserved attempt, not lost-worker recovery. A released task is terminal cleanup and appears only under `sophon status --all`.
 A task that already derives `ready` or beyond needs completion review, not recovery.
 Never scrape terminal text or reconstruct current state from wake lines.
 

@@ -7,13 +7,16 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"sophon/internal/datahome"
@@ -21,8 +24,38 @@ import (
 	"sophon/internal/herdr"
 )
 
-// ErrNotFound marks a missing record. Wrap it; never compare by string.
-var ErrNotFound = errors.New("store record not found")
+var (
+	// ErrNotFound marks a missing record. Wrap it; never compare by string.
+	ErrNotFound = errors.New("store record not found")
+	// ErrInvalidEvidence marks a malformed canonical worker completion or
+	// non-completion record. Status surfaces it instead of treating presence as
+	// truth.
+	ErrInvalidEvidence = errors.New("invalid worker evidence")
+)
+
+const (
+	CompletionSubmissionName  = "completion-submission.json"
+	ReportSubmissionName      = "report-submission.json"
+	WorkerReportScopeMismatch = "scope-mismatch"
+	WorkerReportBlocked       = "blocked"
+)
+
+// WorkerReport is canonical typed non-completion evidence. It preserves the
+// exact task/attempt/head identity plus work and verification disclosure
+// without claiming completion, verification, or delivery readiness.
+type WorkerReport struct {
+	Version      int                         `json:"version"`
+	Status       string                      `json:"status"`
+	TaskID       string                      `json:"task_id"`
+	Attempt      int                         `json:"attempt"`
+	HeadSHA      string                      `json:"head_sha"`
+	Reason       string                      `json:"reason"`
+	Verification []domain.VerificationResult `json:"verification"`
+	Evidence     []string                    `json:"evidence"`
+	ChangedFiles []string                    `json:"changed_files"`
+	DirtyWork    bool                        `json:"dirty_work"`
+	Risks        []string                    `json:"risks"`
+}
 
 // Mission is durable mission intent.
 type Mission struct {
@@ -207,8 +240,8 @@ func Publish(path string, v any) error {
 	return PublishBytes(path, append(data, '\n'))
 }
 
-// PublishBytes is the raw-bytes variant of Publish, used for brief.md and the
-// worker's result.json whose bytes must survive verbatim.
+// PublishBytes is the raw-bytes variant of Publish, used for brief.md and
+// validated canonical evidence whose submitted bytes must survive verbatim.
 func PublishBytes(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -325,6 +358,141 @@ func ReadSpawn(missionID, taskID string, attempt int) (Spawn, error) {
 	return spawn, read(AttemptPath(homeDir, missionID, taskID, attempt, "spawn.json"), &spawn)
 }
 
+// ReadResult strictly decodes one canonical completion record.
+func ReadResult(missionID, taskID string, attempt int) (domain.WorkerResult, error) {
+	homeDir, err := home()
+	if err != nil {
+		return domain.WorkerResult{}, err
+	}
+	data, err := readBytes(AttemptPath(homeDir, missionID, taskID, attempt, "result.json"))
+	if err != nil {
+		return domain.WorkerResult{}, err
+	}
+	return DecodeWorkerResult(data)
+}
+
+// ReadReport strictly decodes one canonical non-completion record.
+func ReadReport(missionID, taskID string, attempt int) (WorkerReport, error) {
+	homeDir, err := home()
+	if err != nil {
+		return WorkerReport{}, err
+	}
+	data, err := readBytes(AttemptPath(homeDir, missionID, taskID, attempt, "report.json"))
+	if err != nil {
+		return WorkerReport{}, err
+	}
+	return DecodeWorkerReport(data)
+}
+
+func readBytes(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read record %s: %w", path, err)
+	}
+	return data, nil
+}
+
+// DecodeWorkerResult is the single strict schema boundary for canonical
+// completion evidence and its submission form.
+func DecodeWorkerResult(data []byte) (domain.WorkerResult, error) {
+	var result domain.WorkerResult
+	if err := decodeStrict(data, &result); err != nil {
+		return result, err
+	}
+	if result.Version != 1 || result.Status != "completed" || strings.TrimSpace(result.Summary) == "" ||
+		len(result.Verification) == 0 || len(result.ChangedFiles) == 0 || result.Risks == nil {
+		return result, fmt.Errorf("%w: version, completed status, summary, verification, changed_files, and risks are required", ErrInvalidEvidence)
+	}
+	for _, check := range result.Verification {
+		if strings.TrimSpace(check.Command) == "" || check.ExitCode != 0 {
+			return result, fmt.Errorf("%w: verification entries require a command and zero exit code", ErrInvalidEvidence)
+		}
+	}
+	if err := validateChangedFiles(result.ChangedFiles); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// DecodeWorkerReport is the single strict schema boundary for canonical typed
+// non-completion evidence and its submission form.
+func DecodeWorkerReport(data []byte) (WorkerReport, error) {
+	var raw struct {
+		Version      int                         `json:"version"`
+		Status       string                      `json:"status"`
+		TaskID       string                      `json:"task_id"`
+		Attempt      int                         `json:"attempt"`
+		HeadSHA      string                      `json:"head_sha"`
+		Reason       string                      `json:"reason"`
+		Verification []domain.VerificationResult `json:"verification"`
+		Evidence     []string                    `json:"evidence"`
+		ChangedFiles []string                    `json:"changed_files"`
+		DirtyWork    *bool                       `json:"dirty_work"`
+		Risks        []string                    `json:"risks"`
+	}
+	if err := decodeStrict(data, &raw); err != nil {
+		return WorkerReport{}, err
+	}
+	validStatus := raw.Status == WorkerReportScopeMismatch || raw.Status == WorkerReportBlocked
+	if raw.Version != 1 || !validStatus || strings.TrimSpace(raw.TaskID) == "" || raw.Attempt < 1 ||
+		strings.TrimSpace(raw.HeadSHA) == "" || strings.TrimSpace(raw.Reason) == "" || raw.DirtyWork == nil ||
+		raw.Verification == nil || raw.Evidence == nil || raw.ChangedFiles == nil || raw.Risks == nil ||
+		(len(raw.Verification) == 0 && len(raw.Evidence) == 0) {
+		return WorkerReport{}, fmt.Errorf("%w: version, typed status, task_id, attempt, head_sha, reason, verification/evidence, changed_files, dirty_work, and risks are required", ErrInvalidEvidence)
+	}
+	for _, check := range raw.Verification {
+		if strings.TrimSpace(check.Command) == "" {
+			return WorkerReport{}, fmt.Errorf("%w: report verification entries require a command", ErrInvalidEvidence)
+		}
+	}
+	for _, evidence := range raw.Evidence {
+		if strings.TrimSpace(evidence) == "" {
+			return WorkerReport{}, fmt.Errorf("%w: report evidence entries cannot be empty", ErrInvalidEvidence)
+		}
+	}
+	if err := validateChangedFiles(raw.ChangedFiles); err != nil {
+		return WorkerReport{}, err
+	}
+	return WorkerReport{Version: raw.Version, Status: raw.Status, TaskID: raw.TaskID, Attempt: raw.Attempt,
+		HeadSHA: raw.HeadSHA, Reason: raw.Reason, Verification: raw.Verification, Evidence: raw.Evidence,
+		ChangedFiles: raw.ChangedFiles, DirtyWork: *raw.DirtyWork, Risks: raw.Risks}, nil
+}
+
+func decodeStrict(data []byte, value any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return fmt.Errorf("%w: decode JSON: %v", ErrInvalidEvidence, err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("%w: trailing JSON value", ErrInvalidEvidence)
+		}
+		return fmt.Errorf("%w: trailing content: %v", ErrInvalidEvidence, err)
+	}
+	return nil
+}
+
+func validateChangedFiles(files []string) error {
+	seen := make(map[string]struct{}, len(files))
+	for _, changed := range files {
+		clean := filepath.Clean(changed)
+		if changed == "" || filepath.IsAbs(changed) || clean == "." || clean == ".." ||
+			strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean != changed {
+			return fmt.Errorf("%w: changed_files contains unsafe path %q", ErrInvalidEvidence, changed)
+		}
+		if _, exists := seen[changed]; exists {
+			return fmt.Errorf("%w: duplicate changed file %q", ErrInvalidEvidence, changed)
+		}
+		seen[changed] = struct{}{}
+	}
+	return nil
+}
+
 // ReadOutcome loads one attempt's verified-completion receipt.
 func ReadOutcome(missionID, taskID string, attempt int) (Outcome, error) {
 	var outcome Outcome
@@ -362,7 +530,14 @@ func ReadRelease(missionID, taskID string, attempt int) (Release, error) {
 	if err != nil {
 		return release, err
 	}
-	return release, read(AttemptPath(homeDir, missionID, taskID, attempt, "release.json"), &release)
+	data, err := readBytes(AttemptPath(homeDir, missionID, taskID, attempt, "release.json"))
+	if err != nil {
+		return release, err
+	}
+	if err := decodeStrict(data, &release); err != nil {
+		return release, err
+	}
+	return release, nil
 }
 
 // ReadCommander loads the volatile commander registration, mapping absence to
@@ -498,11 +673,14 @@ func BumpAttempt(missionID, taskID string) (Task, error) {
 // Derived task states. Anything beyond active is terminal for the store
 // layer; active is augmented by the caller with live pane observation.
 const (
-	StateQueued    = "queued"
-	StateDelivered = "delivered"
-	StateVerified  = "verified"
-	StateReady     = "ready"
-	StateActive    = "active"
+	StateQueued          = "queued"
+	StateDelivered       = "delivered"
+	StateVerified        = "verified"
+	StateReady           = "ready"
+	StateAttention       = "attention"
+	StateInvalidEvidence = "invalid-evidence"
+	StateReleased        = "released"
+	StateActive          = "active"
 )
 
 // TaskStatus is the read-time derivation of one task's lifecycle from its
@@ -512,12 +690,16 @@ type TaskStatus struct {
 	Attempt int    `json:"attempt"`
 	State   string `json:"state"`
 	Detail  string `json:"detail,omitempty"`
+	// DeliveryState preserves whether released historical work had previously
+	// been delivered. Release itself never implies delivery.
+	DeliveryState string `json:"delivery_state,omitempty"`
 }
 
-// Derive computes a task's state from its records: no attempts → queued;
-// current-attempt terminal delivery → delivered; outcome → verified; result
-// without outcome → ready; otherwise active. Records in non-current (fenced)
-// attempts never influence the result. Wake lines are never consulted.
+// Derive computes one task from strict current-attempt records. Exact release
+// derives released; typed report derives attention; malformed or conflicting
+// evidence derives invalid-evidence; then delivery, outcome, and schema-valid
+// completion derive delivered, verified, and ready respectively. Otherwise the
+// task is active. Fenced attempts and wake lines never influence the result.
 func Derive(task Task) (TaskStatus, error) {
 	status := TaskStatus{Task: task, Attempt: task.CurrentAttempt, State: StateQueued}
 	if task.CurrentAttempt < 1 {
@@ -530,6 +712,71 @@ func Derive(task Task) (TaskStatus, error) {
 	status.State = StateActive
 	record := func(name string) (bool, error) {
 		return exists(AttemptPath(homeDir, task.MissionID, task.ID, task.CurrentAttempt, name))
+	}
+	if present, err := record("release.json"); err != nil {
+		return status, err
+	} else if present {
+		released, err := ReadRelease(task.MissionID, task.ID, task.CurrentAttempt)
+		if err != nil {
+			status.State = StateInvalidEvidence
+			status.Detail = "invalid current-attempt release: " + err.Error()
+			return status, nil
+		}
+		spawn, err := ReadSpawn(task.MissionID, task.ID, task.CurrentAttempt)
+		if err != nil || released.TaskID != task.ID || released.Attempt != task.CurrentAttempt ||
+			released.LeaseID != spawn.LeaseID || released.LeaseHolder != spawn.LeaseHolder || released.ReleasedAt.IsZero() {
+			status.State = StateInvalidEvidence
+			status.Detail = "current-attempt release identity does not match spawn receipt"
+			return status, nil
+		}
+		status.State = StateReleased
+		status.DeliveryState = "not-delivered"
+		if delivery, deliveryErr := ReadDelivery(task.MissionID, task.ID, task.CurrentAttempt); deliveryErr == nil && delivery.State.Terminal() {
+			status.DeliveryState = string(delivery.State)
+		} else if deliveryErr != nil && !errors.Is(deliveryErr, ErrNotFound) {
+			status.State = StateInvalidEvidence
+			status.Detail = "cannot inspect delivery history: " + deliveryErr.Error()
+			status.DeliveryState = ""
+			return status, nil
+		}
+		status.Detail = "lease returned; delivery=" + status.DeliveryState
+		return status, nil
+	}
+	resultPresent, err := record("result.json")
+	if err != nil {
+		return status, err
+	}
+	reportPresent, err := record("report.json")
+	if err != nil {
+		return status, err
+	}
+	if resultPresent && reportPresent {
+		status.State = StateInvalidEvidence
+		status.Detail = "conflicting result.json and report.json require reconciliation"
+		return status, nil
+	}
+	if reportPresent {
+		report, err := ReadReport(task.MissionID, task.ID, task.CurrentAttempt)
+		if err != nil {
+			status.State = StateInvalidEvidence
+			status.Detail = err.Error()
+			return status, nil
+		}
+		if report.TaskID != task.ID || report.Attempt != task.CurrentAttempt {
+			status.State = StateInvalidEvidence
+			status.Detail = "report identity does not match its canonical attempt path"
+			return status, nil
+		}
+		status.State = StateAttention
+		status.Detail = report.Status + ": " + report.Reason
+		return status, nil
+	}
+	if resultPresent {
+		if _, err := ReadResult(task.MissionID, task.ID, task.CurrentAttempt); err != nil {
+			status.State = StateInvalidEvidence
+			status.Detail = err.Error()
+			return status, nil
+		}
 	}
 	if present, err := record("delivery.json"); err != nil {
 		return status, err
@@ -550,9 +797,7 @@ func Derive(task Task) (TaskStatus, error) {
 		status.State = StateVerified
 		return status, nil
 	}
-	if present, err := record("result.json"); err != nil {
-		return status, err
-	} else if present {
+	if resultPresent {
 		status.State = StateReady
 		status.Detail = "pending verification"
 		return status, nil

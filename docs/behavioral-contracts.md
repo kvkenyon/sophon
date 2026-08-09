@@ -28,7 +28,10 @@ no managed runtime, no resume machinery. Its contract:
   can join its Herdr workspace as tabs), then `sophon status`, drain the
   derived action queue to a fixed point (every ready task verified, every
   pending configured validation run), then reconcile attention items the
-  queue does not cover (lost or unknown-pane tasks), then report.
+  queue does not cover (`attention`, `invalid-evidence`, lost, or unknown-pane
+  tasks), then report. Normal status is operational and filters exact
+  current-attempt releases; `status --all` provides durable cleanup/delivery
+  history without treating release as delivery.
 - **Outcomes, not mechanics.** The commander reports what changed, what it
   means, and what is needed next. Wake lines in `~/.sophon/state/`, the
   volatile `state/commander.json` registration, and worker notification prose
@@ -44,6 +47,11 @@ no managed runtime, no resume machinery. Its contract:
 - **Attempt fencing.** Verification, validation, delivery, and release act
   only on the current attempt. `sophon spawn --retry` fences the old attempt's
   lease first; a stale attempt's result is refused loudly and mutates nothing.
+- **Typed attention and safe steering.** A valid current report preserves the
+  attempt and dirty work and asks only for the concrete unresolved decision;
+  it never becomes a verify/validate action. `sophon send` queues exact literal
+  corrections to idle or already-running current workers, and ambiguous
+  delivery is never blindly retried.
 - **Routine worker cleanup.** Successful terminal worker evidence — a verified
   outcome, plus a passing validation when one is configured — retires the
   exact finished worker pane automatically. This is quiet presentation
@@ -74,13 +82,17 @@ in its own leased Treehouse worktree. Its contract:
   attempt worktree and nowhere else. The worker never touches leases,
   worktrees, or any shared state — mission or task records, other attempts,
   outcomes, delivery — and never pushes, opens a PR, delivers, or merges.
-- **Structured result only.** The worker's sole write outside the worktree is
-  the version 1 result JSON (`version`, `status`, `summary`, `verification`,
-  `changed_files`, `risks`), published exactly once through the brief's exact
+- **Structured staging only.** The worker's sole writes outside the worktree
+  are the generated completion or report submission files. Completion uses
+  version 1 (`version`, `status`, `summary`, `verification`, `changed_files`,
+  `risks`), submitted exactly once through the brief's exact
   completion command — `sophon worker complete <task-id> --attempt <n>
   --head-sha $(git rev-parse HEAD) --result <path>` prefixed with the
-  `SOPHON_DATA_HOME` assignment that pins the assigned store. Completion prose
-  is never completion.
+  `SOPHON_DATA_HOME` assignment that pins the assigned store. Scope mismatch,
+  blockers, and failed execution use the strict typed `sophon worker report`
+  command with task/attempt/head identity, reason, verification/evidence,
+  changed files, dirty-work disclosure, and risks. Workers never write
+  canonical `result.json` or `report.json`; completion prose is never truth.
 - **Concrete escalation only.** A worker escalates only genuine decisions and
   blockers it cannot resolve within the brief, by stopping, preserving work,
   and reporting the evidence — never by addressing the operator, and never by
@@ -90,7 +102,9 @@ in its own leased Treehouse worktree. Its contract:
 
 Every guarantee above is enforced by records and commands, not by supervision
 liveness. Workers cannot publish outside their own attempt directory; the
-strict result schema and head pin are validated at publication; verification
+strict completion/report schemas and head pins are validated before canonical
+publication; malformed canonical completion surfaces as invalid evidence rather
+than ready; verification
 re-proves lease identity and Git descent; delivery refuses without
 `--confirmed`. With no commander session alive, nothing advances and nothing
 is lost — completed work waits on disk and surfaces as `ready` to the next

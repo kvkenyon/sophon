@@ -32,13 +32,17 @@ func (f *Flow) ReleaseLease(ctx context.Context, taskID string) (store.Release, 
 	if err != nil {
 		return store.Release{}, err
 	}
-	if existing, err := store.ReadRelease(task.MissionID, taskID, attempt); err == nil {
-		return existing, nil
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return store.Release{}, err
-	}
 	spawn, err := store.ReadSpawn(task.MissionID, taskID, attempt)
 	if err != nil {
+		return store.Release{}, err
+	}
+	if existing, err := store.ReadRelease(task.MissionID, taskID, attempt); err == nil {
+		if existing.TaskID != taskID || existing.Attempt != attempt || existing.LeaseID != spawn.LeaseID ||
+			existing.LeaseHolder != spawn.LeaseHolder || existing.ReleasedAt.IsZero() {
+			return store.Release{}, fmt.Errorf("%w: existing release receipt does not match current spawn identity", ErrEvidenceConflict)
+		}
+		return existing, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
 		return store.Release{}, err
 	}
 	// The release is conditional on exact lease id and holder; any failure is
@@ -99,8 +103,11 @@ type Report struct {
 // validation has no receipt yet yields an exact validate action — verify
 // actions first, then validate actions. An existing validation receipt
 // (pass or fail) is terminal for the queue: a failure needs commander
-// judgment (correction routing), never a blind re-run.
-func (f *Flow) Status(ctx context.Context) (Report, error) {
+// judgment (correction routing), never a blind re-run. By default released
+// tasks and released-only missions are filtered; includeReleased=true selects
+// immutable history. Attention, invalid evidence, and release yield no action.
+func (f *Flow) Status(ctx context.Context, includeReleased ...bool) (Report, error) {
+	showAll := len(includeReleased) > 0 && includeReleased[0]
 	missions, err := store.ListMissions()
 	if err != nil {
 		return Report{}, err
@@ -121,6 +128,9 @@ func (f *Flow) Status(ctx context.Context) (Report, error) {
 			if status.State == store.StateActive {
 				status = f.augmentActive(ctx, status)
 			}
+			if status.State == store.StateReleased && !showAll {
+				continue
+			}
 			entry.Tasks = append(entry.Tasks, status)
 			switch {
 			case status.State == store.StateReady:
@@ -135,7 +145,9 @@ func (f *Flow) Status(ctx context.Context) (Report, error) {
 				}
 			}
 		}
-		report.Missions = append(report.Missions, entry)
+		if showAll || len(entry.Tasks) > 0 {
+			report.Missions = append(report.Missions, entry)
+		}
 	}
 	report.Actions = append(verify, validate...)
 	return report, nil
@@ -162,7 +174,7 @@ func (f *Flow) augmentActive(ctx context.Context, status store.TaskStatus) store
 	return status
 }
 
-// Send wakes the current attempt's worker pane with a message and persists
+// Send submits to the current attempt's exact worker pane with a message and persists
 // the (possibly replaced) pane placement back into spawn.json.
 func (f *Flow) Send(ctx context.Context, taskID, message string) error {
 	if f.deps.Panes == nil {
@@ -188,9 +200,9 @@ func (f *Flow) Send(ctx context.Context, taskID, message string) error {
 	if err != nil {
 		return err
 	}
-	session, err := f.deps.Panes.Wake(ctx, spawn.Pane, message)
+	session, err := f.deps.Panes.Submit(ctx, spawn.Pane, message)
 	if err != nil {
-		return fmt.Errorf("wake worker pane: %w", err)
+		return fmt.Errorf("submit worker pane: %w", err)
 	}
 	spawn.Pane = session
 	homeDir, err := datahome.Dir()

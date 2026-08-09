@@ -148,6 +148,13 @@ func (p *fakePanes) Wake(_ context.Context, session herdr.Session, message strin
 	return session, nil
 }
 
+func (p *fakePanes) Submit(_ context.Context, session herdr.Session, message string) (herdr.Session, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.wakes = append(p.wakes, message)
+	return session, nil
+}
+
 // fakeDeliveryGit implements DeliveryGit.
 type fakeDeliveryGit struct {
 	repository  string

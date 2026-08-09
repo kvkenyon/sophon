@@ -59,7 +59,7 @@ func TestCLIWorkerEnvironmentCarriesAssignedDataHome(t *testing.T) {
 	writeCLIFile(t, filepath.Join(spawned.WorktreePath, name), "change\n", 0o600)
 	runCLIGit(t, spawned.WorktreePath, "add", name)
 	runCLIGit(t, spawned.WorktreePath, "commit", "-m", "change")
-	resultPath := store.AttemptPath(home, mission.ID, task.ID, 1, "result.json")
+	resultPath := store.AttemptPath(home, mission.ID, task.ID, 1, store.CompletionSubmissionName)
 	writeCLIFile(t, resultPath, `{"version":1,"status":"completed","summary":"changed",`+
 		`"verification":[{"command":"go test ./...","exit_code":0}],"changed_files":["`+name+`"],"risks":[]}`, 0o600)
 	future := time.Now().Add(2 * time.Second)
@@ -280,7 +280,7 @@ func commitWorkerChange(t *testing.T, missionID, taskID string, attempt int) str
 func writeWorkerResult(t *testing.T, home, missionID, taskID string, attempt int) string {
 	t.Helper()
 	name := fmt.Sprintf("change-%d.txt", attempt)
-	resultPath := store.AttemptPath(home, missionID, taskID, attempt, "result.json")
+	resultPath := store.AttemptPath(home, missionID, taskID, attempt, store.CompletionSubmissionName)
 	writeCLIFile(t, resultPath, `{"version":1,"status":"completed","summary":"changed",`+
 		`"verification":[{"command":"go test ./...","exit_code":0}],"changed_files":["`+name+`"],"risks":[]}`, 0o600)
 	future := time.Now().Add(2 * time.Second)

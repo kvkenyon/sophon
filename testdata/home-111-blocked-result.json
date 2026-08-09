@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "status": "blocked",
+  "summary": "HOME-111 targets the Tesla Fleet API client, not the preserved Grid Services edits",
+  "verification": [
+    {
+      "command": "go test ./...",
+      "exit_code": 1
+    }
+  ],
+  "changed_files": [
+    "grid_services.go"
+  ],
+  "risks": [
+    "dirty work preserved"
+  ]
+}

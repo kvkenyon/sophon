@@ -94,6 +94,7 @@ type Adapter interface {
 	StartCodex(context.Context, StartRequest) (Session, error)
 	Observe(context.Context, Session) (State, error)
 	Wake(context.Context, Session, string) (Session, error)
+	Submit(context.Context, Session, string) (Session, error)
 }
 
 // Stop closes the task-owned tab, which also stops its sole runtime session.
@@ -148,10 +149,8 @@ func (a *CommandAdapter) Wake(ctx context.Context, session Session, message stri
 	default:
 		return Session{}, fmt.Errorf("Herdr wake cannot handle liveness state %q", state)
 	}
-	_, stderr, err := a.run(ctx, "agent", "prompt", session.PaneID, message,
-		"--wait", "--until", "working", "--timeout", "30000")
-	if err != nil {
-		return Session{}, commandError("wake "+string(sessionRuntime(session)), err, stderr)
+	if err := a.submitPrompt(ctx, session, message, true); err != nil {
+		return Session{}, fmt.Errorf("wake %s: %w", sessionRuntime(session), err)
 	}
 	return session, nil
 }
@@ -174,21 +173,75 @@ func (a *CommandAdapter) Submit(ctx context.Context, session Session, message st
 	if err != nil {
 		return Session{}, err
 	}
+	waitForWorking := false
 	switch state {
 	case StateHusk:
 		return a.Wake(ctx, session, message)
 	case StateLost:
 		return Session{}, ErrSessionMissing
-	case StateIdle, StateRunning:
+	case StateIdle:
+		waitForWorking = true
+	case StateRunning:
 	default:
 		return Session{}, fmt.Errorf("Herdr submit cannot handle liveness state %q", state)
 	}
-	_, stderr, err := a.run(ctx, "agent", "prompt", session.PaneID, message,
-		"--wait", "--until", "working", "--timeout", "30000")
-	if err != nil {
-		return Session{}, commandError("submit to "+string(sessionRuntime(session)), err, stderr)
+	if err := a.submitPrompt(ctx, session, message, waitForWorking); err != nil {
+		return Session{}, fmt.Errorf("submit to %s: %w", sessionRuntime(session), err)
 	}
 	return session, nil
+}
+
+// submitPrompt invokes Herdr exactly once and validates its positive
+// acknowledgement. Idle delivery asks Herdr to wait for the new turn to start;
+// running delivery accepts the queue acknowledgement immediately because the
+// agent cannot transition from working to working. An error is never retried:
+// the prompt may already be queued, so retyping could duplicate it.
+func (a *CommandAdapter) submitPrompt(ctx context.Context, session Session, message string, waitForWorking bool) error {
+	args := []string{"agent", "prompt", session.PaneID, message}
+	if waitForWorking {
+		args = append(args, "--wait", "--until", "working", "--timeout", "30000")
+	}
+	stdout, stderr, runErr := a.run(ctx, args...)
+	var response struct {
+		Result struct {
+			Type  string `json:"type"`
+			OK    bool   `json:"ok"`
+			Agent struct {
+				PaneID string `json:"pane_id"`
+			} `json:"agent"`
+		} `json:"result"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	body := bytes.TrimSpace(stdout)
+	if len(body) == 0 {
+		body = bytes.TrimSpace(stderr)
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		if runErr != nil {
+			return commandError("prompt "+string(sessionRuntime(session)), runErr, stderr)
+		}
+		return fmt.Errorf("decode Herdr prompt acknowledgement: %w", err)
+	}
+	if response.Error.Code != "" {
+		if runErr != nil {
+			return commandError("prompt "+string(sessionRuntime(session)), runErr, stderr)
+		}
+		return fmt.Errorf("Herdr prompt error %s", response.Error.Code)
+	}
+	if runErr != nil {
+		return commandError("prompt "+string(sessionRuntime(session)), runErr, stderr)
+	}
+	acceptedType := response.Result.Type == "prompt_sent" || response.Result.Type == "prompt_queued"
+	acceptedPane := response.Result.Agent.PaneID == session.PaneID
+	if !acceptedType && !response.Result.OK && !acceptedPane {
+		return fmt.Errorf("Herdr prompt response did not acknowledge acceptance")
+	}
+	if response.Result.Agent.PaneID != "" && response.Result.Agent.PaneID != session.PaneID {
+		return fmt.Errorf("Herdr prompt acknowledgement did not preserve pane identity")
+	}
+	return nil
 }
 
 // Resume creates a replacement tab for a structurally missing pane. Unlike a
@@ -233,7 +286,10 @@ func (a *CommandAdapter) Resume(ctx context.Context, missing Session, message st
 	if err != nil {
 		return Session{}, err
 	}
-	if err := a.launchRuntimeInPane(ctx, replacement, command, false); err != nil {
+	// Native registration can precede the resumed TUI's input-ready frame.
+	// Wait for that bounded composer proof before submitting; otherwise Herdr
+	// can accept text while Codex is still restoring and report prompt_stalled.
+	if err := a.launchRuntimeInPane(ctx, replacement, command, true); err != nil {
 		return Session{}, fmt.Errorf("resume %s in replacement pane: %w", sessionRuntime(missing), err)
 	}
 	if _, stderr, err := a.run(ctx, "agent", "prompt", replacement.PaneID, message,
@@ -280,10 +336,10 @@ func (a *CommandAdapter) replaceHusk(ctx context.Context, husk Session, message 
 	if err != nil {
 		return Session{}, err
 	}
-	// Native resume restores an existing Codex/Claude/Pi transcript and may not
-	// redraw a fresh composer banner. Registration plus the prompt below is the
-	// end-to-end readiness proof, just as it is for a structurally missing pane.
-	if err := a.launchRuntimeInPane(ctx, replacement, command, false); err != nil {
+	// Native registration can precede the resumed TUI's input-ready frame.
+	// Keep the bounded composer proof before prompt submission; the prompt's
+	// idle-to-working transition remains the end-to-end readiness proof.
+	if err := a.launchRuntimeInPane(ctx, replacement, command, true); err != nil {
 		return Session{}, fmt.Errorf("resume %s in replacement pane: %w", sessionRuntime(husk), err)
 	}
 	if _, stderr, err := a.run(ctx, "agent", "prompt", replacement.PaneID, message,

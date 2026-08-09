@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"sophon/internal/domain"
 	"sophon/internal/flow"
 	"sophon/internal/store"
 )
@@ -285,7 +287,7 @@ func (f *cliFixture) completeWorker(t *testing.T, missionID, taskID string, atte
 	runCLIGit(t, spawned.WorktreePath, "add", name)
 	runCLIGit(t, spawned.WorktreePath, "commit", "-m", "change")
 	head := runCLIGit(t, spawned.WorktreePath, "rev-parse", "HEAD")
-	resultPath := store.AttemptPath(f.home, missionID, taskID, attempt, "result.json")
+	resultPath := store.AttemptPath(f.home, missionID, taskID, attempt, store.CompletionSubmissionName)
 	writeCLIFile(t, resultPath, `{"version":1,"status":"completed","summary":"changed",`+
 		`"verification":[{"command":"go test ./...","exit_code":0}],"changed_files":["`+name+`"],"risks":[]}`, 0o600)
 	future := time.Now().Add(2 * time.Second)
@@ -340,6 +342,24 @@ func (f *cliFixture) taskStatus(t *testing.T, taskID string) store.TaskStatus {
 	return store.TaskStatus{}
 }
 
+func (f *cliFixture) taskStatusAll(t *testing.T, taskID string) store.TaskStatus {
+	t.Helper()
+	output := runCLI(t, "status", "--json", "--all", "--herdr", f.herdr, "--herdr-session", "fm-lab-cli-test")
+	var report flow.Report
+	if err := json.Unmarshal(output, &report); err != nil {
+		t.Fatal(err)
+	}
+	for _, mission := range report.Missions {
+		for _, task := range mission.Tasks {
+			if task.Task.ID == taskID {
+				return task
+			}
+		}
+	}
+	t.Fatalf("task %s missing from all-history status report %+v", taskID, report)
+	return store.TaskStatus{}
+}
+
 func TestCLIHappyPathMissionToRelease(t *testing.T) {
 	fixture := newCLIFixture(t)
 	mission := fixture.createMission(t, "Happy path")
@@ -382,12 +402,15 @@ func TestCLIHappyPathMissionToRelease(t *testing.T) {
 	if released.LeaseID != spawned.LeaseID {
 		t.Fatalf("released = %+v, want lease %s", released, spawned.LeaseID)
 	}
-	status := fixture.taskStatus(t, task.ID)
-	if status.State != store.StateDelivered || status.Detail != string(store.DeliveryDeliveredBranch) {
+	if report := fixture.statusReport(t); len(report.Missions) != 0 {
+		t.Fatalf("released-only mission remained in operational status: %+v", report)
+	}
+	status := fixture.taskStatusAll(t, task.ID)
+	if status.State != store.StateReleased || status.DeliveryState != string(store.DeliveryDeliveredBranch) {
 		t.Fatalf("final status = %+v", status)
 	}
-	text := string(runCLI(t, "status", "--herdr", fixture.herdr, "--herdr-session", "fm-lab-cli-test"))
-	if !strings.Contains(text, task.ID+"\tdelivered\t1") {
+	text := string(runCLI(t, "status", "--all", "--herdr", fixture.herdr, "--herdr-session", "fm-lab-cli-test"))
+	if !strings.Contains(text, task.ID+"\treleased\t1") {
 		t.Fatalf("status text = %q", text)
 	}
 	assertNoDatabaseFiles(t, fixture.home)
@@ -410,6 +433,167 @@ func TestCLICompletionSurvivesWithoutAnySupervisor(t *testing.T) {
 		t.Fatalf("outcome = %+v", outcome)
 	}
 	assertNoDatabaseFiles(t, fixture.home)
+}
+
+func TestCLISendQueuesExactMessageOnceWhileWorkerIsRunning(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "Running worker steering")
+	task := fixture.createTask(t, mission.ID)
+	fixture.spawnTask(t, task.ID)
+
+	runningHerdr := filepath.Join(filepath.Dir(fixture.herdr), "fake-herdr-running")
+	runningLog := filepath.Join(filepath.Dir(fixture.herdr), "running-prompts")
+	writeCLIFile(t, runningHerdr, fmt.Sprintf(`#!/bin/sh
+set -eu
+case "$1 $2" in
+  "pane get") printf '{"result":{"pane":{"pane_id":"%%s"}}}\n' "$3" ;;
+  "agent get") printf '{"result":{"agent":{"agent":"codex","pane_id":"%%s","agent_status":"working","state_change_seq":2}}}\n' "$3" ;;
+  "agent prompt")
+    [ "$3" = "w1:p1" ]
+    [ "$5" = "--session" ]
+    [ "$6" = "fm-lab-cli-test" ]
+    [ "$#" = 6 ]
+    printf '%%s\n' "$4" >> %s
+    printf '{"result":{"type":"prompt_queued"}}\n'
+    ;;
+  *) exit 2 ;;
+esac
+`, shellQuote(runningLog)), 0o700)
+	message := "Stop implementation now. HOME-111 targets the Tesla Fleet API client; preserve 'dirty' work; $(literal)."
+	output := runCLI(t, "send", task.ID, message, "--herdr", runningHerdr, "--herdr-session", "fm-lab-cli-test")
+	if !strings.Contains(string(output), `"sent": true`) {
+		t.Fatalf("send output = %s", output)
+	}
+	data, err := os.ReadFile(runningLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n"); len(got) != 1 || got[0] != message {
+		t.Fatalf("queued messages = %#v, want exact message once", got)
+	}
+}
+
+func TestCLIRejectedBlockedCompletionNeverDerivesReady(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "Rejected blocked completion")
+	task := fixture.createTask(t, mission.ID, "--validate", "go test ./...")
+	spawn := fixture.spawnTask(t, task.ID)
+	resultPath := store.AttemptPath(fixture.home, mission.ID, task.ID, 1, "result.json")
+	rejected, err := os.ReadFile(filepath.Join("..", "..", "testdata", "home-111-blocked-result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, resultPath, string(rejected), 0o600)
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(resultPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCLIErr(t, "worker", "complete", task.ID, "--attempt", "1",
+		"--head-sha", spawn.BaseSHA, "--result", resultPath, "--git", fixture.git, "--herdr", fixture.herdr); err == nil ||
+		!strings.Contains(err.Error(), "invalid worker result") {
+		t.Fatalf("worker complete error = %v, want invalid worker result", err)
+	}
+	report := fixture.statusReport(t)
+	status := fixture.taskStatus(t, task.ID)
+	if status.State != "invalid-evidence" {
+		t.Fatalf("status = %+v, want invalid evidence", status)
+	}
+	for _, action := range report.Actions {
+		if action.TaskID == task.ID {
+			t.Fatalf("invalid completion yielded action %+v", action)
+		}
+	}
+}
+
+func TestCLIScopeMismatchReportWakesCommanderAndPreservesDirtyWork(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "Scope mismatch report")
+	task := fixture.createTask(t, mission.ID, "--validate", "go test ./...")
+	spawn := fixture.spawnTask(t, task.ID)
+	runCLI(t, "commander", "attach", "--pane", "w1:p1", "--herdr", fixture.herdr, "--herdr-session", "fm-lab-cli-test")
+	dirtyFile := filepath.Join(spawn.WorktreePath, "grid_services.go")
+	writeCLIFile(t, dirtyFile, "preserved dirty work\n", 0o600)
+	reportPath := store.AttemptPath(fixture.home, mission.ID, task.ID, 1, store.ReportSubmissionName)
+	report := store.WorkerReport{Version: 1, Status: store.WorkerReportScopeMismatch, TaskID: task.ID, Attempt: 1,
+		HeadSHA: spawn.BaseSHA, Reason: "HOME-111 targets the Tesla Fleet API client", Verification: []domain.VerificationResult{},
+		Evidence: []string{"existing edits target Grid Services"}, ChangedFiles: []string{"grid_services.go"},
+		DirtyWork: true, Risks: []string{"dirty work needs an operator decision"}}
+	if err := store.Publish(reportPath, report); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(reportPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+	before := readLogLines(t, fixture.herdrLog)
+	first := runCLI(t, "worker", "report", task.ID, "--attempt", "1", "--head-sha", spawn.BaseSHA,
+		"--report", reportPath, "--git", fixture.git, "--herdr", fixture.herdr)
+	second := runCLI(t, "worker", "report", task.ID, "--attempt", "1", "--head-sha", spawn.BaseSHA,
+		"--report", reportPath, "--git", fixture.git, "--herdr", fixture.herdr)
+	if !bytes.Equal(first, second) {
+		t.Fatalf("duplicate report publication diverged:\n%s\n%s", first, second)
+	}
+	status := fixture.taskStatus(t, task.ID)
+	if status.State != store.StateAttention || !strings.Contains(status.Detail, "scope-mismatch") {
+		t.Fatalf("report status = %+v, want attention", status)
+	}
+	if actions := fixture.statusReport(t).Actions; len(actions) != 0 {
+		t.Fatalf("report generated actions: %+v", actions)
+	}
+	if data, err := os.ReadFile(dirtyFile); err != nil || string(data) != "preserved dirty work\n" {
+		t.Fatalf("dirty work changed: %q, %v", data, err)
+	}
+	if _, err := os.Stat(store.AttemptPath(fixture.home, mission.ID, task.ID, 1, "result.json")); !os.IsNotExist(err) {
+		t.Fatalf("report created completion truth: %v", err)
+	}
+	wake := logDelta(t, fixture.herdrLog, before)
+	if !strings.Contains(wake, "scope-mismatch") || !strings.Contains(wake, "preserve this attempt") || strings.Contains(wake, "verify-complete") {
+		t.Fatalf("report wake is not attention-scoped:\n%s", wake)
+	}
+}
+
+func TestCLIStatusFiltersFourReleasedTasksAndRetainsAllHistory(t *testing.T) {
+	fixture := newCLIFixture(t)
+	releasedOnly := fixture.createMission(t, "Four released task copies")
+	for i := 0; i < 4; i++ {
+		task := fixture.createTask(t, releasedOnly.ID, "--title", fmt.Sprintf("Released copy %d", i+1))
+		fixture.spawnTask(t, task.ID)
+		fixture.completeWorker(t, releasedOnly.ID, task.ID, 1)
+		fixture.verifyComplete(t, task.ID)
+		runCLI(t, "release", task.ID, "--treehouse", fixture.treehouse)
+	}
+	if report := fixture.statusReport(t); len(report.Missions) != 0 || len(report.Actions) != 0 {
+		t.Fatalf("released-only operational status = %+v, want empty", report)
+	}
+	allJSON := runCLI(t, "status", "--json", "--all", "--herdr", fixture.herdr, "--herdr-session", "fm-lab-cli-test")
+	var all flow.Report
+	if err := json.Unmarshal(allJSON, &all); err != nil {
+		t.Fatal(err)
+	}
+	if len(all.Missions) != 1 || len(all.Missions[0].Tasks) != 4 || len(all.Actions) != 0 {
+		t.Fatalf("all-history status = %+v, want four released tasks and no actions", all)
+	}
+	allText := string(runCLI(t, "status", "--all", "--herdr", fixture.herdr, "--herdr-session", "fm-lab-cli-test"))
+	for _, task := range all.Missions[0].Tasks {
+		if task.State != store.StateReleased || task.DeliveryState != "not-delivered" ||
+			!strings.Contains(allText, task.Task.ID+"\treleased\t1") {
+			t.Fatalf("released history missing or ambiguous: %+v\n%s", task, allText)
+		}
+	}
+
+	mixed := fixture.createMission(t, "Mixed operational mission")
+	released := fixture.createTask(t, mixed.ID, "--title", "Released")
+	active := fixture.createTask(t, mixed.ID, "--title", "Active")
+	fixture.spawnTask(t, released.ID)
+	fixture.completeWorker(t, mixed.ID, released.ID, 1)
+	fixture.verifyComplete(t, released.ID)
+	runCLI(t, "release", released.ID, "--treehouse", fixture.treehouse)
+	fixture.spawnTask(t, active.ID)
+	operational := fixture.statusReport(t)
+	if len(operational.Missions) != 1 || operational.Missions[0].Mission.ID != mixed.ID ||
+		len(operational.Missions[0].Tasks) != 1 || operational.Missions[0].Tasks[0].Task.ID != active.ID {
+		t.Fatalf("mixed operational status = %+v, want only active task", operational)
+	}
 }
 
 func TestCLIStaleAttemptRefusalLeavesCurrentAttemptUntouched(t *testing.T) {
@@ -612,6 +796,8 @@ func TestCLIDispatchAndUsageErrors(t *testing.T) {
 		{"spawn arity", []string{"spawn", "one", "two"}, "exactly one task ID"},
 		{"worker complete arity", []string{"worker", "complete"}, "exactly one task ID"},
 		{"worker complete missing result", []string{"worker", "complete", "task_x", "--attempt", "1", "--head-sha", "abc"}, "result path are required"},
+		{"worker report arity", []string{"worker", "report"}, "exactly one task ID"},
+		{"worker report missing report", []string{"worker", "report", "task_x", "--attempt", "1", "--head-sha", "abc"}, "report path are required"},
 		{"verify-complete arity", []string{"verify-complete"}, "exactly one task ID"},
 		{"validate arity", []string{"validate"}, "exactly one task ID"},
 		{"deliver arity", []string{"deliver"}, "exactly one task ID"},

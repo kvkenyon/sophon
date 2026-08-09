@@ -39,10 +39,12 @@ sophon task create --mission <mission-id> --title "Token-bucket limiter" \
 # 3. Spawn attempt 1: lease, branch, generated brief, worker pane.
 sophon spawn <task-id>
 
-# 4. Watch derived state. queued → active → ready → verified → delivered.
+# 4. Watch operational derived state. queued → active → ready → verified → delivered.
 #    Status is an action queue first: it also prints the exact next commands
 #    (verify-complete for every ready task, validate for every verified task
-#    whose configured validation has no receipt yet).
+#    whose configured validation has no receipt yet). Typed worker reports
+#    derive attention and invalid canonical evidence derives invalid-evidence;
+#    neither emits an automated action.
 sophon status
 
 # 5. When the task is ready, prove the attempt and run validation.
@@ -54,26 +56,36 @@ sophon deliver <task-id> --confirmed
 
 # 7. Return the lease when the delivered branch no longer needs it.
 sophon release <task-id>
+
+# 8. Inspect durable history, including released tasks filtered from normal status.
+sophon status --all
 ```
 
-Other commands: `sophon commander attach` (register the live commander's volatile Herdr wake/placement address so completions wake it and workers group into its workspace as tabs), `sophon spawn <task-id> --retry` (fence the current attempt and spawn the next), `sophon send <task-id> <message>` (steer a live worker), `sophon mission list`, `sophon version`.
+Other commands: `sophon commander attach` (register the live commander's volatile Herdr wake/placement address so publications wake it and workers group into its workspace as tabs), `sophon spawn <task-id> --retry` (fence the current attempt and spawn the next), `sophon send <task-id> <message>` (queue an exact steer to an idle or running current worker), `sophon mission list` (durable mission history, unlike filtered operational status), `sophon version`.
 
-Workers finish by publishing their structured result with the exact command the generated brief renders (including its `SOPHON_DATA_HOME` assignment pinning the assigned store):
+Workers write completion JSON only to the generated staging path. The CLI validates the complete schema and live head before atomically publishing canonical `result.json`:
 
 ```bash
 SOPHON_DATA_HOME=<assigned-home> sophon worker complete <task-id> --attempt <n> --head-sha "$(git rev-parse HEAD)" --result <path>
 ```
 
-After durable publication the CLI best-effort wakes the attached commander. Once terminal worker evidence lands (verification, plus a passing validation when configured), the exact finished worker pane is closed as routine cleanup; the branch and lease remain until delivery and explicit release.
+Scope mismatch, ordinary blockers, and failed execution use typed non-completion evidence instead of pretending completion:
+
+```bash
+SOPHON_DATA_HOME=<assigned-home> sophon worker report <task-id> --attempt <n> --head-sha "$(git rev-parse HEAD)" --report <path>
+```
+
+After durable publication the CLI best-effort wakes the attached commander. A valid report derives `attention`, preserves dirty-work disclosure, and creates no verification or validation action. Once terminal completion evidence lands (verification, plus a passing validation when configured), the exact finished worker pane is closed as routine cleanup; the branch and lease remain until explicit release. A valid current-attempt release derives historical `released`; normal status omits it, while `status --all` preserves whether delivery occurred.
 
 ## What it guarantees
 
 - **Derived state, no daemon.** Nothing runs in the background; nothing automatically recovers, restarts, or fails over. With no commander session alive, nothing advances and nothing is lost — completed work waits on disk and surfaces as `ready` to the next session.
-- **Structured evidence, not prose.** A strict result schema, pinned to the live worktree HEAD, is the only completion path; worker prose and notification lines are never state.
+- **Structured evidence, not prose.** Strict completion and typed non-completion schemas are pinned to the live worktree HEAD. Workers write staging files; only validated CLI publication creates canonical truth. Worker prose and notification lines are never state.
 - **Attempt fencing.** Retry fences the old attempt's lease by exact identity before the next attempt exists; stale results are refused loudly.
 - **Operator authority at the boundary.** Verification and validation are autonomous; every delivery effect requires `--confirmed`. There is no merge path.
 - **Crash-safe external effects.** Delivery and release write typed intent before the effect and a receipt after; re-running converges to the same result.
-- **Volatile liveness routing, never truth.** `sophon commander attach` records only a best-effort wake/placement address; completion wakes, grouped worker tabs, and retired worker panes are liveness and presentation, while every fact still derives from files.
+- **Operational status plus durable history.** Normal status filters exact current-attempt releases and released-only missions; `status --all` shows immutable history and distinguishes released-delivered from released-undelivered work. No records are deleted.
+- **Volatile liveness routing, never truth.** `sophon commander attach` records only a best-effort wake/placement address; publication wakes, grouped worker tabs, and retired worker panes are liveness and presentation, while every fact still derives from files.
 
 ## Documentation
 

@@ -27,7 +27,8 @@ func (f *Flow) renderBrief(homeDir string, mission store.Mission, task store.Tas
 	if err != nil {
 		return "", err
 	}
-	resultPath := filepath.Join(store.AttemptDir(homeDir, mission.ID, task.ID, attempt), "result.json")
+	resultPath := filepath.Join(store.AttemptDir(homeDir, mission.ID, task.ID, attempt), store.CompletionSubmissionName)
+	reportPath := filepath.Join(store.AttemptDir(homeDir, mission.ID, task.ID, attempt), store.ReportSubmissionName)
 	validationCommand := strings.TrimSpace(task.ValidationCommand)
 	if validationCommand == "" {
 		validationCommand = "none configured"
@@ -55,7 +56,7 @@ func (f *Flow) renderBrief(homeDir string, mission store.Mission, task store.Tas
 	body.WriteString(strings.TrimSpace(mission.Objective))
 	body.WriteString("\n\n## Permissions\n\n")
 	body.WriteString("- Modify and commit files only in the assigned worktree.\n")
-	fmt.Fprintf(&body, "- Write the structured result only to `%s`; this control-plane artifact is the sole write permitted outside the worktree.\n", resultPath)
+	fmt.Fprintf(&body, "- Write a structured completion submission only to `%s`, or typed non-completion submission only to `%s`; these staging artifacts are the sole writes permitted outside the worktree.\n", resultPath, reportPath)
 	body.WriteString("- Run non-destructive local validation required by the project.\n")
 	body.WriteString("\n## Forbidden actions\n\n")
 	body.WriteString("- Do not create, return, or alter Treehouse leases or worktrees.\n")
@@ -69,6 +70,9 @@ func (f *Flow) renderBrief(homeDir string, mission store.Mission, task store.Tas
 	body.WriteString("4. Finish by submitting exactly once, with this exact command (it pins the assigned Sophon data home):\n\n```bash\n")
 	fmt.Fprintf(&body, "%s=%s sophon worker complete %s --attempt %d --head-sha \"$(git rev-parse HEAD)\" --result %s\n",
 		datahome.OverrideEnv, shellQuote(homeDir), task.ID, attempt, shellQuote(resultPath))
+	body.WriteString("```\n\nFor `scope-mismatch` or `blocked`, do not write completion JSON. Write version 1 typed report JSON to the report submission path and publish it with this exact command:\n\n```bash\n")
+	fmt.Fprintf(&body, "%s=%s sophon worker report %s --attempt %d --head-sha \"$(git rev-parse HEAD)\" --report %s\n",
+		datahome.OverrideEnv, shellQuote(homeDir), task.ID, attempt, shellQuote(reportPath))
 	body.WriteString("```\n")
 	return body.String(), nil
 }

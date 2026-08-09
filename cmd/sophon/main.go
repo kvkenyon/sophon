@@ -260,7 +260,10 @@ func workerCommand(ctx context.Context, args []string) error {
 	if len(args) >= 1 && args[0] == "complete" {
 		return workerComplete(ctx, args[1:])
 	}
-	return &exitError{2, errors.New("expected: sophon worker complete TASK --attempt N --head-sha SHA --result FILE")}
+	if len(args) >= 1 && args[0] == "report" {
+		return workerReport(ctx, args[1:])
+	}
+	return &exitError{2, errors.New("expected: sophon worker complete|report TASK --attempt N --head-sha SHA --result|--report FILE")}
 }
 
 func workerComplete(ctx context.Context, args []string) error {
@@ -287,6 +290,30 @@ func workerComplete(ctx context.Context, args []string) error {
 		fmt.Fprintf(os.Stderr, "sophon: commander wake undelivered (completion is durable): %v\n", err)
 	}
 	return encode(map[string]any{"task_id": positional[0], "attempt": *attempt, "result_sha256": digest})
+}
+
+func workerReport(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("worker report", flag.ContinueOnError)
+	attempt := flags.Int("attempt", 0, "task attempt")
+	headSHA := flags.String("head-sha", "", "live attempt head SHA")
+	reportPath := flags.String("report", "", "structured report JSON staging path inside the attempt directory")
+	tools.bind(flags, "git", "herdr")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("worker report requires exactly one task ID")
+	}
+	digest, err := tools.flow().PublishReport(ctx, positional[0], *attempt, *headSHA, *reportPath)
+	if err != nil {
+		return err
+	}
+	if err := tools.flow().NotifyCommanderReport(ctx, positional[0], *attempt); err != nil {
+		fmt.Fprintf(os.Stderr, "sophon: commander wake undelivered (report is durable): %v\n", err)
+	}
+	return encode(map[string]any{"task_id": positional[0], "attempt": *attempt, "report_sha256": digest})
 }
 
 func commanderCommand(ctx context.Context, args []string) error {
@@ -420,6 +447,7 @@ func statusCommand(ctx context.Context, args []string) error {
 	tools := defaultTools()
 	flags := flag.NewFlagSet("status", flag.ContinueOnError)
 	jsonOutput := flags.Bool("json", false, "emit JSON")
+	all := flags.Bool("all", false, "include released task and mission history")
 	tools.bind(flags, "herdr", "herdr-session")
 	positional, err := parseFlags(flags, args)
 	if err != nil {
@@ -428,7 +456,7 @@ func statusCommand(ctx context.Context, args []string) error {
 	if len(positional) != 0 {
 		return errors.New("status does not accept positional arguments")
 	}
-	report, err := tools.flow().Status(ctx)
+	report, err := tools.flow().Status(ctx, *all)
 	if err != nil {
 		return err
 	}
@@ -517,12 +545,13 @@ func usage() {
   sophon task create --mission ID --title TITLE [--kind KIND] [--delivery branch|pr] [--validate COMMAND]
   sophon spawn TASK [--retry] [--herdr BIN] [--treehouse BIN] [--git BIN] [--herdr-session NAME]
   sophon worker complete TASK --attempt N --head-sha SHA --result FILE [--git BIN] [--herdr BIN]
+  sophon worker report TASK --attempt N --head-sha SHA --report FILE [--git BIN] [--herdr BIN]
   sophon commander attach [--pane ID] [--workspace ID] [--tab ID] [--herdr BIN] [--herdr-session NAME]
   sophon verify-complete TASK [--git BIN] [--treehouse BIN] [--herdr BIN]
   sophon validate TASK [--git BIN] [--herdr BIN]
   sophon deliver TASK --confirmed [--git BIN] [--gh-axi BIN]
   sophon release TASK [--treehouse BIN]
-  sophon status [--json] [--herdr BIN] [--herdr-session NAME]
+  sophon status [--json] [--all] [--herdr BIN] [--herdr-session NAME]
   sophon send TASK MESSAGE [--herdr BIN] [--herdr-session NAME]
   sophon prompt commander`)
 }

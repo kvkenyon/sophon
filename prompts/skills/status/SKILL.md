@@ -17,7 +17,8 @@ It never spawns, retries, steers, answers a decision, delivers, releases a lease
 Run `sophon status --json` at invocation time and use its derived result as the snapshot authority.
 When the result lists verify-complete or validate actions, those are commander-owned routine work, not discretionary observations: drain them to the fixed point first (verify every ready task, run every pending configured validation, re-deriving between steps), then run `sophon status --json` once more so the snapshot reflects the drained state.
 Do not supplement the derived result with chat history, wake-line prose, worker output, filesystem scanning, repository probes, or ad hoc GitHub queries.
-Task state is derived at read time: `queued`, `active` (augmented by live pane observation into `running`, `idle`, `lost`, or `unknown-pane`), `ready`, `verified`, and `delivered`.
+Task state is derived at read time: `queued`, `active` (augmented by live pane observation into `running`, `idle`, `lost`, or `unknown-pane`), `ready`, `attention`, `invalid-evidence`, `verified`, `delivered`, and historical `released`.
+Normal `sophon status` is operational and filters released tasks plus released-only missions. Use `sophon status --all` for durable history; `delivery_state` distinguishes released-delivered from released-undelivered without implying release delivered anything.
 Wake lines are notifications, never state; do not quote them as truth.
 Apart from that drain, do not turn an observation into an action from inside this skill.
 
@@ -35,7 +36,7 @@ Render exactly these four sections in this order, each present even when empty:
    Empty state: "Nothing is queued."
 
 Put every item in exactly one section.
-Running, idle, and ready tasks never belong in Needs Your Attention.
+Valid `attention` reports and `invalid-evidence` belong in Needs Your Attention. Preserve disclosed dirty work and ask only for the concrete unresolved decision. Running, idle, ready, and released tasks never belong there.
 Delivered work never belongs in Underway.
 Worker-pane idleness is not task completion.
 Include every PR as a complete `https://...` URL.

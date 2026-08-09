@@ -451,6 +451,8 @@ func TestCommandAdapterCreatesReplacementBeforeClosingHusk(t *testing.T) {
 		{stdout: `{"result":{"type":"command_started"}}`},
 		{stdout: `{"result":{"pane":{"pane_id":"w1:p2"}}}`},
 		{stdout: `{"result":{"agent":{"pane_id":"w1:p2","agent_status":"idle","state_change_seq":1}}}`},
+		{stdout: `codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume codex-session-1`},
+		{stdout: `OpenAI Codex`},
 		{stdout: `{"result":{"type":"prompt_sent"}}`},
 		{stdout: `{"result":{"type":"tab_closed"}}`},
 		{stdout: `{"result":{"tabs":[{"tab_id":"w1:t2","label":"pi-worker"}]}}`},
@@ -475,6 +477,8 @@ func TestCommandAdapterCreatesReplacementBeforeClosingHusk(t *testing.T) {
 		{"pane", "run", "w1:p2", "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume codex-session-1", "--session", "fm-lab-contract"},
 		{"pane", "get", "w1:p2", "--session", "fm-lab-contract"},
 		{"agent", "get", "w1:p2", "--session", "fm-lab-contract"},
+		{"pane", "read", "w1:p2", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
+		{"pane", "read", "w1:p2", "--source", "recent", "--lines", "200", "--session", "fm-lab-contract"},
 		{"agent", "prompt", "w1:p2", "continue after restart", "--wait", "--until", "working", "--timeout", "30000", "--session", "fm-lab-contract"},
 		{"tab", "close", "w1:t1", "--session", "fm-lab-contract"},
 		{"tab", "list", "--workspace", "w1", "--session", "fm-lab-contract"},
@@ -490,6 +494,7 @@ func TestHerdrRuntimeConformanceResumesClaudeAndPiAfterRestart(t *testing.T) {
 	tests := []struct {
 		name          string
 		session       Session
+		composer      string
 		resumeCommand string
 	}{
 		{
@@ -497,6 +502,7 @@ func TestHerdrRuntimeConformanceResumesClaudeAndPiAfterRestart(t *testing.T) {
 			session: Session{Runtime: RuntimeClaude, SessionName: "fm-lab-contract", WorkspaceID: "w1",
 				TabID: "w1:t1", PaneID: "w1:p1", AgentName: "pi-task-a1", AgentSessionID: "claude-session-1",
 				WorktreePath: "/worktrees/claude", Model: "claude-opus-5"},
+			composer:      "Claude Code\n❯",
 			resumeCommand: "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --model 'claude-opus-5' --resume claude-session-1",
 		},
 		{
@@ -504,6 +510,7 @@ func TestHerdrRuntimeConformanceResumesClaudeAndPiAfterRestart(t *testing.T) {
 			session: Session{Runtime: RuntimePi, SessionName: "fm-lab-contract", WorkspaceID: "w1",
 				TabID: "w1:t1", PaneID: "w1:p1", AgentName: "pi-task-a1", AgentSessionID: "/sessions/pi-session.jsonl",
 				WorktreePath: piWorktree, Model: "kimi-coding/k3-256k", PiExtensionPath: piExtension},
+			composer: "pi v0.84.0\nescape interrupt",
 			resumeCommand: "FM_PI_HARNESS=pi pi --model 'kimi-coding/k3-256k' -e " + shellQuote(piExtension) +
 				" --session '/sessions/pi-session.jsonl'",
 		},
@@ -519,6 +526,7 @@ func TestHerdrRuntimeConformanceResumesClaudeAndPiAfterRestart(t *testing.T) {
 				{stdout: `{"result":{"type":"command_started"}}`},
 				{stdout: `{"result":{"pane":{"pane_id":"w1:p2"}}}`},
 				{stdout: `{"result":{"agent":{"agent":"` + string(runtime) + `","pane_id":"w1:p2","agent_status":"idle","state_change_seq":1}}}`},
+				{stdout: test.composer},
 				{stdout: `{"result":{"type":"prompt_sent"}}`},
 				{stdout: `{"result":{"type":"tab_closed"}}`},
 				{stdout: `{"result":{"tabs":[{"tab_id":"w1:t2","label":"worker"}]}}`},
@@ -537,7 +545,7 @@ func TestHerdrRuntimeConformanceResumesClaudeAndPiAfterRestart(t *testing.T) {
 				[]string{"pane", "run", "w1:p2", test.resumeCommand, "--session", "fm-lab-contract"}) {
 				t.Fatalf("resume call = %#v", got)
 			}
-			if got := runner.calls[8]; !reflect.DeepEqual(got,
+			if got := runner.calls[9]; !reflect.DeepEqual(got,
 				[]string{"tab", "close", "w1:t1", "--session", "fm-lab-contract"}) {
 				t.Fatalf("husk close call = %#v", got)
 			}
@@ -554,6 +562,7 @@ func TestCommandAdapterLeavesHuskWhenReplacementIsNotVerified(t *testing.T) {
 		{stdout: `{"result":{"type":"command_started"}}`},
 		{stdout: `{"result":{"pane":{"pane_id":"w1:p2"}}}`},
 		{stdout: `{"result":{"agent":{"pane_id":"w1:p2","agent_status":"idle","state_change_seq":1}}}`},
+		{stdout: `OpenAI Codex`},
 		{stderr: `{"error":{"code":"agent_prompt_stalled"}}`, err: errors.New("exit 1")},
 		{stdout: `resumed but prompt was not accepted`},
 	}}
@@ -596,7 +605,7 @@ func TestCommandAdapterSubmitSteersRunningAgent(t *testing.T) {
 	if updated != session {
 		t.Fatalf("running submit changed session: before=%+v after=%+v", session, updated)
 	}
-	want := []string{"agent", "prompt", "w1:p1", "bounded commander steer", "--wait", "--until", "working", "--timeout", "30000", "--session", "fm-lab-contract"}
+	want := []string{"agent", "prompt", "w1:p1", "bounded commander steer", "--session", "fm-lab-contract"}
 	if len(runner.calls) != 3 || !reflect.DeepEqual(runner.calls[2], want) {
 		t.Fatalf("submit calls = %#v", runner.calls)
 	}
@@ -793,6 +802,66 @@ func TestRealHerdrPersistentWorkerSmoke(t *testing.T) {
 	if _, err := os.Stat(restartMarker); err != nil {
 		t.Logf("restart wake completed working -> idle but secondary marker %s is absent: %v\nvisible pane:\n%s",
 			restartMarker, err, capturePane(t, runner, replacement.PaneID))
+	}
+}
+
+func TestRealHerdrQueuesRunningWorkerSteerExactlyOnce(t *testing.T) {
+	if os.Getenv("SOPHON_HERDR_LAB") != "1" {
+		t.Skip("set SOPHON_HERDR_LAB=1 to exercise running-worker steering in an isolated lab session")
+	}
+	helper := os.Getenv("HERDR_LAB_HELPER")
+	if helper == "" {
+		t.Fatal("HERDR_LAB_HELPER is required")
+	}
+	sessionName := strings.TrimSpace(os.Getenv("HERDR_LAB_SESSION"))
+	if !strings.HasPrefix(sessionName, "fm-lab-") || sessionName == "default" || os.Getenv("HERDR_LAB_PROVISIONED") != "1" {
+		t.Fatalf("test requires a pre-provisioned named lab session, got %q", sessionName)
+	}
+	worktree, err := os.MkdirTemp(".", ".herdr-running-steer-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree, err = filepath.Abs(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(worktree) })
+	runner := labRunner{helper: helper, session: sessionName}
+	adapter := NewCommandAdapterWithRunner(sessionName, "sophon-running-steer", runner)
+	session, err := adapter.StartCodex(context.Background(), StartRequest{
+		TaskID: "task_running_steer", Attempt: 1, WorktreePath: worktree,
+		Brief: "Run `sleep 45; printf original-finished > original-finished` as one terminal command now. Do nothing else until it exits, then obey any queued correction exactly once before replying.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state, observeErr := adapter.Observe(context.Background(), session); observeErr != nil || state != StateRunning {
+		t.Fatalf("agent was not genuinely running before steer: state=%s err=%v\n%s", state, observeErr, capturePane(t, runner, session.PaneID))
+	}
+	marker := filepath.Join(worktree, "queued-steer")
+	message := "Queued correction: after the current sleep exits, run `printf 'queued-once\\n' >> queued-steer`, then reply. Execute this correction exactly once."
+	started := time.Now()
+	updated, err := adapter.Submit(context.Background(), session, message)
+	if err != nil {
+		t.Fatalf("running steer was not acknowledged: %v\nvisible pane:\n%s", err, capturePane(t, runner, session.PaneID))
+	}
+	if updated != session {
+		t.Fatalf("running steer changed exact placement: before=%+v after=%+v", session, updated)
+	}
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("running steer waited for an idle-to-working transition: %s", elapsed)
+	}
+	visible := capturePane(t, runner, session.PaneID)
+	if count := strings.Count(visible, "Queued correction:"); count != 1 {
+		t.Fatalf("queued correction visible count = %d, want 1\n%s", count, visible)
+	}
+	waitForHerdrState(t, adapter, session, StateIdle, 3*time.Minute)
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("queued correction did not execute: %v\n%s", err, capturePane(t, runner, session.PaneID))
+	}
+	if string(data) != "queued-once\n" {
+		t.Fatalf("queued correction executed more than once: %q", data)
 	}
 }
 

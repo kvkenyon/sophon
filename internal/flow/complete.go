@@ -5,17 +5,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"sophon/internal/datahome"
-	"sophon/internal/domain"
 	"sophon/internal/store"
 	"sophon/internal/treehouse"
 )
@@ -23,7 +20,8 @@ import (
 // PublishResult is the `sophon worker complete` core: it validates the
 // worker's result hard, pins the claimed head to the live worktree HEAD, and
 // atomically publishes the result bytes into the worker's own attempt dir.
-// No shared lock is taken: a worker writes only its own attempt directory.
+// The shared mutation lock serializes completion against retry and typed report
+// publication so conflicting evidence can never win by timestamp.
 // It returns the SHA-256 of the published bytes.
 func (f *Flow) PublishResult(ctx context.Context, taskID string, attempt int, headSHA, resultPath string) (string, error) {
 	if f.deps.Git == nil {
@@ -32,6 +30,11 @@ func (f *Flow) PublishResult(ctx context.Context, taskID string, attempt int, he
 	if err := requireNonEmpty(taskID, headSHA, resultPath); err != nil || attempt < 1 {
 		return "", errors.New("task, attempt, head SHA, and result path are required")
 	}
+	release, err := store.Acquire(ctx, "worker complete "+taskID)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	task, err := store.FindTask(taskID)
 	if err != nil {
 		return "", err
@@ -46,12 +49,12 @@ func (f *Flow) PublishResult(ctx context.Context, taskID string, attempt int, he
 		return "", err
 	}
 	attemptDir := store.AttemptDir(homeDir, task.MissionID, taskID, attempt)
-	data, err := readGuardedResult(resultPath, attemptDir, spawn.StartedAt)
+	data, err := readGuardedSubmission(resultPath, attemptDir, store.CompletionSubmissionName, spawn.StartedAt, ErrInvalidResult)
 	if err != nil {
 		return "", err
 	}
-	if _, err := decodeResult(data); err != nil {
-		return "", err
+	if _, err := store.DecodeWorkerResult(data); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrInvalidResult, err)
 	}
 	snapshot, err := f.deps.Git.Snapshot(ctx, spawn.WorktreePath)
 	if err != nil {
@@ -60,88 +63,138 @@ func (f *Flow) PublishResult(ctx context.Context, taskID string, attempt int, he
 	if !strings.EqualFold(snapshot.Head, headSHA) {
 		return "", fmt.Errorf("%w: worktree HEAD is %s", ErrHeadMismatch, snapshot.Head)
 	}
-	if err := store.PublishBytes(filepath.Join(attemptDir, "result.json"), data); err != nil {
+	digest, _, err := publishEvidence(attemptDir, "result.json", "report.json", data)
+	if err != nil {
 		return "", fmt.Errorf("publish worker result: %w", err)
 	}
 	store.AppendWake(taskID, fmt.Sprintf("ready: result published (attempt %d)", attempt))
-	digest := sha256.Sum256(data)
-	return hex.EncodeToString(digest[:]), nil
+	return digest, nil
 }
 
-// readGuardedResult enforces the worker result file guards: the resolved path
-// must be a regular file inside the attempt directory, no larger than 1 MiB,
-// and written after the attempt started.
-func readGuardedResult(resultPath, attemptDir string, startedAt time.Time) ([]byte, error) {
-	resolved, err := filepath.Abs(resultPath)
+// PublishReport is the `sophon worker report` core. It validates typed
+// non-completion evidence, exact task/attempt/head identity, and the live
+// worktree head before atomically publishing report.json. Dirty work is
+// allowed and preserved; a report is attention evidence, never completion.
+func (f *Flow) PublishReport(ctx context.Context, taskID string, attempt int, headSHA, reportPath string) (string, error) {
+	if f.deps.Git == nil {
+		return "", errors.New("flow is not fully configured for worker report")
+	}
+	if err := requireNonEmpty(taskID, headSHA, reportPath); err != nil || attempt < 1 {
+		return "", errors.New("task, attempt, head SHA, and report path are required")
+	}
+	release, err := store.Acquire(ctx, "worker report "+taskID)
 	if err != nil {
-		return nil, fmt.Errorf("resolve result path: %w", err)
+		return "", err
+	}
+	defer release()
+	task, err := store.FindTask(taskID)
+	if err != nil {
+		return "", err
+	}
+	spawn, err := store.ReadSpawn(task.MissionID, taskID, attempt)
+	if err != nil {
+		return "", fmt.Errorf("publish report for attempt %d: %w", attempt, err)
+	}
+	homeDir, err := datahome.Dir()
+	if err != nil {
+		return "", err
+	}
+	attemptDir := store.AttemptDir(homeDir, task.MissionID, taskID, attempt)
+	data, err := readGuardedSubmission(reportPath, attemptDir, store.ReportSubmissionName, spawn.StartedAt, ErrInvalidReport)
+	if err != nil {
+		return "", err
+	}
+	report, err := store.DecodeWorkerReport(data)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrInvalidReport, err)
+	}
+	if report.TaskID != taskID || report.Attempt != attempt || !strings.EqualFold(report.HeadSHA, headSHA) {
+		return "", fmt.Errorf("%w: report identity %s attempt %d head %s does not match command identity",
+			ErrInvalidReport, report.TaskID, report.Attempt, report.HeadSHA)
+	}
+	snapshot, err := f.deps.Git.Snapshot(ctx, spawn.WorktreePath)
+	if err != nil {
+		return "", fmt.Errorf("snapshot attempt worktree: %w", err)
+	}
+	if !strings.EqualFold(snapshot.Head, headSHA) {
+		return "", fmt.Errorf("%w: worktree HEAD is %s", ErrHeadMismatch, snapshot.Head)
+	}
+	digest, _, err := publishEvidence(attemptDir, "report.json", "result.json", data)
+	if err != nil {
+		return "", fmt.Errorf("publish worker report: %w", err)
+	}
+	store.AppendWake(taskID, fmt.Sprintf("attention: %s report published (attempt %d)", report.Status, attempt))
+	return digest, nil
+}
+
+// readGuardedSubmission enforces the worker submission guards: the path must
+// be the exact generated staging filename (never canonical truth), a regular
+// file no larger than 1 MiB, and written after the attempt started.
+func readGuardedSubmission(submissionPath, attemptDir, expectedName string, startedAt time.Time, invalid error) ([]byte, error) {
+	expected := filepath.Join(attemptDir, expectedName)
+	resolved, err := filepath.Abs(submissionPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve submission path: %w", err)
+	}
+	expected, err = filepath.Abs(expected)
+	if err != nil {
+		return nil, fmt.Errorf("resolve expected submission path: %w", err)
+	}
+	if filepath.Clean(resolved) != filepath.Clean(expected) {
+		return nil, fmt.Errorf("%w: submission must use generated staging path %s", invalid, expected)
 	}
 	resolved, err = filepath.EvalSymlinks(resolved)
 	if err != nil {
-		return nil, fmt.Errorf("resolve result path: %w", err)
+		return nil, fmt.Errorf("resolve submission path: %w", err)
 	}
-	dir, err := filepath.EvalSymlinks(attemptDir)
+	expected, err = filepath.EvalSymlinks(expected)
 	if err != nil {
-		return nil, fmt.Errorf("resolve attempt directory: %w", err)
+		return nil, fmt.Errorf("resolve expected submission path: %w", err)
 	}
-	relative, err := filepath.Rel(dir, resolved)
-	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return nil, fmt.Errorf("%w: result must live inside the attempt directory %s", ErrInvalidResult, dir)
+	if resolved != expected {
+		return nil, fmt.Errorf("%w: submission staging path cannot redirect through a symlink", invalid)
 	}
 	info, err := os.Stat(resolved)
 	if err != nil {
-		return nil, fmt.Errorf("read worker result metadata: %w", err)
+		return nil, fmt.Errorf("read worker submission metadata: %w", err)
 	}
 	if !info.Mode().IsRegular() || info.Size() > 1<<20 {
-		return nil, fmt.Errorf("%w: result must be a regular file no larger than 1 MiB", ErrInvalidResult)
+		return nil, fmt.Errorf("%w: submission must be a regular file no larger than 1 MiB", invalid)
 	}
 	if !info.ModTime().After(startedAt) {
-		return nil, fmt.Errorf("%w: result predates the attempt start", ErrInvalidResult)
+		return nil, fmt.Errorf("%w: submission predates the attempt start", invalid)
 	}
 	data, err := os.ReadFile(resolved)
 	if err != nil {
-		return nil, fmt.Errorf("read worker result: %w", err)
+		return nil, fmt.Errorf("read worker submission: %w", err)
 	}
 	return data, nil
 }
 
-// decodeResult enforces the strict version 1 worker completion schema.
-func decodeResult(data []byte) (domain.WorkerResult, error) {
-	var result domain.WorkerResult
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&result); err != nil {
-		return result, fmt.Errorf("%w: decode JSON: %v", ErrInvalidResult, err)
+// publishEvidence converges identical retries and refuses both differing
+// same-kind evidence and report-vs-completion conflicts. Callers hold the
+// shared mutation lock, so the sibling check and atomic rename are serialized.
+func publishEvidence(attemptDir, canonicalName, siblingName string, data []byte) (digest string, published bool, err error) {
+	digestBytes := sha256.Sum256(data)
+	digest = hex.EncodeToString(digestBytes[:])
+	if _, err := os.Stat(filepath.Join(attemptDir, siblingName)); err == nil {
+		return "", false, fmt.Errorf("%w: %s already exists", ErrEvidenceConflict, siblingName)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", false, fmt.Errorf("inspect conflicting evidence: %w", err)
 	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return result, fmt.Errorf("%w: trailing JSON value", ErrInvalidResult)
+	canonical := filepath.Join(attemptDir, canonicalName)
+	if existing, err := os.ReadFile(canonical); err == nil {
+		if bytes.Equal(existing, data) {
+			return digest, false, nil
 		}
-		return result, fmt.Errorf("%w: trailing content: %v", ErrInvalidResult, err)
+		return "", false, fmt.Errorf("%w: %s already contains different evidence", ErrEvidenceConflict, canonicalName)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", false, fmt.Errorf("read existing evidence: %w", err)
 	}
-	if result.Version != 1 || result.Status != "completed" || strings.TrimSpace(result.Summary) == "" ||
-		len(result.Verification) == 0 || len(result.ChangedFiles) == 0 || result.Risks == nil {
-		return result, fmt.Errorf("%w: version, completed status, summary, verification, changed_files, and risks are required", ErrInvalidResult)
+	if err := store.PublishBytes(canonical, data); err != nil {
+		return "", false, err
 	}
-	for _, check := range result.Verification {
-		if strings.TrimSpace(check.Command) == "" || check.ExitCode != 0 {
-			return result, fmt.Errorf("%w: verification entries require a command and zero exit code", ErrInvalidResult)
-		}
-	}
-	seen := make(map[string]struct{}, len(result.ChangedFiles))
-	for _, changed := range result.ChangedFiles {
-		clean := filepath.Clean(changed)
-		if changed == "" || filepath.IsAbs(changed) || clean == "." || clean == ".." ||
-			strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean != changed {
-			return result, fmt.Errorf("%w: changed_files contains unsafe path %q", ErrInvalidResult, changed)
-		}
-		if _, exists := seen[changed]; exists {
-			return result, fmt.Errorf("%w: duplicate changed file %q", ErrInvalidResult, changed)
-		}
-		seen[changed] = struct{}{}
-	}
-	return result, nil
+	return digest, true, nil
 }
 
 // VerifyComplete proves the current attempt: spawn and result records exist,
@@ -180,6 +233,14 @@ func (f *Flow) VerifyComplete(ctx context.Context, taskID string) (store.Outcome
 			return store.Outcome{}, f.notReadyOrStale(homeDir, task, attempt)
 		}
 		return store.Outcome{}, fmt.Errorf("read attempt result: %w", err)
+	}
+	if _, err := store.DecodeWorkerResult(resultBytes); err != nil {
+		return store.Outcome{}, fmt.Errorf("%w: canonical result: %v", ErrInvalidResult, err)
+	}
+	if _, err := os.Stat(store.AttemptPath(homeDir, task.MissionID, taskID, attempt, "report.json")); err == nil {
+		return store.Outcome{}, fmt.Errorf("%w: current attempt contains both result.json and report.json", ErrEvidenceConflict)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return store.Outcome{}, fmt.Errorf("inspect current attempt report: %w", err)
 	}
 	if err := verifyLiveLease(ctx, f.deps.Leases, mission.ProjectPath, spawn); err != nil {
 		return store.Outcome{}, err

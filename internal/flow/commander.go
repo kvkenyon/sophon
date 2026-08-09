@@ -103,11 +103,60 @@ func CommanderWakeMessage(taskID string, attempt int, needsValidation bool) stri
 		"routine work; never report a task as ready for your verification.", taskID, attempt, taskID, validate)
 }
 
+// CommanderReportWakeMessage routes durable non-completion evidence without
+// turning it into completion or an automated action. The commander preserves
+// the attempt and dirty work and asks only for a genuinely required decision.
+func CommanderReportWakeMessage(report store.WorkerReport) string {
+	return fmt.Sprintf("Sophon: task %s attempt %d published a durable %s report and now derives attention. "+
+		"Run `sophon status`, read the current attempt's `report.json`, and preserve this attempt and all disclosed dirty work. "+
+		"This is not completion: do not verify, validate, deliver, release, retry, or discard work. "+
+		"Resolve an ordinary blocker within commander authority by steering the same attempt; otherwise ask the operator only for the concrete decision the report requires.",
+		report.TaskID, report.Attempt, report.Status)
+}
+
 // NotifyCommander best-effort wakes the registered commander after a durable
 // result publication. It is liveness only: a missing, malformed, stale, dead,
 // or unreachable target is a bounded diagnostic to the caller, never a task
 // failure, and never changes the durable completion.
 func (f *Flow) NotifyCommander(ctx context.Context, taskID string, attempt int) error {
+	if f.deps.NewSessionPanes == nil {
+		return nil
+	}
+	// The validate clause needs the task record; a lookup failure only narrows
+	// the instruction to the always-required status/verify-complete drain.
+	needsValidation := false
+	if task, err := store.FindTask(taskID); err == nil {
+		if task.CurrentAttempt != attempt {
+			return nil
+		}
+		needsValidation = strings.TrimSpace(task.ValidationCommand) != ""
+	}
+	return f.notifyCommander(ctx, CommanderWakeMessage(taskID, attempt, needsValidation))
+}
+
+// NotifyCommanderReport best-effort wakes the attached commander after a
+// durable current-attempt report publication. A fenced report is retained as
+// history but sends no false attention wake. The message is built only from
+// the exact typed report record.
+func (f *Flow) NotifyCommanderReport(ctx context.Context, taskID string, attempt int) error {
+	task, err := store.FindTask(taskID)
+	if err != nil {
+		return err
+	}
+	if task.CurrentAttempt != attempt {
+		return nil
+	}
+	report, err := store.ReadReport(task.MissionID, taskID, attempt)
+	if err != nil {
+		return err
+	}
+	if report.TaskID != taskID || report.Attempt != attempt {
+		return errors.New("published report identity does not match notification target")
+	}
+	return f.notifyCommander(ctx, CommanderReportWakeMessage(report))
+}
+
+func (f *Flow) notifyCommander(ctx context.Context, message string) error {
 	if f.deps.NewSessionPanes == nil {
 		return nil
 	}
@@ -125,13 +174,7 @@ func (f *Flow) NotifyCommander(ctx context.Context, taskID string, attempt int) 
 	panes := f.deps.NewSessionPanes(registration.Session)
 	session := herdr.Session{SessionName: registration.Session, PaneID: registration.PaneID,
 		Runtime: herdr.Runtime(registration.Runtime)}
-	// The validate clause needs the task record; a lookup failure only narrows
-	// the instruction to the always-required status/verify-complete drain.
-	needsValidation := false
-	if task, err := store.FindTask(taskID); err == nil {
-		needsValidation = strings.TrimSpace(task.ValidationCommand) != ""
-	}
-	if _, err := panes.Submit(ctx, session, CommanderWakeMessage(taskID, attempt, needsValidation)); err != nil {
+	if _, err := panes.Submit(ctx, session, message); err != nil {
 		return fmt.Errorf("wake commander pane %s in session %s: %w", registration.PaneID, registration.Session, err)
 	}
 	return nil

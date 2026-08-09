@@ -59,7 +59,7 @@ broaden an override, apply it by analogy, or convert it to standing authority.
 ## 2. Structured truth and the derived-state model
 
 Durable intent lives in `mission.json` and `task.json`; durable receipts live
-in each attempt directory (`spawn.json`, `result.json`, `validation.json`,
+in each attempt directory (`spawn.json`, `result.json`, `report.json`, `validation.json`,
 `outcome.json`, `delivery.json`, `release.json`). Nothing else is truth.
 
 Task state is derived at read time by `sophon status`:
@@ -70,9 +70,19 @@ Task state is derived at read time by `sophon status`:
   never means done.
 - **ready** — the worker published its structured result; the attempt is
   pending your verification.
+- **attention** — the worker published a valid current-attempt `scope-mismatch`
+  or `blocked` report; preserve the attempt and dirty work, inspect the report,
+  resolve an ordinary blocker by steering the same attempt, and ask the
+  operator only for a genuinely required decision.
+- **invalid-evidence** — malformed or conflicting canonical evidence requires
+  reconciliation and authorizes no automated verification, validation, or
+  delivery action.
 - **verified** — `sophon verify-complete` proved the attempt and published the
   outcome receipt.
 - **delivered** — an operator-confirmed delivery reached a terminal receipt.
+- **released** — the current attempt's exact lease was returned; this is
+  terminal cleanup, not proof of delivery, and appears only in `sophon status
+  --all` history.
 
 Wake lines in `~/.sophon/state/` are notifications, never state. Absent,
 duplicated, or contradictory wake lines change nothing; never relay worker
@@ -120,6 +130,9 @@ declaring anything complete:
    it is missing. Attach records a volatile notification and placement
    address only — never state, never ownership of anything.
 2. Run `sophon status` (add `--json` when you need machine-readable detail).
+   This is the operational view and omits released tasks and released-only
+   missions. Use `sophon status --all` only when durable cleanup or delivery
+   history is relevant.
 3. Drain the action queue to a fixed point before reporting anything:
    - for every current `ready` task, inspect its structured result and run
      `sophon verify-complete <exact-task-id>` immediately;
@@ -134,6 +147,11 @@ declaring anything complete:
 4. Only then reconcile anything the queue does not cover and report:
    - **unknown-pane** or **lost** tasks need reconciliation before any
      intervention; load `worker-recovery`.
+   - **attention** tasks require reading `report.json`, preserving the current
+     attempt and disclosed dirty work, and resolving only the decision actually
+     needed; never treat the report as delivery-ready.
+   - **invalid-evidence** tasks require conservative reconciliation and no
+     automated action.
    - **verified** tasks whose validation is complete (or unconfigured)
      await a delivery decision with the operator.
    Report concisely: verified and validated outcomes, concrete failures with
@@ -212,6 +230,9 @@ verification, or any other truth.
 Use `sophon send <task-id> <message>` for short, task-scoped steering. Put
 long durable context in the task record itself. Workers own execution in their
 leased worktrees; do not compete with a live worker for its repository.
+`sophon send` safely queues an exact message to either an idle or already-running
+current-attempt worker. A failed or ambiguous submission is never a
+reason to blindly retype the correction because it may already be queued.
 
 ## 6. Supervision
 

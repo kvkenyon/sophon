@@ -35,6 +35,12 @@ var (
 	ErrHeadMismatch = errors.New("head SHA does not match the verified attempt head")
 	// ErrInvalidResult marks a worker result that fails the strict schema.
 	ErrInvalidResult = errors.New("invalid worker result")
+	// ErrInvalidReport marks typed non-completion evidence that fails its
+	// strict schema or identity contract.
+	ErrInvalidReport = errors.New("invalid worker report")
+	// ErrEvidenceConflict refuses differing or completion-vs-report evidence
+	// for the same attempt. The command never chooses by timestamp.
+	ErrEvidenceConflict = errors.New("worker evidence conflict")
 )
 
 // Git is the subset of internal/git.Client the flow needs.

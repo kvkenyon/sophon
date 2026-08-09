@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -181,7 +182,9 @@ func TestDeriveLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	publishAttempt(1, "result.json", map[string]string{"status": "completed"})
+	publishAttempt(1, "result.json", domain.WorkerResult{Version: 1, Status: "completed", Summary: "done",
+		Verification: []domain.VerificationResult{{Command: "go test ./...", ExitCode: 0}},
+		ChangedFiles: []string{"feature.go"}, Risks: []string{}})
 	assertState(StateReady)
 	publishAttempt(1, "outcome.json", Outcome{TaskID: task.ID, Attempt: 1})
 	assertState(StateVerified)
@@ -226,6 +229,141 @@ func TestDeriveFencesNonCurrentAttempts(t *testing.T) {
 	}
 	if status.State != StateActive {
 		t.Fatalf("state = %q, want active: fenced attempt records must not leak", status.State)
+	}
+}
+
+func TestDeriveRejectsMalformedCanonicalCompletionEvidence(t *testing.T) {
+	home := useHome(t)
+	mission := Mission{ID: "mission_a", CreatedAt: time.Now().UTC()}
+	if err := CreateMission(mission); err != nil {
+		t.Fatal(err)
+	}
+	task := sampleTask(mission.ID, "task_a")
+	if err := CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BumpAttempt(mission.ID, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	// This preserves the rejected HOME-111 evidence shape: a worker wrote a
+	// blocked completion-shaped document at the canonical result path before
+	// `worker complete` rejected it.
+	rejected, err := os.ReadFile(filepath.Join("..", "..", "testdata", "home-111-blocked-result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishBytes(AttemptPath(home, mission.ID, task.ID, 1, "result.json"), rejected); err != nil {
+		t.Fatal(err)
+	}
+	current, err := ReadTask(mission.ID, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := Derive(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "invalid-evidence" {
+		t.Fatalf("state = %q, want invalid-evidence; malformed canonical evidence must never derive ready", status.State)
+	}
+}
+
+func TestDeriveRejectsMalformedAndPartialCanonicalCompletion(t *testing.T) {
+	for name, content := range map[string]string{
+		"malformed": `{"version":`,
+		"partial":   `{"version":1,"status":"completed","summary":"partial"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := useHome(t)
+			mission := Mission{ID: "mission_a", CreatedAt: time.Now().UTC()}
+			if err := CreateMission(mission); err != nil {
+				t.Fatal(err)
+			}
+			task := sampleTask(mission.ID, "task_a")
+			if err := CreateTask(task); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := BumpAttempt(mission.ID, task.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := PublishBytes(AttemptPath(home, mission.ID, task.ID, 1, "result.json"), []byte(content)); err != nil {
+				t.Fatal(err)
+			}
+			current, _ := ReadTask(mission.ID, task.ID)
+			status, err := Derive(current)
+			if err != nil || status.State != StateInvalidEvidence {
+				t.Fatalf("status = %+v, %v; invalid canonical evidence must never derive ready", status, err)
+			}
+		})
+	}
+}
+
+func TestDeriveReleasedRequiresExactCurrentAttemptIdentity(t *testing.T) {
+	home := useHome(t)
+	mission := Mission{ID: "mission_a", CreatedAt: time.Now().UTC()}
+	if err := CreateMission(mission); err != nil {
+		t.Fatal(err)
+	}
+	task := sampleTask(mission.ID, "task_a")
+	if err := CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BumpAttempt(mission.ID, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	spawn := Spawn{TaskID: task.ID, MissionID: mission.ID, Attempt: 1, LeaseID: "lease-1", LeaseHolder: "holder-1"}
+	if err := Publish(AttemptPath(home, mission.ID, task.ID, 1, "spawn.json"), spawn); err != nil {
+		t.Fatal(err)
+	}
+	if err := Publish(AttemptPath(home, mission.ID, task.ID, 1, "release.json"), Release{
+		TaskID: task.ID, Attempt: 1, LeaseID: spawn.LeaseID, LeaseHolder: spawn.LeaseHolder, ReleasedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	current, _ := ReadTask(mission.ID, task.ID)
+	status, err := Derive(current)
+	if err != nil || status.State != StateReleased || status.DeliveryState != "not-delivered" {
+		t.Fatalf("exact release status = %+v, %v", status, err)
+	}
+
+	// A fenced release cannot hide attempt 2.
+	if _, err := BumpAttempt(mission.ID, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	current, _ = ReadTask(mission.ID, task.ID)
+	status, err = Derive(current)
+	if err != nil || status.State != StateActive || status.Attempt != 2 {
+		t.Fatalf("fenced release affected current attempt: %+v, %v", status, err)
+	}
+
+	// Mismatched current evidence remains visible as invalid and cannot hide work.
+	if err := Publish(AttemptPath(home, mission.ID, task.ID, 2, "release.json"), Release{
+		TaskID: task.ID, Attempt: 1, LeaseID: "wrong", LeaseHolder: "wrong", ReleasedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, err = Derive(current)
+	if err != nil || status.State != StateInvalidEvidence {
+		t.Fatalf("mismatched release status = %+v, %v", status, err)
+	}
+}
+
+func TestDecodeWorkerReportAcceptsBothTypedNonCompletionStatuses(t *testing.T) {
+	for _, status := range []string{WorkerReportScopeMismatch, WorkerReportBlocked} {
+		t.Run(status, func(t *testing.T) {
+			report := WorkerReport{Version: 1, Status: status, TaskID: "task_a", Attempt: 1,
+				HeadSHA: "1111111111111111111111111111111111111111", Reason: "cannot continue honestly",
+				Verification: []domain.VerificationResult{}, Evidence: []string{"bounded evidence"},
+				ChangedFiles: []string{}, DirtyWork: false, Risks: []string{}}
+			data, err := json.Marshal(report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := DecodeWorkerReport(data)
+			if err != nil || decoded.Status != status {
+				t.Fatalf("decoded report = %+v, %v", decoded, err)
+			}
+		})
 	}
 }
 

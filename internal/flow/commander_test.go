@@ -57,8 +57,13 @@ func TestSpawnPropagatesResolvedDataHome(t *testing.T) {
 	if !strings.Contains(string(brief), pinned) {
 		t.Fatalf("brief completion command not pinned to the resolved data home:\n%s", brief)
 	}
-	if !strings.Contains(string(brief), "--result "+shellQuote(filepath.Join(store.AttemptDir(home, spawned.MissionID, task.ID, 1), "result.json"))) {
+	if !strings.Contains(string(brief), "--result "+shellQuote(filepath.Join(store.AttemptDir(home, spawned.MissionID, task.ID, 1), store.CompletionSubmissionName))) {
 		t.Fatalf("brief result path is not shell-quoted against spaces:\n%s", brief)
+	}
+	reportPinned := datahome.OverrideEnv + "=" + shellQuote(home) + " sophon worker report " + task.ID
+	if !strings.Contains(string(brief), reportPinned) ||
+		!strings.Contains(string(brief), "--report "+shellQuote(filepath.Join(store.AttemptDir(home, spawned.MissionID, task.ID, 1), store.ReportSubmissionName))) {
+		t.Fatalf("brief report command/path not pinned and shell-quoted:\n%s", brief)
 	}
 }
 
@@ -194,6 +199,9 @@ func TestNotifyCommanderIsBestEffort(t *testing.T) {
 	// A task with a configured validation command gets the exact validate
 	// command in its wake.
 	_, validated := rig.createMissionAndTask(t, "", "go test ./...")
+	if _, err := store.BumpAttempt(validated.MissionID, validated.ID); err != nil {
+		t.Fatal(err)
+	}
 	if err := rig.flow.NotifyCommander(ctx, validated.ID, 1); err != nil {
 		t.Fatal(err)
 	}

@@ -93,13 +93,30 @@ const validResult = `{
   "risks": []
 }`
 
-// writeResult drops a worker result file inside the attempt dir (under a
-// worker-chosen name; publication writes result.json itself).
+// writeResult drops a worker completion into the exact generated staging path;
+// publication writes canonical result.json only after validation.
 func writeResult(t *testing.T, home string, spawn store.Spawn, content string) string {
 	t.Helper()
 	dir := store.AttemptDir(home, spawn.MissionID, spawn.TaskID, spawn.Attempt)
-	path := filepath.Join(dir, "worker-result.json")
+	path := filepath.Join(dir, store.CompletionSubmissionName)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeReport(t *testing.T, home string, spawn store.Spawn, status, reason string, dirty bool) string {
+	t.Helper()
+	path := store.AttemptPath(home, spawn.MissionID, spawn.TaskID, spawn.Attempt, store.ReportSubmissionName)
+	report := store.WorkerReport{Version: 1, Status: status, TaskID: spawn.TaskID, Attempt: spawn.Attempt,
+		HeadSHA: testHeadSHA, Reason: reason, Verification: []domain.VerificationResult{},
+		Evidence: []string{"task brief targets a different subsystem"}, ChangedFiles: []string{"preserved.go"},
+		DirtyWork: dirty, Risks: []string{"operator decision required"}}
+	if err := store.Publish(path, report); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, future, future); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -128,6 +145,7 @@ func TestHappyPathBranchDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"# Generated task brief", "sophon worker complete " + task.ID + " --attempt 1",
+		"sophon worker report " + task.ID + " --attempt 1", store.CompletionSubmissionName, store.ReportSubmissionName,
 		"`version`, `status`, `summary`, `verification`, `changed_files`, and `risks`"} {
 		if !strings.Contains(string(brief), want) {
 			t.Fatalf("brief missing %q", want)
@@ -560,6 +578,15 @@ func TestPublishResultGuards(t *testing.T) {
 	if _, err := rig.flow.PublishResult(ctx, task.ID, 1, testHeadSHA, stale); !errors.Is(err, ErrInvalidResult) {
 		t.Fatalf("err = %v, want ErrInvalidResult", err)
 	}
+	// Even a schema-valid submission cannot become canonical before the live
+	// head contract passes.
+	valid := writeResult(t, home, spawn, validResult)
+	if _, err := rig.flow.PublishResult(ctx, task.ID, 1, testBaseSHA, valid); !errors.Is(err, ErrHeadMismatch) {
+		t.Fatalf("head mismatch error = %v, want ErrHeadMismatch", err)
+	}
+	if _, err := store.ReadResult(task.MissionID, task.ID, 1); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("head-rejected submission published canonical result: %v", err)
+	}
 	// Schema violations are refused: trailing JSON, missing fields, bad paths.
 	for name, content := range map[string]string{
 		"trailing":  validResult + "\n{}\n",
@@ -571,6 +598,75 @@ func TestPublishResultGuards(t *testing.T) {
 		if _, err := rig.flow.PublishResult(ctx, task.ID, 1, testHeadSHA, path); !errors.Is(err, ErrInvalidResult) {
 			t.Fatalf("%s: err = %v, want ErrInvalidResult", name, err)
 		}
+	}
+	if _, err := store.ReadResult(task.MissionID, task.ID, 1); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("rejected submissions published canonical result: %v", err)
+	}
+}
+
+func TestPublishTypedReportIsAttentionAndConflictsConservatively(t *testing.T) {
+	home := useHome(t)
+	rig := newRig()
+	ctx := context.Background()
+	_, task := rig.createMissionAndTask(t, domain.DeliveryBranch, "go test ./...")
+	spawn, err := rig.flow.Spawn(ctx, task.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := writeReport(t, home, spawn, store.WorkerReportScopeMismatch, "HOME-111 targets another client", true)
+	first, err := rig.flow.PublishReport(ctx, task.ID, 1, testHeadSHA, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := rig.flow.PublishReport(ctx, task.ID, 1, testHeadSHA, path)
+	if err != nil || second != first {
+		t.Fatalf("idempotent report = %q, %v; want %q", second, err, first)
+	}
+	report, err := rig.flow.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := report.Missions[0].Tasks[0]; got.State != store.StateAttention || !strings.Contains(got.Detail, "scope-mismatch") {
+		t.Fatalf("report status = %+v, want attention", got)
+	}
+	if len(report.Actions) != 0 {
+		t.Fatalf("typed report yielded automated actions: %+v", report.Actions)
+	}
+	if _, err := store.ReadResult(task.MissionID, task.ID, 1); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("report pretended completion: %v", err)
+	}
+	changed := writeReport(t, home, spawn, store.WorkerReportBlocked, "different claim", true)
+	if _, err := rig.flow.PublishReport(ctx, task.ID, 1, testHeadSHA, changed); !errors.Is(err, ErrEvidenceConflict) {
+		t.Fatalf("conflicting report error = %v, want evidence conflict", err)
+	}
+	completion := writeResult(t, home, spawn, validResult)
+	if _, err := rig.flow.PublishResult(ctx, task.ID, 1, testHeadSHA, completion); !errors.Is(err, ErrEvidenceConflict) {
+		t.Fatalf("report-vs-completion error = %v, want evidence conflict", err)
+	}
+}
+
+func TestFencedAttemptReportCannotAffectCurrentAttempt(t *testing.T) {
+	home := useHome(t)
+	rig := newRig()
+	ctx := context.Background()
+	_, task := rig.createMissionAndTask(t, domain.DeliveryBranch, "")
+	first, err := rig.flow.Spawn(ctx, task.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rig.flow.Spawn(ctx, task.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	path := writeReport(t, home, first, store.WorkerReportBlocked, "late report", true)
+	if _, err := rig.flow.PublishReport(ctx, task.ID, 1, testHeadSHA, path); err != nil {
+		t.Fatal(err)
+	}
+	report, err := rig.flow.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := report.Missions[0].Tasks[0]; got.Attempt != 2 || got.State == store.StateAttention || got.State == store.StateReady {
+		t.Fatalf("fenced report affected current attempt: %+v", got)
 	}
 }
 
