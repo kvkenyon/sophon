@@ -277,6 +277,42 @@ func TestEveryTaskChangeKindRequiresTypedCanonicalEvidence(t *testing.T) {
 	}
 }
 
+func TestReviewChangeNotificationHashesLatestImmutableEventOnly(t *testing.T) {
+	home := shortHome(t)
+	task := canonicalTask(t, home, "task_review")
+	binding := store.ReviewBinding{Version: 1, Product: store.ReviewProduct, ProductSchemaVersion: 1,
+		TaskID: task.ID, Attempt: 1, SessionID: "57d91f3ddc544f34e70c1156",
+		BaseSHA: "1111111111111111111111111111111111111111", HeadSHA: "2222222222222222222222222222222222222222",
+		OpenedAt: time.Now().UTC()}
+	if err := store.PublishReviewBindingForTask(task, binding); err != nil {
+		t.Fatal(err)
+	}
+	event := store.ReviewEvent{Version: 1, ProductSchema: 1, TaskID: task.ID, Attempt: 1,
+		SessionID: binding.SessionID, Sequence: 1, ProductEventID: "11111111-1111-4111-8111-111111111111",
+		Type: "approval", CreatedAt: time.Now().UTC(), BaseSHA: binding.BaseSHA, HeadSHA: binding.HeadSHA,
+		ApprovedHeadSHA: binding.HeadSHA}
+	if err := store.PublishReviewEvent(task, binding, event); err != nil {
+		t.Fatal(err)
+	}
+	generation, err := CanonicalGeneration(home, task.ID, 1, ChangeReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := TaskChangedParams{TaskID: task.ID, Attempt: 1, Change: ChangeReview, ChangeGeneration: generation}
+	if err := validateCanonicalChange(home, params); err != nil {
+		t.Fatal(err)
+	}
+	// Comment content is never present in the notification envelope; only the
+	// fixed change kind and digest cross the monitor transport.
+	encoded, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "approval") || strings.Contains(string(encoded), binding.HeadSHA) {
+		t.Fatalf("review content leaked into monitor params: %s", encoded)
+	}
+}
+
 func TestPendingQueueIsBounded(t *testing.T) {
 	server := &Server{Forwarder: ForwarderFunc(func(context.Context, Event) error { return nil }), CoalesceDelay: time.Hour,
 		pending: make(map[string]*pendingEvent), Logger: log.New(io.Discard, "", 0)}

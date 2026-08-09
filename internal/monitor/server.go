@@ -402,6 +402,8 @@ func changeRank(change string) int {
 		return 50
 	case ChangeValidation:
 		return 40
+	case ChangeReview:
+		return 45
 	case ChangeVerification:
 		return 30
 	case ChangeReport:

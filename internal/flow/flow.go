@@ -14,6 +14,7 @@ import (
 	gitcontrol "sophon/internal/git"
 	"sophon/internal/herdr"
 	"sophon/internal/naming"
+	"sophon/internal/readcode"
 	"sophon/internal/store"
 	"sophon/internal/treehouse"
 	"sophon/internal/validation"
@@ -88,6 +89,9 @@ type Deps struct {
 	DeliveryGit    DeliveryGit
 	DeliveryRemote DeliveryRemote
 	NewValidator   func(command string) Validator
+	// ReviewProduct is the documented read-the-code-axi JSON boundary. Nil
+	// disables commands that need the external product.
+	ReviewProduct readcode.Product
 	// HerdrSession is the explicit Herdr session spawn placements target.
 	HerdrSession string
 	// NewSessionPanes builds an exact-session pane boundary for volatile

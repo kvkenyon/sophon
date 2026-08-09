@@ -3,7 +3,8 @@
 Sophon's only state model is a filesystem protocol under the Sophon data home.
 There is no database, command ledger, state projection, or managed agent
 runtime. One intentionally narrow local monitor may carry optional notification
-traffic; it never carries facts or authority. Facts are canonical typed records; status is derived
+traffic, and each opened Read the Code revision may have one blocking external-event
+bridge. Neither carries facts or authority. Facts are canonical typed records; status is derived
 at read time from those records plus live Herdr, Treehouse, Git, and forge
 observation.
 
@@ -19,9 +20,10 @@ attempt each).
   missions/<mission-id>/
     mission.json                        # durable intent: project path, objective
     tasks/<task-id>/
-      task.json                         # public contract + current_revision/current_attempt pointers
+      task.json                         # public contract, review posture + revision/attempt pointers
       revisions/<n>/
-        correction.json                # immutable accepted open-PR correction intent (n > 1)
+        correction.json                # immutable accepted correction intent (n > 1)
+      review-posture/<sequence>.json    # immutable explicit posture escalation history
       attempts/<n>/
         brief.md                        # generated work order (input to worker)
         spawn.json                      # spawn receipt (written by sophon spawn)
@@ -33,6 +35,12 @@ attempt each).
         outcome.json                    # verified-completion receipt (sophon verify-complete)
         delivery.json                   # delivery intent + receipt (sophon deliver)
         release.json                    # conditional lease-release receipt (sophon release)
+        review/
+          open.json                     # exact product session/base/head; NEVER browser URL/path
+          events/<sequence>.json        # contiguous immutable normalized submissions
+          decisions/<sequence>.json     # feedback classification; no comment text
+          routes/<sequence>.json        # exact-worker correction routing receipt
+          approval-acknowledgements/<sequence>.json # commander awareness, not authority
   state/
     <task-id>.status                    # VOLATILE wake lines; never truth
     commander.json                      # VOLATILE commander wake/placement address; never truth
@@ -42,6 +50,7 @@ attempt each).
       runtime.json                      # private exact generation/pid identity (0600)
       start.lock                        # crash-released singleton file lock (0600)
       monitor.log[.1]                   # bounded transport diagnostics, never bodies/tokens
+    review-bridges/                     # VOLATILE exact kernel-lock owners; never truth
   skills/                               # per-session materialized runtime skills
 ```
 
@@ -190,6 +199,25 @@ attempt each).
    autonomously. Every delivery effect requires operator confirmation, enforced
    mechanically: `sophon deliver` refuses without `--confirmed`. With no
    commander session alive, nothing advances and nothing is lost.
+11. **Read the Code review.** `task.json.review_posture` is `off`, `optional`,
+   or `required`; an absent field reads as `off`. Typed task-level changes may
+   only escalate posture and preserve immutable history. A review binding is
+   published only for the clean current verified head after configured
+   validation and contains no browser capability, repository path, executable,
+   or process data. Attempt-scoped product events are strictly validated and
+   published as contiguous immutable sequence files, so cursor is derived
+   rather than mutably advanced. Feedback bodies exist only in those bounded
+   records and explicit `review feedback` output; monitor messages, status,
+   process arguments, logs, routes, and prompts contain fixed identity/sequence
+   pointers only. One crash-released kernel-lock bridge blocks in the external
+   versioned CLI's poll, publishes before notifying, and exits when exact
+   ownership becomes stale, ended, delivered, or released. It and the monitor
+   carry no lifecycle authority. For `required`, delivery also requires a
+   canonical approval for the exact current outcome head later than every
+   feedback event, no pending/requested-change/gap/stale evidence, and an
+   immediate non-capability product-status cursor/revision check. Approval
+   never supplies `--confirmed` or any external authority. The full contract
+   is in `docs/read-the-code-review.md`.
 
 ## CLI
 
@@ -201,10 +229,20 @@ sophon task create --mission <id> --title <public-title>
                    --objective <worker-objective>
                    --delivery-branch <public-branch> [--kind implementation]
                    [--delivery branch|pr] [--validate <command>]
+                   [--review off|optional|required]
 sophon commander attach [--pane <id>] [--workspace <id>] [--tab <id>]
 sophon monitor run|start [--herdr <path>]
 sophon monitor status [--json]
 sophon monitor stop
+sophon review set <task-id> --posture optional|required
+sophon review open <task-id> [--attempt <n>] [--no-browser] [--json]
+sophon review status <task-id> [--json]
+sophon review feedback <task-id> [--attempt <n>] [--after <n>] [--limit <n>] [--json]
+sophon review classify <task-id> --sequence <n> --disposition requested-changes|non-actionable
+sophon review apply <task-id> --sequence <n>
+sophon review acknowledge <task-id> --sequence <n>
+sophon review reconcile <task-id> [--json]
+sophon review end <task-id> [--json]
 sophon spawn <task-id> [--retry]
 sophon worker progress <task-id> --attempt <n> --phase <phase> [--message <note>]
 sophon revise <task-id> --reason <same-contract-reason>
@@ -222,6 +260,9 @@ sophon prompt commander
 
 Binary paths for external tools (`--herdr`, `--treehouse`, `--git`, `--gh-axi`)
 are flags on the commands that need them, defaulting to PATH lookup.
+Read the Code is the exception: `--read-the-code` overrides
+`SOPHON_READ_THE_CODE`, and an empty configuration refuses with an install/pack
+diagnostic rather than assuming PATH, npm publication, or registry access.
 
 Task creation requires all three distinct intent values. `--title` is a
 single printable public line of at most 120 characters (including an issue

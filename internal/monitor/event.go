@@ -56,6 +56,8 @@ func canonicalPath(home string, task store.Task, attempt int, change string) (st
 		name = "outcome.json"
 	case ChangeValidation:
 		name = "validation.json"
+	case ChangeReview:
+		return store.LatestReviewEventPath(home, task, attempt)
 	case ChangeDelivery:
 		name = "delivery.json"
 	case ChangeRelease:
@@ -133,6 +135,12 @@ func validateCanonicalChange(home string, params TaskChangedParams) error {
 		if err == nil && (validation.TaskID != task.ID || validation.Attempt != params.Attempt ||
 			validation.Command == "" || validation.HeadSHA == "" || validation.RanAt.IsZero()) {
 			err = errors.New("validation identity does not match the notification")
+		}
+	case ChangeReview:
+		var events []store.ReviewEvent
+		events, err = store.ReadReviewEvents(task.MissionID, task.ID, params.Attempt)
+		if err == nil && len(events) == 0 {
+			err = errors.New("review notification requires a canonical event")
 		}
 	case ChangeDelivery:
 		var delivery store.Delivery

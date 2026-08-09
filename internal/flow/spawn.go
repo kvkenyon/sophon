@@ -38,7 +38,7 @@ func (f *Flow) CreateMission(ctx context.Context, projectPath, title, objective 
 // CreateTask publishes durable task intent under a mission. Empty kind
 // defaults to implementation; empty delivery mode defaults to branch.
 func (f *Flow) CreateTask(ctx context.Context, missionID, title, objective, deliveryBranch string, kind domain.TaskKind,
-	mode domain.DeliveryMode, validationCommand string) (store.Task, error) {
+	mode domain.DeliveryMode, validationCommand string, reviewPosture ...domain.ReviewPosture) (store.Task, error) {
 	if err := requireNonEmpty(missionID, title, objective, deliveryBranch); err != nil {
 		return store.Task{}, fmt.Errorf("create task: %w", err)
 	}
@@ -62,6 +62,15 @@ func (f *Flow) CreateTask(ctx context.Context, missionID, title, objective, deli
 	default:
 		return store.Task{}, fmt.Errorf("unknown delivery mode %q", mode)
 	}
+	posture := domain.ReviewOff
+	if len(reviewPosture) > 0 && reviewPosture[0] != "" {
+		posture = reviewPosture[0]
+	}
+	switch posture {
+	case domain.ReviewOff, domain.ReviewOptional, domain.ReviewRequired:
+	default:
+		return store.Task{}, fmt.Errorf("unknown review posture %q", posture)
+	}
 	release, err := store.Acquire(ctx, "task create")
 	if err != nil {
 		return store.Task{}, err
@@ -73,7 +82,7 @@ func (f *Flow) CreateTask(ctx context.Context, missionID, title, objective, deli
 	}
 	task := store.Task{ID: taskID, MissionID: missionID, Title: title, Objective: objective,
 		DeliveryBranch: deliveryBranch, Kind: kind, DeliveryMode: mode,
-		ValidationCommand: validationCommand, CreatedAt: time.Now().UTC()}
+		ReviewPosture: posture, ValidationCommand: validationCommand, CreatedAt: time.Now().UTC()}
 	return task, store.CreateTask(task)
 }
 

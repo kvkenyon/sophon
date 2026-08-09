@@ -661,14 +661,23 @@ func TestCLITaskCreateRequiresSeparatePublicAndWorkerIntent(t *testing.T) {
 		t.Fatal("CLI accepted a private delivery branch")
 	}
 	created := runCLI(t, "task", "create", "--mission", mission.ID, "--title", "HOME-111 Add client",
-		"--objective", "Implement detailed client behavior", "--delivery-branch", "home-111/add-client", "--delivery", "pr")
+		"--objective", "Implement detailed client behavior", "--delivery-branch", "home-111/add-client", "--delivery", "pr", "--review", "required")
 	var task store.Task
 	if err := json.Unmarshal(created, &task); err != nil {
 		t.Fatal(err)
 	}
 	if task.Title != "HOME-111 Add client" || task.Objective != "Implement detailed client behavior" ||
-		task.DeliveryBranch != "home-111/add-client" {
+		task.DeliveryBranch != "home-111/add-client" || task.ReviewPosture != domain.ReviewRequired {
 		t.Fatalf("task = %+v", task)
+	}
+	legacy := fixture.createTask(t, mission.ID, "--title", "Compatible task", "--delivery-branch", "feature/compatible")
+	if legacy.ReviewPosture != domain.ReviewOff {
+		t.Fatalf("default review posture = %q, want off", legacy.ReviewPosture)
+	}
+	transition := runCLI(t, "review", "set", legacy.ID, "--posture", "optional", "--json")
+	var changed store.ReviewPostureChange
+	if err := json.Unmarshal(transition, &changed); err != nil || changed.From != domain.ReviewOff || changed.To != domain.ReviewOptional {
+		t.Fatalf("review transition = %+v, %v", changed, err)
 	}
 }
 

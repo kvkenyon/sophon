@@ -2,7 +2,7 @@
 
 Sophon is single-operator local orchestration for autonomous coding agents. A human operator talks to one **commander** — an ordinary, disposable agent session; the commander decomposes work into tasks and dispatches **workers**, each an isolated agent session executing one attempt in its own Treehouse worktree over a Herdr pane.
 
-Sophon's only state model is a filesystem protocol: durable typed records under `~/.sophon/`, with task status **derived at read time** from those records plus live Herdr, Treehouse, Git, and forge observation. A deliberately narrow local notification monitor may run in the background, but it transports optional triggers only; it is never task truth, a lifecycle controller, recovery service, or commander manager.
+Sophon's only state model is a filesystem protocol: durable typed records under `~/.sophon/`, with task status **derived at read time** from those records plus live Herdr, Treehouse, Git, and forge observation. A deliberately narrow local notification monitor may run in the background, and an opened Read the Code revision may own one blocking external-event bridge. Both transport optional triggers only; neither is task truth, a lifecycle controller, recovery service, or commander manager.
 
 > Reasoning may be probabilistic. Execution state may not be.
 
@@ -23,7 +23,7 @@ Sophon's only state model is a filesystem protocol: durable typed records under 
 go build -o sophon ./cmd/sophon
 ```
 
-External tools (`herdr`, `treehouse`, `git`, `gh-axi`) are resolved from PATH by default; every command that needs one accepts a flag to override it.
+External tools (`herdr`, `treehouse`, `git`, `gh-axi`) are resolved from PATH by default; every command that needs one accepts a flag to override it. Read the Code is deliberately separate and not yet published: configure an explicitly installed or packed `read-the-code-axi` with `--read-the-code PATH` or `SOPHON_READ_THE_CODE=PATH`. Sophon never downloads it or assumes a global package.
 
 ## Quickstart
 
@@ -41,7 +41,7 @@ sophon mission create --project /path/to/repo --title "Rate limiting" \
 sophon task create --mission <mission-id> --title "API: add token-bucket limiter" \
   --objective "Implement per-client token-bucket limiting with unit and integration coverage" \
   --delivery-branch "api/token-bucket-limiter" --delivery pr \
-  --validate "go test ./..."
+  --validate "go test ./..." --review required
 
 # 3. Spawn attempt 1: lease, branch, generated brief, worker pane.
 sophon spawn <task-id>
@@ -59,6 +59,9 @@ sophon verify-complete <task-id>
 sophon validate <task-id>
 
 # 6. Deliver only with explicit operator confirmation.
+sophon review open <task-id> # required review opens after validation
+# Feedback wakes the commander and returns through the derived review actions.
+# Exact-head approval is evidence, never delivery confirmation.
 sophon deliver <task-id> --confirmed
 
 # 7. If review feedback corrects the same contract while the PR is open,
@@ -76,6 +79,8 @@ sophon status --all
 ```
 
 Other commands: `sophon monitor run|start|status --json|stop` (direct lifecycle for the optional private JSON-RPC notification transport), `sophon commander attach` (register the live commander's volatile Herdr wake/placement address so publications wake it and workers group into its workspace as tabs), `sophon worker progress` (send one sparse non-authoritative phase transition), `sophon spawn <task-id> --retry` (replace an attempt inside the current revision), `sophon release <task-id> --attempt <n>` (retire one historical copy), `sophon send <task-id> <message>` (queue an exact steer to an idle or running current worker), `sophon mission list` (durable mission history, unlike filtered operational status), `sophon version`.
+
+`sophon review set|open|status|feedback|classify|apply|acknowledge|reconcile|end` owns the local review lifecycle. Review posture is immutable intake (`off`, `optional`, or `required`) with monotonic typed escalation. Canonical attempt records contain only exact session/revision evidence—never the authenticated browser URL—and a crash-released single-owner bridge carries blocking Read the Code events into the existing notification monitor. See [Read the Code integration](docs/read-the-code-review.md).
 
 Workers write completion JSON only to the generated staging path. The CLI validates the complete schema and live head before atomically publishing canonical `result.json`:
 
@@ -99,6 +104,7 @@ After durable publication the CLI asks the healthy monitor to coalesce and forwa
   `revise` creates the next correction revision from an exact open-PR head.
   Stale evidence is preserved and refused loudly.
 - **Operator authority at the boundary.** Verification and validation are autonomous; every delivery effect requires `--confirmed`. There is no merge path.
+- **Exact local review when requested.** Required tasks cannot deliver until the current verified head has a canonical Read the Code approval later than all processed feedback. A new head invalidates old approval, and product cursor/status is rechecked immediately before delivery. Approval never substitutes for confirmation or grants a forge effect.
 - **Crash-safe external effects.** Delivery and release write typed intent before the effect and a receipt after; re-running converges to the same result.
 - **One continuing open PR.** A confirmed first delivery creates the PR. Each
   accepted same-contract correction needs new confirmation and normally
@@ -117,6 +123,7 @@ After durable publication the CLI asks the healthy monitor to coalesce and forwa
 
 - `docs/filesystem-protocol.md` — the authoritative design: layout, rules, and CLI surface.
 - `docs/notification-monitor.md` — versioned JSON-RPC framing, methods, bounds, lifecycle, and security model.
+- `docs/read-the-code-review.md` — external CLI contract, immutable review evidence, single-owner bridge, feedback actions, and delivery gate.
 - `docs/behavioral-contracts.md` — the commander and worker behavioral contracts implemented in `prompts/`.
 
 Named for the all-seeing sophons in *The Three-Body Problem*.

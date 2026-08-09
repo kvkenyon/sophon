@@ -17,6 +17,17 @@ const (
 	DeliveryBranch DeliveryMode = "branch"
 )
 
+// ReviewPosture is immutable task intake describing whether a local Read the
+// Code review participates in delivery eligibility. The empty value is read
+// as ReviewOff so tasks created before the field existed remain compatible.
+type ReviewPosture string
+
+const (
+	ReviewOff      ReviewPosture = "off"
+	ReviewOptional ReviewPosture = "optional"
+	ReviewRequired ReviewPosture = "required"
+)
+
 type VerificationResult struct {
 	Command  string `json:"command"`
 	ExitCode int    `json:"exit_code"`

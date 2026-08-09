@@ -25,11 +25,13 @@ import (
 	"sophon/internal/herdr"
 	"sophon/internal/id"
 	"sophon/internal/monitor"
+	"sophon/internal/readcode"
+	"sophon/internal/reviewbridge"
 	"sophon/internal/store"
 	runtimeprompts "sophon/prompts"
 )
 
-const version = "0.4.0-m1"
+const version = "0.5.0-m1"
 
 func main() {
 	if err := run(context.Background(), os.Args[1:]); err != nil {
@@ -61,6 +63,8 @@ func run(ctx context.Context, args []string) error {
 		return commanderCommand(ctx, args[1:])
 	case "monitor":
 		return monitorCommand(ctx, args[1:])
+	case "review":
+		return reviewCommand(ctx, args[1:])
 	case "verify-complete":
 		return verifyCompleteCommand(ctx, args[1:])
 	case "validate":
@@ -106,6 +110,7 @@ type toolConfig struct {
 	treehouse    string
 	git          string
 	ghAxi        string
+	readCode     string
 	herdrSession string
 }
 
@@ -114,7 +119,8 @@ func defaultTools() toolConfig {
 	if session == "" {
 		session = "default"
 	}
-	return toolConfig{herdr: "herdr", treehouse: "treehouse", git: "git", ghAxi: "gh-axi", herdrSession: session}
+	return toolConfig{herdr: "herdr", treehouse: "treehouse", git: "git", ghAxi: "gh-axi",
+		readCode: strings.TrimSpace(os.Getenv("SOPHON_READ_THE_CODE")), herdrSession: session}
 }
 
 func (t *toolConfig) bind(flags *flag.FlagSet, names ...string) {
@@ -128,6 +134,8 @@ func (t *toolConfig) bind(flags *flag.FlagSet, names ...string) {
 			flags.StringVar(&t.git, "git", t.git, "Git binary")
 		case "gh-axi":
 			flags.StringVar(&t.ghAxi, "gh-axi", t.ghAxi, "gh-axi binary")
+		case "read-the-code":
+			flags.StringVar(&t.readCode, "read-the-code", t.readCode, "configured read-the-code-axi executable (env SOPHON_READ_THE_CODE)")
 		case "herdr-session":
 			flags.StringVar(&t.herdrSession, "herdr-session", t.herdrSession, "Herdr session name (env HERDR_SESSION)")
 		}
@@ -137,6 +145,7 @@ func (t *toolConfig) bind(flags *flag.FlagSet, names ...string) {
 func (t toolConfig) flow() *flow.Flow {
 	panes := herdr.NewCommandAdapter(t.herdr, t.herdrSession, "sophon")
 	deps := flow.ProductionDeps(t.git, t.treehouse, t.ghAxi, panes)
+	deps.ReviewProduct = readcode.Client{Binary: t.readCode}
 	deps.HerdrSession = t.herdrSession
 	binary := t.herdr
 	deps.NewSessionPanes = func(session string) flow.SessionPanes {
@@ -236,6 +245,7 @@ func taskCreate(ctx context.Context, args []string) error {
 	kind := flags.String("kind", string(domain.TaskImplementation), "task kind")
 	delivery := flags.String("delivery", string(domain.DeliveryBranch), "delivery mode (branch|pr)")
 	validate := flags.String("validate", "", "required validation command")
+	review := flags.String("review", string(domain.ReviewOff), "Read the Code posture (off|optional|required)")
 	positional, err := parseFlags(flags, args)
 	if err != nil {
 		return err
@@ -244,7 +254,7 @@ func taskCreate(ctx context.Context, args []string) error {
 		return errors.New("task create does not accept positional arguments")
 	}
 	created, err := flow.New(flow.Deps{}).CreateTask(ctx, *missionID, *title, *objective, *deliveryBranch,
-		domain.TaskKind(*kind), domain.DeliveryMode(*delivery), *validate)
+		domain.TaskKind(*kind), domain.DeliveryMode(*delivery), *validate, domain.ReviewPosture(*review))
 	if err != nil {
 		return err
 	}
@@ -401,6 +411,467 @@ func commanderAttach(ctx context.Context, args []string) error {
 		return err
 	}
 	return encode(registration)
+}
+
+func reviewCommand(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return &exitError{2, errors.New("expected: sophon review set|open|status|feedback|classify|apply|acknowledge|reconcile|end")}
+	}
+	switch args[0] {
+	case "set":
+		return reviewSet(ctx, args[1:])
+	case "open":
+		return reviewOpen(ctx, args[1:])
+	case "status":
+		return reviewStatus(ctx, args[1:])
+	case "feedback":
+		return reviewFeedback(ctx, args[1:])
+	case "classify":
+		return reviewClassify(ctx, args[1:])
+	case "apply":
+		return reviewApply(ctx, args[1:])
+	case "acknowledge":
+		return reviewAcknowledge(ctx, args[1:])
+	case "reconcile":
+		return reviewReconcile(ctx, args[1:])
+	case "end":
+		return reviewEnd(ctx, args[1:])
+	case "bridge":
+		return reviewBridge(ctx, args[1:])
+	default:
+		return &exitError{2, fmt.Errorf("unknown review command %q", args[0])}
+	}
+}
+
+func reviewSet(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("review set", flag.ContinueOnError)
+	posture := flags.String("posture", "", "review posture escalation (optional|required)")
+	jsonOutput := flags.Bool("json", false, "emit versioned JSON")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("review set requires TASK --posture optional|required")
+	}
+	record, err := flow.New(flow.Deps{}).SetReviewPosture(ctx, positional[0], domain.ReviewPosture(*posture))
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return encode(record)
+	}
+	fmt.Printf("task %s review posture: %s -> %s\n", record.TaskID, record.From, record.To)
+	return nil
+}
+
+func reviewOpen(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("review open", flag.ContinueOnError)
+	attempt := flags.Int("attempt", 0, "exact current attempt (defaults to current)")
+	noBrowser := flags.Bool("no-browser", false, "do not launch the browser")
+	jsonOutput := flags.Bool("json", false, "emit versioned JSON including the local capability URL")
+	tools.bind(flags, "read-the-code", "git", "herdr", "herdr-session")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 || *attempt < 0 {
+		return errors.New("review open requires one TASK and an optional positive --attempt")
+	}
+	result, err := tools.flow().ReviewOpen(ctx, positional[0], *attempt, *noBrowser)
+	if err != nil {
+		return err
+	}
+	if err := ensureReviewBridge(result.TaskID, result.Attempt, tools); err != nil {
+		return fmt.Errorf("review opened but event bridge did not acquire its exact owner: %w", err)
+	}
+	if *jsonOutput {
+		return encode(result)
+	}
+	fmt.Printf("%s review %s for task %s attempt %d (%s..%s)\n", map[bool]string{true: "Resumed", false: "Opened"}[result.Resumed],
+		result.SessionID, result.TaskID, result.Attempt, result.BaseSHA[:10], result.HeadSHA[:10])
+	if *noBrowser {
+		// This is the only non-JSON surface that returns the bearer URL, directly
+		// to the local operator who explicitly requested a no-browser open.
+		fmt.Println(result.BrowserURL)
+	}
+	return nil
+}
+
+func reviewStatus(_ context.Context, args []string) error {
+	flags := flag.NewFlagSet("review status", flag.ContinueOnError)
+	jsonOutput := flags.Bool("json", false, "emit versioned JSON")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("review status requires exactly one task ID")
+	}
+	status, err := flow.New(flow.Deps{}).ReviewStatus(positional[0])
+	if err != nil {
+		return err
+	}
+	if status.SessionID != "" {
+		home, homeErr := datahome.AbsDir()
+		task, taskErr := store.FindTask(status.TaskID)
+		if homeErr == nil && taskErr == nil {
+			binding, bindingErr := store.ReadReviewBinding(task.MissionID, task.ID, status.Attempt)
+			if bindingErr == nil {
+				status.BridgeRunning, _ = reviewbridge.Running(home, reviewbridge.Expected(home, binding))
+			}
+		}
+	}
+	if *jsonOutput {
+		return encode(status)
+	}
+	fmt.Printf("task %s attempt %d review %s (%s), cursor %d\n", status.TaskID, status.Attempt, status.State, status.Posture, status.Cursor)
+	return nil
+}
+
+func reviewFeedback(_ context.Context, args []string) error {
+	flags := flag.NewFlagSet("review feedback", flag.ContinueOnError)
+	after := flags.Int("after", 0, "return feedback after this durable sequence")
+	limit := flags.Int("limit", 20, "maximum feedback submissions (1-100)")
+	attempt := flags.Int("attempt", 0, "current or historical task attempt (defaults to current)")
+	jsonOutput := flags.Bool("json", false, "emit bounded structured feedback JSON")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("review feedback requires exactly one task ID")
+	}
+	result, err := flow.New(flow.Deps{}).ReviewFeedback(positional[0], *after, *limit, *attempt)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return encode(result)
+	}
+	fmt.Printf("task %s attempt %d exact review %s..%s; %d feedback submission(s), cursor %d\n",
+		result.TaskID, result.Attempt, result.BaseSHA[:10], result.HeadSHA[:10], len(result.Events), result.Cursor)
+	for _, event := range result.Events {
+		fmt.Printf("sequence %d: %d comment(s); use --json to read bounded untrusted comment data\n", event.Sequence, len(event.Comments))
+	}
+	return nil
+}
+
+func reviewClassify(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("review classify", flag.ContinueOnError)
+	sequence := flags.Int("sequence", 0, "exact feedback sequence")
+	disposition := flags.String("disposition", "", "requested-changes|non-actionable")
+	jsonOutput := flags.Bool("json", false, "emit versioned JSON")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("review classify requires exactly one task ID")
+	}
+	record, err := defaultTools().flow().ClassifyReviewFeedback(ctx, positional[0], *sequence, *disposition)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return encode(record)
+	}
+	fmt.Printf("task %s review feedback sequence %d classified %s\n", record.TaskID, record.Sequence, record.Disposition)
+	return nil
+}
+
+func reviewApply(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("review apply", flag.ContinueOnError)
+	sequence := flags.Int("sequence", 0, "exact requested-change feedback sequence")
+	jsonOutput := flags.Bool("json", false, "emit versioned JSON")
+	tools.bind(flags, "herdr", "herdr-session")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("review apply requires exactly one task ID")
+	}
+	record, err := tools.flow().ApplyReviewFeedback(ctx, positional[0], *sequence)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return encode(record)
+	}
+	fmt.Printf("task %s review feedback sequence %d routed to exact attempt %d worker\n", record.TaskID, record.Sequence, record.Attempt)
+	return nil
+}
+
+func reviewAcknowledge(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("review acknowledge", flag.ContinueOnError)
+	sequence := flags.Int("sequence", 0, "exact approval sequence")
+	jsonOutput := flags.Bool("json", false, "emit versioned JSON")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("review acknowledge requires exactly one task ID")
+	}
+	record, err := flow.New(flow.Deps{}).AcknowledgeReviewApproval(ctx, positional[0], *sequence)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return encode(record)
+	}
+	fmt.Printf("task %s exact head %s approval sequence %d acknowledged; delivery still requires separate confirmation\n",
+		record.TaskID, record.HeadSHA[:10], record.Sequence)
+	return nil
+}
+
+func reviewReconcile(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("review reconcile", flag.ContinueOnError)
+	jsonOutput := flags.Bool("json", false, "emit versioned JSON")
+	tools.bind(flags, "read-the-code", "herdr", "herdr-session")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("review reconcile requires exactly one task ID")
+	}
+	home, err := datahome.AbsDir()
+	if err != nil {
+		return err
+	}
+	task, err := store.FindTask(positional[0])
+	if err != nil {
+		return err
+	}
+	binding, err := store.ReadReviewBinding(task.MissionID, task.ID, task.CurrentAttempt)
+	if err != nil {
+		return err
+	}
+	// Manual reconciliation and the long-lived bridge share the same kernel
+	// owner. A live bridge remains the sole poll consumer; a crashed/missing
+	// bridge leaves the lock free so this command catches up durably.
+	lease, acquired, err := reviewbridge.Acquire(home, reviewbridge.Expected(home, binding))
+	if err != nil {
+		return err
+	}
+	if !acquired {
+		return errors.New("the exact review bridge currently owns blocking poll; no concurrent reconcile consumer was started")
+	}
+	result, err := tools.flow().ReviewReconcile(ctx, positional[0])
+	if err != nil {
+		_ = lease.Release()
+		return err
+	}
+	if len(result.Ingested) > 0 {
+		notifyDurableChange(ctx, tools.flow(), result.TaskID, result.Attempt, monitor.ChangeReview)
+	}
+	if err := lease.Release(); err != nil {
+		return err
+	}
+	if !result.Ended {
+		if err := ensureReviewBridge(result.TaskID, result.Attempt, tools); err != nil {
+			return err
+		}
+	}
+	if *jsonOutput {
+		return encode(result)
+	}
+	fmt.Printf("task %s review reconciled through cursor %d (%d new event(s))\n", result.TaskID, result.Cursor, len(result.Ingested))
+	return nil
+}
+
+func reviewEnd(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("review end", flag.ContinueOnError)
+	jsonOutput := flags.Bool("json", false, "emit versioned JSON")
+	tools.bind(flags, "read-the-code", "herdr", "herdr-session")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("review end requires exactly one task ID")
+	}
+	result, err := tools.flow().ReviewEnd(ctx, positional[0])
+	if err != nil {
+		return err
+	}
+	if len(result.Ingested) > 0 {
+		notifyDurableChange(ctx, tools.flow(), result.TaskID, result.Attempt, monitor.ChangeReview)
+	}
+	if *jsonOutput {
+		return encode(result)
+	}
+	fmt.Printf("ended task %s review at durable cursor %d; canonical evidence was preserved\n", result.TaskID, result.Cursor)
+	return nil
+}
+
+func ensureReviewBridge(taskID string, attempt int, tools toolConfig) error {
+	home, err := datahome.AbsDir()
+	if err != nil {
+		return err
+	}
+	task, err := store.FindTask(taskID)
+	if err != nil {
+		return err
+	}
+	binding, err := store.ReadReviewBinding(task.MissionID, taskID, attempt)
+	if err != nil {
+		return err
+	}
+	expected := reviewbridge.Expected(home, binding)
+	if running, err := reviewbridge.Running(home, expected); err != nil {
+		return err
+	} else if running {
+		return nil
+	}
+	if strings.TrimSpace(tools.readCode) == "" {
+		return errors.New("Read the Code executable is not configured; use --read-the-code or SOPHON_READ_THE_CODE")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer devNull.Close()
+	command := exec.Command(executable, "review", "bridge", taskID, "--attempt", fmt.Sprint(attempt),
+		"--read-the-code", tools.readCode, "--herdr", tools.herdr, "--herdr-session", tools.herdrSession)
+	command.Env = assignedDataHomeEnv(os.Environ(), home)
+	command.Stdin, command.Stdout, command.Stderr = nil, devNull, devNull
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("start review bridge: %w", err)
+	}
+	_ = command.Process.Release()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		running, checkErr := reviewbridge.Running(home, expected)
+		if checkErr != nil {
+			return checkErr
+		}
+		if running {
+			return nil
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return errors.New("review bridge child did not acquire the exact owner within 3s")
+}
+
+func reviewBridge(ctx context.Context, args []string) error {
+	tools := defaultTools()
+	flags := flag.NewFlagSet("review bridge", flag.ContinueOnError)
+	attempt := flags.Int("attempt", 0, "exact attempt")
+	tools.bind(flags, "read-the-code", "herdr", "herdr-session")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 || *attempt < 1 {
+		return errors.New("review bridge requires one task ID and a positive --attempt")
+	}
+	home, err := datahome.AbsDir()
+	if err != nil {
+		return err
+	}
+	task, err := store.FindTask(positional[0])
+	if err != nil || task.CurrentAttempt != *attempt {
+		return errors.New("review bridge target is not the exact current task attempt")
+	}
+	binding, err := store.ReadReviewBinding(task.MissionID, task.ID, *attempt)
+	if err != nil {
+		return err
+	}
+	lease, acquired, err := reviewbridge.Acquire(home, reviewbridge.Expected(home, binding))
+	if err != nil {
+		return err
+	}
+	if !acquired {
+		return nil
+	}
+	defer lease.Release()
+	signalCtx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	product := readcode.Client{Binary: tools.readCode}
+	for signalCtx.Err() == nil {
+		current, currentErr := reviewBridgeCurrent(task.ID, *attempt, binding)
+		if currentErr != nil || !current {
+			return currentErr
+		}
+		cursor, err := store.ReviewCursor(task.MissionID, task.ID, *attempt)
+		if err != nil {
+			return err
+		}
+		polled, err := product.Poll(signalCtx, binding.SessionID, cursor, 30*time.Second)
+		if err != nil {
+			return err
+		}
+		current, currentErr = reviewBridgeCurrent(task.ID, *attempt, binding)
+		if currentErr != nil || !current {
+			return currentErr
+		}
+		if len(polled.Events) > 0 {
+			ingested, ended, err := tools.flow().IngestReviewEvents(signalCtx, task.ID, *attempt, binding, polled.Events)
+			if err != nil {
+				return err
+			}
+			if len(ingested) > 0 {
+				notifyDurableChange(signalCtx, tools.flow(), task.ID, *attempt, monitor.ChangeReview)
+			}
+			if ended {
+				return nil
+			}
+			cursor = polled.NextCursor
+		}
+		productStatus, err := product.Status(signalCtx, binding.SessionID)
+		if err != nil {
+			return err
+		}
+		if productStatus.Status != "open" || productStatus.Stale || productStatus.ApprovalStale ||
+			productStatus.BaseSHA != binding.BaseSHA || productStatus.HeadSHA != binding.HeadSHA ||
+			productStatus.LastSequence != cursor {
+			return fmt.Errorf("%w: blocking bridge observed product session/revision/cursor drift", flow.ErrReviewReconcile)
+		}
+	}
+	return signalCtx.Err()
+}
+
+func reviewBridgeCurrent(taskID string, attempt int, binding store.ReviewBinding) (bool, error) {
+	task, err := store.FindTask(taskID)
+	if err != nil || task.CurrentAttempt != attempt {
+		return false, nil
+	}
+	current, err := store.ReadReviewBinding(task.MissionID, task.ID, attempt)
+	if err != nil {
+		return false, err
+	}
+	if current.SessionID != binding.SessionID || current.BaseSHA != binding.BaseSHA || current.HeadSHA != binding.HeadSHA ||
+		current.TaskID != binding.TaskID || current.Attempt != binding.Attempt {
+		return false, errors.New("review bridge canonical binding was replaced or conflicted")
+	}
+	if _, err := store.ReadRelease(task.MissionID, task.ID, attempt); err == nil {
+		return false, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return false, err
+	}
+	if delivery, err := store.ReadDelivery(task.MissionID, task.ID, attempt); err == nil && delivery.State.Terminal() {
+		return false, nil
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return false, err
+	}
+	return !reviewEndedForCLI(task), nil
+}
+
+func reviewEndedForCLI(task store.Task) bool {
+	events, err := store.ReadReviewEvents(task.MissionID, task.ID, task.CurrentAttempt)
+	return err == nil && len(events) > 0 && events[len(events)-1].Type == "end"
 }
 
 type monitorForwarder struct{ flow *flow.Flow }
@@ -753,7 +1224,7 @@ func deliverCommand(ctx context.Context, args []string) error {
 	tools := defaultTools()
 	flags := flag.NewFlagSet("deliver", flag.ContinueOnError)
 	confirmed := flags.Bool("confirmed", false, "operator confirmation for the delivery effect")
-	tools.bind(flags, "git", "gh-axi")
+	tools.bind(flags, "git", "gh-axi", "read-the-code")
 	positional, err := parseFlags(flags, args)
 	if err != nil {
 		return err
@@ -895,7 +1366,7 @@ func usage() {
   sophon version
   sophon mission create --project PATH --title TITLE --objective OBJECTIVE
   sophon mission list [--json]
-  sophon task create --mission ID --title PUBLIC_TITLE --objective WORKER_OBJECTIVE --delivery-branch PUBLIC_BRANCH [--kind KIND] [--delivery branch|pr] [--validate COMMAND]
+  sophon task create --mission ID --title PUBLIC_TITLE --objective WORKER_OBJECTIVE --delivery-branch PUBLIC_BRANCH [--kind KIND] [--delivery branch|pr] [--validate COMMAND] [--review off|optional|required]
   sophon spawn TASK [--retry] [--herdr BIN] [--treehouse BIN] [--git BIN] [--herdr-session NAME]
   sophon revise TASK --reason REASON --objective CORRECTION [--accept-external-head] [--herdr BIN] [--treehouse BIN] [--git BIN] [--gh-axi BIN] [--herdr-session NAME]
   sophon worker complete TASK --attempt N --head-sha SHA --result FILE [--git BIN] [--herdr BIN]
@@ -905,9 +1376,18 @@ func usage() {
   sophon monitor run|start [--herdr BIN]
   sophon monitor status [--json]
   sophon monitor stop
+  sophon review set TASK --posture optional|required [--json]
+  sophon review open TASK [--attempt N] [--no-browser] [--json] [--read-the-code BIN]
+  sophon review status TASK [--json]
+  sophon review feedback TASK [--attempt N] [--after N] [--limit N] [--json]
+  sophon review classify TASK --sequence N --disposition requested-changes|non-actionable [--json]
+  sophon review apply TASK --sequence N [--json] [--herdr BIN] [--herdr-session NAME]
+  sophon review acknowledge TASK --sequence N [--json]
+  sophon review reconcile TASK [--json] [--read-the-code BIN]
+  sophon review end TASK [--json] [--read-the-code BIN]
   sophon verify-complete TASK [--git BIN] [--treehouse BIN] [--herdr BIN]
   sophon validate TASK [--git BIN] [--herdr BIN]
-  sophon deliver TASK --confirmed [--git BIN] [--gh-axi BIN]
+  sophon deliver TASK --confirmed [--git BIN] [--gh-axi BIN] [--read-the-code BIN]
   sophon release TASK [--attempt N] [--treehouse BIN]
   sophon status [--json] [--all] [--herdr BIN] [--git BIN] [--gh-axi BIN] [--herdr-session NAME]
   sophon send TASK MESSAGE [--herdr BIN] [--herdr-session NAME]

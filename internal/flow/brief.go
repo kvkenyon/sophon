@@ -33,6 +33,10 @@ func (f *Flow) renderBrief(homeDir string, mission store.Mission, task store.Tas
 	if validationCommand == "" {
 		validationCommand = "none configured"
 	}
+	reviewPosture, err := store.EffectiveReviewPosture(task)
+	if err != nil {
+		return "", fmt.Errorf("derive task review posture: %w", err)
+	}
 
 	var body strings.Builder
 	body.WriteString(common)
@@ -54,6 +58,7 @@ func (f *Flow) renderBrief(homeDir string, mission store.Mission, task store.Tas
 	fmt.Fprintf(&body, "- Branch: `%s`\n", branch)
 	fmt.Fprintf(&body, "- Base SHA: `%s`\n", baseSHA)
 	fmt.Fprintf(&body, "- Delivery mode: `%s`\n", task.DeliveryMode)
+	fmt.Fprintf(&body, "- Read the Code review: `%s`\n", reviewPosture)
 	fmt.Fprintf(&body, "- Validation command: `%s`\n", validationCommand)
 	body.WriteString("\n## Objective\n\n")
 	body.WriteString(strings.TrimSpace(task.Objective))

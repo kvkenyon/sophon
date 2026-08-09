@@ -41,6 +41,7 @@ type testRig struct {
 	delGit   *fakeDeliveryGit
 	remote   *fakeDeliveryRemote
 	validate *fakeValidator
+	review   *fakeReviewProduct
 }
 
 func newRig() *testRig {
@@ -52,11 +53,13 @@ func newRig() *testRig {
 		delGit:   &fakeDeliveryGit{repository: testRepo},
 		remote:   &fakeDeliveryRemote{headSHA: testHeadSHA},
 		validate: &fakeValidator{result: validation.Result{Status: validation.Passed, ExitCode: 0}},
+		review:   &fakeReviewProduct{},
 	}
 	rig.flow = New(Deps{
 		Git: rig.git, Leases: rig.leases, Panes: rig.panes,
 		DeliveryGit: rig.delGit, DeliveryRemote: rig.remote,
-		NewValidator: func(string) Validator { return rig.validate },
+		ReviewProduct: rig.review,
+		NewValidator:  func(string) Validator { return rig.validate },
 	})
 	return rig
 }

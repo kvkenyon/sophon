@@ -69,17 +69,18 @@ type Mission struct {
 
 // Task is durable task intent plus the current-attempt incarnation token.
 type Task struct {
-	ID                string              `json:"id"`
-	MissionID         string              `json:"mission_id"`
-	Title             string              `json:"title"`
-	Objective         string              `json:"objective"`
-	DeliveryBranch    string              `json:"delivery_branch"`
-	Kind              domain.TaskKind     `json:"kind"`
-	DeliveryMode      domain.DeliveryMode `json:"delivery_mode"`
-	ValidationCommand string              `json:"validation_command,omitempty"`
-	CurrentAttempt    int                 `json:"current_attempt"`
-	CurrentRevision   int                 `json:"current_revision"`
-	CreatedAt         time.Time           `json:"created_at"`
+	ID                string               `json:"id"`
+	MissionID         string               `json:"mission_id"`
+	Title             string               `json:"title"`
+	Objective         string               `json:"objective"`
+	DeliveryBranch    string               `json:"delivery_branch"`
+	Kind              domain.TaskKind      `json:"kind"`
+	DeliveryMode      domain.DeliveryMode  `json:"delivery_mode"`
+	ReviewPosture     domain.ReviewPosture `json:"review_posture,omitempty"`
+	ValidationCommand string               `json:"validation_command,omitempty"`
+	CurrentAttempt    int                  `json:"current_attempt"`
+	CurrentRevision   int                  `json:"current_revision"`
+	CreatedAt         time.Time            `json:"created_at"`
 }
 
 // Spawn is the spawn receipt for one attempt, written only after every
@@ -702,6 +703,10 @@ func CreateTask(task Task) error {
 	if task.DeliveryMode != domain.DeliveryBranch && task.DeliveryMode != domain.DeliveryPR {
 		return fmt.Errorf("task intent has unknown delivery mode %q", task.DeliveryMode)
 	}
+	if task.ReviewPosture != "" && task.ReviewPosture != domain.ReviewOff &&
+		task.ReviewPosture != domain.ReviewOptional && task.ReviewPosture != domain.ReviewRequired {
+		return fmt.Errorf("task intent has unknown review posture %q", task.ReviewPosture)
+	}
 	if task.CurrentAttempt != 0 || task.CurrentRevision != 0 || task.CreatedAt.IsZero() {
 		return errors.New("new task intent requires attempt/revision zero and a creation time")
 	}
@@ -881,12 +886,14 @@ type RevisionStatus struct {
 // TaskStatus is the read-time derivation of one task's lifecycle from its
 // canonical records alone.
 type TaskStatus struct {
-	Task      Task             `json:"task"`
-	Attempt   int              `json:"attempt"`
-	Revision  int              `json:"revision"`
-	State     string           `json:"state"`
-	Detail    string           `json:"detail,omitempty"`
-	Revisions []RevisionStatus `json:"revisions,omitempty"`
+	Task          Task             `json:"task"`
+	Attempt       int              `json:"attempt"`
+	Revision      int              `json:"revision"`
+	State         string           `json:"state"`
+	Detail        string           `json:"detail,omitempty"`
+	Revisions     []RevisionStatus `json:"revisions,omitempty"`
+	Review        ReviewStatus     `json:"review"`
+	ReviewHistory []ReviewStatus   `json:"review_history,omitempty"`
 	// DeliveryState preserves whether released historical work had previously
 	// been delivered. Release itself never implies delivery.
 	DeliveryState string `json:"delivery_state,omitempty"`

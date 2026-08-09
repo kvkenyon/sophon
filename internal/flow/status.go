@@ -10,6 +10,7 @@ import (
 	"sophon/internal/datahome"
 	"sophon/internal/delivery"
 	"sophon/internal/domain"
+	"sophon/internal/reviewbridge"
 	"sophon/internal/store"
 	"sophon/internal/treehouse"
 )
@@ -85,12 +86,17 @@ type MissionStatus struct {
 	Tasks   []store.TaskStatus `json:"tasks"`
 }
 
-// Action kinds a commander can execute deterministically, derived from
-// records alone. Verification and validation are commander-owned routine
-// work; delivery decisions and recovery judgment never appear here.
+// Action kinds a commander can execute deterministically. Lifecycle actions
+// derive from records; review-reconcile may additionally derive from a
+// missing volatile bridge, whose absence costs latency but no truth.
 const (
-	ActionVerifyComplete = "verify-complete"
-	ActionValidate       = "validate"
+	ActionVerifyComplete  = "verify-complete"
+	ActionValidate        = "validate"
+	ActionOpenReview      = "open-review"
+	ActionReadReview      = "read-review-feedback"
+	ActionApplyReview     = "apply-review-feedback"
+	ActionReviewApproved  = "review-approved"
+	ActionReviewReconcile = "review-reconcile"
 )
 
 // Action is one currently authorized deterministic commander action with the
@@ -104,7 +110,7 @@ type Action struct {
 }
 
 // Report is the full read-time status across every mission plus the derived
-// action queue. The queue is truth from the same records, never a hint.
+// action queue. Every action is an exact bounded command, never prose truth.
 type Report struct {
 	Missions []MissionStatus `json:"missions"`
 	Actions  []Action        `json:"actions"`
@@ -119,15 +125,20 @@ type Report struct {
 // (pass or fail) is terminal for the queue: a failure needs commander
 // judgment (correction routing), never a blind re-run. By default released
 // tasks and released-only missions are filtered; includeReleased=true selects
-// immutable history. Attention, invalid evidence, and release yield no action.
+// immutable history. Attention and invalid task evidence yield no lifecycle
+// action; invalid review evidence may yield only an exact reconcile action.
 func (f *Flow) Status(ctx context.Context, includeReleased ...bool) (Report, error) {
 	showAll := len(includeReleased) > 0 && includeReleased[0]
+	homeDir, err := datahome.AbsDir()
+	if err != nil {
+		return Report{}, err
+	}
 	missions, err := store.ListMissions()
 	if err != nil {
 		return Report{}, err
 	}
 	report := Report{Missions: make([]MissionStatus, 0, len(missions))}
-	var verify, validate []Action
+	var verify, validate, reviews []Action
 	for _, mission := range missions {
 		entry := MissionStatus{Mission: mission}
 		tasks, err := store.ListTasks(mission.ID)
@@ -156,6 +167,23 @@ func (f *Flow) Status(ctx context.Context, includeReleased ...bool) (Report, err
 					return Report{}, err
 				}
 			}
+			status.Review = DeriveReview(task)
+			if status.Review.SessionID != "" && !status.Review.Ended {
+				if binding, bindingErr := store.ReadReviewBinding(task.MissionID, task.ID, status.Review.Attempt); bindingErr == nil {
+					status.Review.BridgeRunning, _ = reviewbridge.Running(homeDir, reviewbridge.Expected(homeDir, binding))
+				}
+			}
+			if showAll {
+				for attempt := 1; attempt <= task.CurrentAttempt; attempt++ {
+					if _, err := store.ReadReviewBinding(task.MissionID, task.ID, attempt); err == nil {
+						status.ReviewHistory = append(status.ReviewHistory, deriveReviewAttempt(task, attempt))
+					} else if !errors.Is(err, store.ErrNotFound) {
+						status.ReviewHistory = append(status.ReviewHistory, store.ReviewStatus{Version: 1,
+							TaskID: task.ID, Attempt: attempt, State: "invalid-evidence",
+							Detail: "historical review binding evidence is invalid"})
+					}
+				}
+			}
 			if status.State == store.StateReleased && !showAll {
 				continue
 			}
@@ -172,12 +200,17 @@ func (f *Flow) Status(ctx context.Context, includeReleased ...bool) (Report, err
 					return Report{}, err
 				}
 			}
+			if status.State != store.StateReleased && status.State != store.StateDelivered {
+				reviews = append(reviews, reviewActions(task, status.Review)...)
+			}
 		}
 		if showAll || len(entry.Tasks) > 0 {
 			report.Missions = append(report.Missions, entry)
 		}
 	}
-	report.Actions = append(verify, validate...)
+	report.Actions = append(report.Actions, verify...)
+	report.Actions = append(report.Actions, validate...)
+	report.Actions = append(report.Actions, reviews...)
 	return report, nil
 }
 
@@ -259,6 +292,38 @@ func (f *Flow) augmentPullRequest(ctx context.Context, mission store.Mission, st
 	return status
 }
 
+func reviewActions(task store.Task, review store.ReviewStatus) []Action {
+	var actions []Action
+	switch review.State {
+	case "ready-to-open":
+		if review.Posture == "required" {
+			actions = append(actions, Action{TaskID: task.ID, Kind: ActionOpenReview,
+				Command: "sophon review open " + task.ID})
+		}
+	case "invalid-evidence", "stale":
+		actions = append(actions, Action{TaskID: task.ID, Kind: ActionReviewReconcile,
+			Command: "sophon review reconcile " + task.ID + " --json"})
+	}
+	if review.SessionID != "" && !review.Ended && !review.BridgeRunning &&
+		review.State != "invalid-evidence" && review.State != "stale" {
+		actions = append(actions, Action{TaskID: task.ID, Kind: ActionReviewReconcile,
+			Command: "sophon review reconcile " + task.ID + " --json"})
+	}
+	for _, sequence := range review.PendingFeedbackSequences {
+		actions = append(actions, Action{TaskID: task.ID, Kind: ActionReadReview,
+			Command: fmt.Sprintf("sophon review feedback %s --after %d --limit 1 --json", task.ID, sequence-1)})
+	}
+	for _, sequence := range review.UnroutedChangeSequences {
+		actions = append(actions, Action{TaskID: task.ID, Kind: ActionApplyReview,
+			Command: fmt.Sprintf("sophon review apply %s --sequence %d --json", task.ID, sequence)})
+	}
+	if review.ApprovalEligible && !review.ApprovalAcknowledged {
+		actions = append(actions, Action{TaskID: task.ID, Kind: ActionReviewApproved,
+			Command: fmt.Sprintf("sophon review acknowledge %s --sequence %d --json", task.ID, review.LatestApprovalSequence)})
+	}
+	return actions
+}
+
 // augmentActive observes the current attempt's pane live; adapter failures
 // degrade to unknown-pane rather than an error.
 func (f *Flow) augmentActive(ctx context.Context, status store.TaskStatus) store.TaskStatus {
@@ -283,6 +348,19 @@ func (f *Flow) augmentActive(ctx context.Context, status store.TaskStatus) store
 // Send submits to the current attempt's exact worker pane with a message and persists
 // the (possibly replaced) pane placement back into spawn.json.
 func (f *Flow) Send(ctx context.Context, taskID, message string) error {
+	return f.sendExact(ctx, taskID, 0, message)
+}
+
+// SendExact is the review-correction steering boundary. It refuses if the
+// task has moved away from the classified attempt before any Herdr effect.
+func (f *Flow) SendExact(ctx context.Context, taskID string, attempt int, message string) error {
+	if attempt < 1 {
+		return errors.New("send exact requires a positive attempt")
+	}
+	return f.sendExact(ctx, taskID, attempt, message)
+}
+
+func (f *Flow) sendExact(ctx context.Context, taskID string, expectedAttempt int, message string) error {
 	if f.deps.Panes == nil {
 		return errors.New("flow is not fully configured for send")
 	}
@@ -301,6 +379,9 @@ func (f *Flow) Send(ctx context.Context, taskID, message string) error {
 	attempt, err := currentAttempt(task)
 	if err != nil {
 		return err
+	}
+	if expectedAttempt > 0 && attempt != expectedAttempt {
+		return fmt.Errorf("send target attempt %d is stale; current attempt is %d", expectedAttempt, attempt)
 	}
 	spawn, err := store.ReadSpawn(task.MissionID, taskID, attempt)
 	if err != nil {

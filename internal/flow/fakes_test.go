@@ -4,13 +4,65 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"sophon/internal/delivery"
 	gitcontrol "sophon/internal/git"
 	"sophon/internal/herdr"
+	"sophon/internal/readcode"
 	"sophon/internal/treehouse"
 	"sophon/internal/validation"
 )
+
+type fakeReviewProduct struct {
+	mu          sync.Mutex
+	open        readcode.OpenResult
+	openErr     error
+	status      readcode.StatusResult
+	statusErr   error
+	polls       []readcode.PollResult
+	pollErr     error
+	end         readcode.EndResult
+	endErr      error
+	openRequest readcode.OpenRequest
+	statusCalls int
+	pollAfter   []int
+}
+
+func (p *fakeReviewProduct) Open(_ context.Context, request readcode.OpenRequest) (readcode.OpenResult, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.openRequest = request
+	return p.open, p.openErr
+}
+
+func (p *fakeReviewProduct) Status(_ context.Context, _ string) (readcode.StatusResult, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.statusCalls++
+	return p.status, p.statusErr
+}
+
+func (p *fakeReviewProduct) Poll(_ context.Context, _ string, after int, _ time.Duration) (readcode.PollResult, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pollAfter = append(p.pollAfter, after)
+	if p.pollErr != nil {
+		return readcode.PollResult{}, p.pollErr
+	}
+	if len(p.polls) == 0 {
+		return readcode.PollResult{SchemaVersion: 1, SessionID: p.open.SessionID, After: after, NextCursor: after, TimedOut: true}, nil
+	}
+	result := p.polls[0]
+	p.polls = p.polls[1:]
+	return result, nil
+}
+
+func (p *fakeReviewProduct) End(_ context.Context, _ string) (readcode.EndResult, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.end, p.endErr
+}
 
 // fakeGit serves scripted Git answers keyed by worktree path.
 type fakeGit struct {

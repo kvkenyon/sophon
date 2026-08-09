@@ -69,6 +69,9 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return store.Delivery{}, err
 	}
+	if err := f.requireReviewDelivery(ctx, task, outcome); err != nil {
+		return store.Delivery{}, err
+	}
 	spawn, err := store.ReadSpawn(task.MissionID, taskID, attempt)
 	if err != nil {
 		return store.Delivery{}, err
@@ -167,6 +170,12 @@ func (f *Flow) deliverFirst(ctx context.Context, task store.Task, spawn store.Sp
 	}
 	if err := store.Publish(deliveryPath, intent); err != nil {
 		return store.Delivery{}, fmt.Errorf("publish delivery intent: %w", err)
+	}
+	// Required review is rechecked after intent publication and immediately
+	// before the first external write. Approval is evidence for this exact
+	// head only; it never substitutes for --confirmed or grants push/PR power.
+	if err := f.requireReviewDelivery(ctx, task, outcome); err != nil {
+		return store.Delivery{}, err
 	}
 	if !branchExists {
 		if err := f.deps.DeliveryRemote.Push(ctx, repository, spawn.WorktreePath, task.DeliveryBranch, outcome.HeadSHA); err != nil {

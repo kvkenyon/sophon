@@ -69,7 +69,7 @@ file or replay record.
 
 Params: `protocol_version`, `generation`, `task_id`, positive `attempt`,
 `change`, and `change_generation`. Change is exactly `completion`, `report`,
-`verification`, `validation`, `delivery`, or `release`. `change_generation` is
+`verification`, `validation`, `review`, `delivery`, or `release`. `change_generation` is
 the lowercase SHA-256 of that canonical record's bytes. The monitor rereads
 the current task, spawn, and typed record; validates exact identity, conflict
 rules, terminal delivery/release fields, and the digest; then coalesces the
@@ -80,6 +80,15 @@ The attempt's canonical `spawn.json` supplies its immutable revision identity.
 A correction completion therefore uses the same method and fencing as initial
 work; forwarding re-derives `correction-ready` and drains the ordinary
 verify-complete/validate action queue. The monitor adds no revision authority.
+
+For `review`, the canonical record is the latest contiguous immutable review
+event. The digest may reflect comment bytes, but only the digest and fixed
+`change: review` value cross JSON-RPC; session capability, path, and comment
+text never do. The monitor does not poll Read the Code, remember its cursor,
+start/restart its bridge, classify feedback, or decide approval. The separate
+single-owner bridge described in `docs/read-the-code-review.md` performs the
+blocking external wait and canonical publication before calling this existing
+method.
 
 ### `monitor.shutdown`
 

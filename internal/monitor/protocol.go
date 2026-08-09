@@ -118,6 +118,7 @@ const (
 	ChangeReport       = "report"
 	ChangeVerification = "verification"
 	ChangeValidation   = "validation"
+	ChangeReview       = "review"
 	ChangeDelivery     = "delivery"
 	ChangeRelease      = "release"
 )
@@ -127,6 +128,7 @@ var changes = map[string]bool{
 	ChangeReport:       true,
 	ChangeVerification: true,
 	ChangeValidation:   true,
+	ChangeReview:       true,
 	ChangeDelivery:     true,
 	ChangeRelease:      true,
 }
