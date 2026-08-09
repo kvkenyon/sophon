@@ -13,6 +13,26 @@ Authoritative source: `prompts/commander/AGENTS.md`, rendered by
 The commander is an ordinary, unmanaged, disposable agent session — no daemon,
 no managed runtime, no resume machinery. Its contract:
 
+- **Proposal is not execution.** “Decide what to build”, “what should we
+  build”, “explore”, “research”, “recommend”, “scope options”, and “talk it
+  through” produce concise chat proposals only and have zero durable,
+  filesystem, Git, worker, or monitor effects. “Build this”, “implement the
+  accepted proposal”, “start development”, and an explicit approval clearly
+  referring to a concrete proposal authorize work. Mixed wording gets one
+  confirmation before effects; scope-only permission and unrelated
+  conversational assent do not. Proposal continuity stays in conversation or
+  an explicitly requested draft artifact, never a hidden proposal store.
+- **One workspace, many confined projects.** The commander starts at an
+  initialized workspace root, inspects the immutable marker, lists its direct
+  child projects, and attaches once with `--scope`. It is not bound to a
+  repository or restarted per project. Explicit project key wins; one clear
+  conversational referent may follow; ambiguity gets one concise project
+  question. CWD is never hidden selection authority. Cross-project outcomes
+  become separate project-pinned tasks/workers that can run concurrently in
+  the same registered Herdr workspace; the workspace root is never a checkout.
+  Project-specific inspection resolves the child and explicitly labels the
+  selected key even when it has no missions; a global empty status is not a
+  truthful substitute.
 - **Sole point of contact.** The operator talks only to the commander. All
   execution is delegated to workers; the commander never edits, commits,
   pushes, or otherwise mutates a project itself.
@@ -23,8 +43,9 @@ no managed runtime, no resume machinery. Its contract:
 - **Durable-state reconstruction.** The commander reconstructs work from the
   durable records under the data home plus live observation through
   `sophon status`, never from conversation memory. A restart is a non-event:
-  session start ensures the optional transport with `sophon monitor start`,
-  then runs `sophon commander attach` (registering the volatile
+  session start inspects the workspace, lists projects, ensures the optional
+  transport with `sophon monitor start`, then runs `sophon commander attach
+  --scope ROOT` (registering the volatile
   wake/placement address so completions can wake the session and new workers
   can join its Herdr workspace as tabs), then `sophon status`, drain the
   derived action queue to a fixed point (every ready task verified, every
@@ -38,10 +59,13 @@ no managed runtime, no resume machinery. Its contract:
   means, and what is needed next. Wake lines in `~/.sophon/state/`, the
   volatile `state/commander.json` registration, and worker notification prose
   are notifications, never state, and are never relayed as current truth.
-- **Bounded authority.** The commander may create missions and tasks, spawn,
-  verify-complete, validate, send, and release autonomously. Every delivery
-  effect requires explicit operator confirmation, enforced mechanically by
-  `sophon deliver --confirmed`. The commander never merges. Verification and
+- **Bounded authority.** Only after implementation authorization, the commander
+  may create missions/tasks, start, verify-complete, validate, review, send,
+  and release local work autonomously. A task starts as truthful `planned`
+  state until its exact spawn receipt exists. GitHub repository/remote
+  publication, local-to-public delivery selection, and every push/PR delivery
+  are separate explicit operator-confirmed boundaries. The commander never
+  merges. Verification and
   validation are commander-owned routine work, never operator decisions: the
   commander drains every derived verify-complete/validate action to a fixed
   point before reporting or waiting, and never reports a task as ready for
@@ -70,12 +94,15 @@ no managed runtime, no resume machinery. Its contract:
   delivery and explicit release, and a cleanup failure is a bounded
   diagnostic, never a verification failure. Worker tab grouping inside the
   commander's Herdr workspace is likewise presentation only.
-- **Explicit public delivery intent.** Task creation records a concise public
-  title, a detailed private worker objective, and an explicit public delivery
-  branch as separate required values. The commander never derives public
-  metadata from internal IDs, attempt state, private paths, or prompt prose,
-  and never writes Sophon branding or orchestration mechanics to a public Git
-  or forge surface.
+- **Local development first.** Task creation records a concise local title and
+  detailed private worker objective; `local` needs no remote or public branch.
+  An exact empty child may receive only the typed, deterministic empty-root
+  bootstrap during start, never scaffolding or product files. Any existing or
+  ambiguous content refuses. Local completion and Read the Code approval are
+  not delivery. A later immutable selection records a separately sanitized
+  public title and branch, but still performs no push and supplies no delivery
+  confirmation. The commander never derives public metadata from internal
+  IDs, attempt state, private paths, or prompt prose.
 - **Human-owned PR metadata after creation.** The public-surface owner renders
   and preflights first-delivery title/body. Correction delivery preflights its
   current product evidence but deterministically preserves the existing
@@ -96,9 +123,9 @@ commander never relays them as truth or operator-facing chatter; it runs status
 before acting and stays quiet when no durable outcome or action exists.
 
 Conditional procedures live in the materialized skills under `prompts/skills/`
-(recap, status, operator-authority, decision-lifecycle, diagnostic-reasoning,
-coding-guidelines, worker-recovery, agent-adapters); the commander prompt
-carries the load triggers.
+(including proposal-execution, recap, status, operator-authority,
+decision-lifecycle, diagnostic-reasoning, coding-guidelines, worker-recovery,
+and agent-adapters); the commander prompt carries the load triggers.
 
 ## Worker
 
@@ -129,6 +156,11 @@ in its own leased Treehouse worktree. Its contract:
   worktrees, or any shared state — mission or task records, other attempts,
   outcomes, delivery — and never pushes/forces, opens or updates a PR,
   delivers, or merges.
+- **Local is complete work.** A local brief contains no public branch and does
+  not require or inspect a remote. Its base may be Sophon's exact recorded
+  empty initial commit; every product file and substantive commit remains the
+  worker's responsibility. The worker never publishes the local result or
+  interprets review approval as delivery.
 - **Structured staging only.** The worker's sole writes outside the worktree
   are the generated completion or report submission files. Completion uses
   version 1 (`version`, `status`, `summary`, `verification`, `changed_files`,

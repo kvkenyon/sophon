@@ -219,6 +219,10 @@ func (f *Flow) VerifyComplete(ctx context.Context, taskID string) (store.Outcome
 	if err != nil {
 		return store.Outcome{}, err
 	}
+	mission, err = f.resolveMissionProject(ctx, mission)
+	if err != nil {
+		return store.Outcome{}, err
+	}
 	attempt, err := currentAttempt(task)
 	if err != nil {
 		return store.Outcome{}, err

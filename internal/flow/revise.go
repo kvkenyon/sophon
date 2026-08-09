@@ -52,6 +52,15 @@ func (f *Flow) reviseLocked(ctx context.Context, taskID, reason, objective strin
 	if err != nil {
 		return store.Spawn{}, err
 	}
+	mission, err = f.resolveMissionProject(ctx, mission)
+	if err != nil {
+		return store.Spawn{}, err
+	}
+	effectiveTask, _, deliveryErr := effectiveDeliveryTask(task)
+	if deliveryErr != nil {
+		return store.Spawn{}, deliveryErr
+	}
+	task = effectiveTask
 	if review != nil {
 		if err := validateReviewCorrectionLink(task, *review); err != nil {
 			return store.Spawn{}, err

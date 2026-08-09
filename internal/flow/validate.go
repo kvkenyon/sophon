@@ -28,6 +28,13 @@ func (f *Flow) Validate(ctx context.Context, taskID string) (store.Validation, e
 	if err != nil {
 		return store.Validation{}, err
 	}
+	mission, err := store.ReadMission(task.MissionID)
+	if err != nil {
+		return store.Validation{}, err
+	}
+	if _, err := f.resolveMissionProject(ctx, mission); err != nil {
+		return store.Validation{}, err
+	}
 	attempt, err := currentAttempt(task)
 	if err != nil {
 		return store.Validation{}, err

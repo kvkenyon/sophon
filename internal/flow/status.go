@@ -38,6 +38,10 @@ func (f *Flow) ReleaseLeaseAttempt(ctx context.Context, taskID string, requested
 	if err != nil {
 		return store.Release{}, err
 	}
+	mission, err = f.resolveMissionProject(ctx, mission)
+	if err != nil {
+		return store.Release{}, err
+	}
 	attempt := requestedAttempt
 	if attempt == 0 {
 		attempt, err = currentAttempt(task)
@@ -90,6 +94,7 @@ type MissionStatus struct {
 // derive from records; review-reconcile may additionally derive from a
 // missing volatile bridge, whose absence costs latency but no truth.
 const (
+	ActionStart           = "start"
 	ActionVerifyComplete  = "verify-complete"
 	ActionValidate        = "validate"
 	ActionOpenReview      = "open-review"
@@ -138,9 +143,10 @@ func (f *Flow) Status(ctx context.Context, includeReleased ...bool) (Report, err
 		return Report{}, err
 	}
 	report := Report{Missions: make([]MissionStatus, 0, len(missions))}
-	var verify, validate, reviews []Action
+	var start, verify, validate, reviews []Action
 	for _, mission := range missions {
 		entry := MissionStatus{Mission: mission}
+		_, projectErr := f.resolveMissionProject(ctx, mission)
 		tasks, err := store.ListTasks(mission.ID)
 		if err != nil {
 			return Report{}, err
@@ -150,7 +156,10 @@ func (f *Flow) Status(ctx context.Context, includeReleased ...bool) (Report, err
 			if err != nil {
 				return Report{}, err
 			}
-			if status.State == store.StateActive {
+			if projectErr != nil && status.State != store.StateCancelled {
+				status.State = store.StateProjectDrift
+				status.Detail = projectErr.Error()
+			} else if status.State == store.StateActive {
 				status = f.augmentActive(ctx, status)
 			} else if status.State == store.StateCorrectionActive {
 				live := status
@@ -158,8 +167,21 @@ func (f *Flow) Status(ctx context.Context, includeReleased ...bool) (Report, err
 				live = f.augmentActive(ctx, live)
 				status.Detail = "worker=" + live.State
 			}
-			if task.DeliveryMode == domain.DeliveryPR {
-				status = f.augmentPullRequest(ctx, mission, status)
+			deliveryTask, selection, deliveryErr := effectiveDeliveryTask(task)
+			if deliveryErr != nil {
+				status.State = store.StateInvalidEvidence
+				status.Detail = deliveryErr.Error()
+			} else {
+				status.DeliverySelection = selection
+				if deliveryTask.DeliveryMode == domain.DeliveryPR {
+					publicStatus := status
+					publicStatus.Task = deliveryTask
+					status = f.augmentPullRequest(ctx, mission, publicStatus)
+					status.Task = task
+					status.DeliverySelection = selection
+				} else if task.DeliveryMode == domain.DeliveryLocal && selection == nil && status.State == store.StateVerified {
+					status.Detail = "verified local completion; no delivery selected"
+				}
 			}
 			if showAll {
 				status.Revisions, err = store.DeriveHistory(task)
@@ -184,11 +206,14 @@ func (f *Flow) Status(ctx context.Context, includeReleased ...bool) (Report, err
 					}
 				}
 			}
-			if status.State == store.StateReleased && !showAll {
+			if (status.State == store.StateReleased || status.State == store.StateCancelled) && !showAll {
 				continue
 			}
 			entry.Tasks = append(entry.Tasks, status)
 			switch {
+			case status.State == store.StatePlanned || status.State == store.StateCorrectionPending:
+				start = append(start, Action{TaskID: task.ID, Kind: ActionStart,
+					Command: "sophon spawn " + task.ID})
 			case status.State == store.StateReady || status.State == store.StateCorrectionReady:
 				verify = append(verify, Action{TaskID: task.ID, Kind: ActionVerifyComplete,
 					Command: "sophon verify-complete " + task.ID})
@@ -200,7 +225,8 @@ func (f *Flow) Status(ctx context.Context, includeReleased ...bool) (Report, err
 					return Report{}, err
 				}
 			}
-			if status.State != store.StateReleased && status.State != store.StateDelivered {
+			if status.State != store.StateReleased && status.State != store.StateDelivered &&
+				status.State != store.StateCancelled && status.State != store.StateProjectDrift {
 				reviews = append(reviews, reviewActions(task, status.Review)...)
 			}
 		}
@@ -208,6 +234,7 @@ func (f *Flow) Status(ctx context.Context, includeReleased ...bool) (Report, err
 			report.Missions = append(report.Missions, entry)
 		}
 	}
+	report.Actions = append(report.Actions, start...)
 	report.Actions = append(report.Actions, verify...)
 	report.Actions = append(report.Actions, validate...)
 	report.Actions = append(report.Actions, reviews...)

@@ -28,10 +28,11 @@ import (
 	"sophon/internal/readcode"
 	"sophon/internal/reviewbridge"
 	"sophon/internal/store"
+	"sophon/internal/workspace"
 	runtimeprompts "sophon/prompts"
 )
 
-const version = "0.5.0-m1"
+const version = "0.6.0-m1"
 
 func main() {
 	if err := run(context.Background(), os.Args[1:]); err != nil {
@@ -51,6 +52,10 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	case "mission":
 		return missionCommand(ctx, args[1:])
+	case "workspace":
+		return workspaceCommand(ctx, args[1:])
+	case "project":
+		return projectCommand(ctx, args[1:])
 	case "task":
 		return taskCommand(ctx, args[1:])
 	case "spawn":
@@ -71,6 +76,8 @@ func run(ctx context.Context, args []string) error {
 		return validateCommand(ctx, args[1:])
 	case "deliver":
 		return deliverCommand(ctx, args[1:])
+	case "delivery":
+		return deliverySelectionCommand(ctx, args[1:])
 	case "release":
 		return releaseCommand(ctx, args[1:])
 	case "status":
@@ -173,6 +180,108 @@ func parseFlags(flags *flag.FlagSet, args []string) ([]string, error) {
 	return positional, nil
 }
 
+func workspaceCommand(_ context.Context, args []string) error {
+	if len(args) < 1 {
+		return &exitError{2, errors.New("expected: sophon workspace init|inspect")}
+	}
+	flags := flag.NewFlagSet("workspace "+args[0], flag.ContinueOnError)
+	positional, err := parseFlags(flags, args[1:])
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("workspace command requires exactly one root path")
+	}
+	switch args[0] {
+	case "init":
+		marker, err := workspace.Init(positional[0])
+		if err != nil {
+			return err
+		}
+		return encode(marker)
+	case "inspect":
+		marker, err := workspace.Read(positional[0])
+		if err != nil {
+			return err
+		}
+		return encode(marker)
+	default:
+		return &exitError{2, errors.New("expected: sophon workspace init|inspect")}
+	}
+}
+
+func projectCommand(ctx context.Context, args []string) error {
+	if len(args) < 1 {
+		return &exitError{2, errors.New("expected: sophon project list|create|clone|add|inspect|publish")}
+	}
+	operation := args[0]
+	flags := flag.NewFlagSet("project "+operation, flag.ContinueOnError)
+	root := flags.String("workspace", "", "Sophon workspace root")
+	gitBinary := flags.String("git", "git", "Git binary")
+	branch := flags.String("initial-branch", "main", "unborn local default branch")
+	source := flags.String("source", "", "explicit Git clone source")
+	path := flags.String("path", "", "existing path already at projects/<key>")
+	repository := flags.String("repository", "", "exact GitHub owner/repository to create")
+	remoteURL := flags.String("remote-url", "", "exact origin URL to add after creation")
+	visibility := flags.String("visibility", "private", "GitHub visibility (private|public|internal)")
+	confirmed := flags.Bool("confirmed", false, "confirm this exact GitHub resource and remote creation")
+	ghBinary := flags.String("gh-axi", "gh-axi", "gh-axi binary")
+	positional, err := parseFlags(flags, args[1:])
+	if err != nil {
+		return err
+	}
+	inspector := workspace.Inspector{GitBinary: *gitBinary}
+	switch operation {
+	case "list":
+		if len(positional) != 0 {
+			return errors.New("project list does not accept a project key")
+		}
+		projects, err := inspector.List(ctx, *root)
+		if err != nil {
+			return err
+		}
+		if projects == nil {
+			projects = []workspace.Project{}
+		}
+		return encode(projects)
+	case "create", "clone", "add", "inspect", "publish":
+		if len(positional) != 1 {
+			return fmt.Errorf("project %s requires exactly one project key", operation)
+		}
+	default:
+		return &exitError{2, errors.New("expected: sophon project list|create|clone|add|inspect|publish")}
+	}
+	key := positional[0]
+	var project workspace.Project
+	switch operation {
+	case "create":
+		project, err = inspector.Create(ctx, *root, key, *branch)
+	case "clone":
+		project, err = inspector.Clone(ctx, *root, key, *source)
+	case "add":
+		if strings.TrimSpace(*path) != "" {
+			expected, pathErr := filepath.Abs(filepath.Join(*root, workspace.ProjectsDir, key))
+			observed, observedErr := filepath.Abs(*path)
+			if pathErr != nil || observedErr != nil || filepath.Clean(expected) != filepath.Clean(observed) {
+				return errors.New("project add only adopts an existing real child already at workspace/projects/<key>; clone external repositories instead")
+			}
+		}
+		project, err = inspector.Add(ctx, *root, key)
+	case "inspect":
+		project, err = inspector.Resolve(ctx, *root, key)
+	case "publish":
+		publication, publishErr := inspector.PublishGitHub(ctx, *root, key, *repository, *remoteURL, *visibility, *ghBinary, *confirmed)
+		if publishErr != nil {
+			return publishErr
+		}
+		return encode(publication)
+	}
+	if err != nil {
+		return err
+	}
+	return encode(project)
+}
+
 func missionCommand(ctx context.Context, args []string) error {
 	if len(args) >= 1 && args[0] == "create" {
 		return missionCreate(ctx, args[1:])
@@ -185,9 +294,11 @@ func missionCommand(ctx context.Context, args []string) error {
 
 func missionCreate(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("mission create", flag.ContinueOnError)
-	project := flags.String("project", "", "project repository path")
+	workspaceRoot := flags.String("workspace", "", "Sophon workspace root")
+	project := flags.String("project", "", "workspace project key, or legacy repository path without --workspace")
 	title := flags.String("title", "", "mission title")
 	objective := flags.String("objective", "", "mission objective")
+	gitBinary := flags.String("git", "git", "Git binary")
 	positional, err := parseFlags(flags, args)
 	if err != nil {
 		return err
@@ -195,7 +306,13 @@ func missionCreate(ctx context.Context, args []string) error {
 	if len(positional) != 0 {
 		return errors.New("mission create does not accept positional arguments")
 	}
-	created, err := flow.New(flow.Deps{}).CreateMission(ctx, *project, *title, *objective)
+	var created store.Mission
+	if strings.TrimSpace(*workspaceRoot) != "" {
+		created, err = flow.New(flow.Deps{Projects: workspace.Inspector{GitBinary: *gitBinary}}).
+			CreateWorkspaceMission(ctx, *workspaceRoot, *project, *title, *objective)
+	} else {
+		created, err = flow.New(flow.Deps{}).CreateMission(ctx, *project, *title, *objective)
+	}
 	if err != nil {
 		return err
 	}
@@ -224,7 +341,11 @@ func missionList(_ context.Context, args []string) error {
 	}
 	fmt.Println("ID\tTITLE\tPROJECT\tCREATED")
 	for _, mission := range missions {
-		fmt.Printf("%s\t%s\t%s\t%s\n", mission.ID, mission.Title, mission.ProjectPath, mission.CreatedAt.Format("2006-01-02"))
+		project := mission.ProjectKey
+		if project == "" {
+			project = filepath.Base(mission.ProjectPath)
+		}
+		fmt.Printf("%s\t%s\t%s\t%s\n", mission.ID, mission.Title, project, mission.CreatedAt.Format("2006-01-02"))
 	}
 	return nil
 }
@@ -233,7 +354,13 @@ func taskCommand(ctx context.Context, args []string) error {
 	if len(args) >= 1 && args[0] == "create" {
 		return taskCreate(ctx, args[1:])
 	}
-	return &exitError{2, errors.New("expected: sophon task create")}
+	if len(args) >= 1 && args[0] == "cancel" {
+		return taskCancel(ctx, args[1:])
+	}
+	if len(args) >= 1 && args[0] == "revise" {
+		return taskRevise(ctx, args[1:])
+	}
+	return &exitError{2, errors.New("expected: sophon task create|cancel|revise")}
 }
 
 func taskCreate(ctx context.Context, args []string) error {
@@ -243,7 +370,7 @@ func taskCreate(ctx context.Context, args []string) error {
 	objective := flags.String("objective", "", "detailed worker objective")
 	deliveryBranch := flags.String("delivery-branch", "", "explicit public-safe branch to push")
 	kind := flags.String("kind", string(domain.TaskImplementation), "task kind")
-	delivery := flags.String("delivery", string(domain.DeliveryBranch), "delivery mode (branch|pr)")
+	delivery := flags.String("delivery", "", "development/delivery posture (default local, or branch when --delivery-branch is supplied; local|branch|pr)")
 	validate := flags.String("validate", "", "required validation command")
 	review := flags.String("review", string(domain.ReviewOff), "Read the Code posture (off|optional|required)")
 	positional, err := parseFlags(flags, args)
@@ -259,6 +386,44 @@ func taskCreate(ctx context.Context, args []string) error {
 		return err
 	}
 	return encode(created)
+}
+
+func taskCancel(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("task cancel", flag.ContinueOnError)
+	reason := flags.String("reason", "", "explicit cancellation reason")
+	confirmed := flags.Bool("confirmed", false, "confirm cancellation of this exact unstarted task")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("task cancel requires exactly one task ID")
+	}
+	value, err := flow.New(flow.Deps{}).CancelPlanned(ctx, positional[0], *reason, *confirmed)
+	if err != nil {
+		return err
+	}
+	return encode(value)
+}
+
+func taskRevise(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("task revise", flag.ContinueOnError)
+	title := flags.String("title", "", "replacement task title")
+	objective := flags.String("objective", "", "replacement detailed objective")
+	validate := flags.String("validate", "", "replacement validation command")
+	confirmed := flags.Bool("confirmed", false, "confirm replacement of this exact unstarted task")
+	positional, err := parseFlags(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("task revise requires exactly one task ID")
+	}
+	value, err := flow.New(flow.Deps{}).RevisePlanned(ctx, positional[0], *title, *objective, *validate, *confirmed)
+	if err != nil {
+		return err
+	}
+	return encode(value)
 }
 
 func spawnCommand(ctx context.Context, args []string) error {
@@ -397,6 +562,7 @@ func commanderAttach(ctx context.Context, args []string) error {
 	pane := flags.String("pane", strings.TrimSpace(os.Getenv("HERDR_PANE_ID")), "Herdr pane ID (env HERDR_PANE_ID)")
 	workspace := flags.String("workspace", strings.TrimSpace(os.Getenv("HERDR_WORKSPACE_ID")), "Herdr workspace ID (env HERDR_WORKSPACE_ID)")
 	tab := flags.String("tab", strings.TrimSpace(os.Getenv("HERDR_TAB_ID")), "Herdr tab ID (env HERDR_TAB_ID)")
+	scope := flags.String("scope", "", "Sophon workspace root visible to this commander")
 	tools.bind(flags, "herdr", "herdr-session")
 	positional, err := parseFlags(flags, args)
 	if err != nil {
@@ -406,7 +572,7 @@ func commanderAttach(ctx context.Context, args []string) error {
 		return errors.New("commander attach does not accept positional arguments")
 	}
 	registration, err := tools.flow().AttachCommander(ctx, flow.AttachRequest{
-		Session: tools.herdrSession, WorkspaceID: *workspace, TabID: *tab, PaneID: *pane})
+		Session: tools.herdrSession, WorkspaceID: *workspace, TabID: *tab, PaneID: *pane, ScopeRoot: *scope})
 	if err != nil {
 		return err
 	}
@@ -1241,6 +1407,31 @@ func deliverCommand(ctx context.Context, args []string) error {
 	return encode(delivered)
 }
 
+func deliverySelectionCommand(ctx context.Context, args []string) error {
+	if len(args) < 1 || args[0] != "select" {
+		return &exitError{2, errors.New("expected: sophon delivery select")}
+	}
+	tools := defaultTools()
+	flags := flag.NewFlagSet("delivery select", flag.ContinueOnError)
+	mode := flags.String("mode", "", "public delivery mode (branch|pr)")
+	title := flags.String("title", "", "public-safe title")
+	branch := flags.String("branch", "", "public-safe branch")
+	confirmed := flags.Bool("confirmed", false, "confirm this exact local-to-public selection (no delivery effect)")
+	tools.bind(flags, "git")
+	positional, err := parseFlags(flags, args[1:])
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("delivery select requires exactly one task ID")
+	}
+	selection, err := tools.flow().SelectDelivery(ctx, positional[0], domain.DeliveryMode(*mode), *title, *branch, *confirmed)
+	if err != nil {
+		return err
+	}
+	return encode(selection)
+}
+
 func releaseCommand(ctx context.Context, args []string) error {
 	tools := defaultTools()
 	flags := flag.NewFlagSet("release", flag.ContinueOnError)
@@ -1281,10 +1472,14 @@ func statusCommand(ctx context.Context, args []string) error {
 	if *jsonOutput {
 		return encode(report)
 	}
-	fmt.Println("MISSION\tTASK\tSTATE\tATTEMPT\tDETAIL")
+	fmt.Println("PROJECT\tMISSION\tTASK\tSTATE\tATTEMPT\tDETAIL")
 	for _, mission := range report.Missions {
+		project := mission.Mission.ProjectKey
+		if project == "" {
+			project = filepath.Base(mission.Mission.ProjectPath)
+		}
 		for _, task := range mission.Tasks {
-			fmt.Printf("%s\t%s\t%s\t%d\t%s\n", mission.Mission.ID, task.Task.ID, task.State, task.Attempt, task.Detail)
+			fmt.Printf("%s\t%s\t%s\t%s\t%d\t%s\n", project, mission.Mission.ID, task.Task.ID, task.State, task.Attempt, task.Detail)
 			if *all {
 				for _, revision := range task.Revisions {
 					for _, attempt := range revision.Attempts {
@@ -1365,15 +1560,24 @@ func encode(value any) error {
 func usage() {
 	fmt.Fprintln(os.Stderr, `Usage:
   sophon version
-  sophon mission create --project PATH --title TITLE --objective OBJECTIVE
+  sophon workspace init|inspect ROOT
+  sophon project list --workspace ROOT
+  sophon project create KEY --workspace ROOT [--initial-branch BRANCH]
+  sophon project clone KEY --workspace ROOT --source GIT_SOURCE
+  sophon project add|inspect KEY --workspace ROOT
+  sophon project publish KEY --workspace ROOT --repository OWNER/REPO --remote-url URL --visibility private|public|internal --confirmed [--gh-axi BIN]
+  sophon mission create --workspace ROOT --project KEY --title TITLE --objective OBJECTIVE [--git BIN]
+  sophon mission create --project LEGACY_PATH --title TITLE --objective OBJECTIVE
   sophon mission list [--json]
-  sophon task create --mission ID --title PUBLIC_TITLE --objective WORKER_OBJECTIVE --delivery-branch PUBLIC_BRANCH [--kind KIND] [--delivery branch|pr] [--validate COMMAND] [--review off|optional|required]
+  sophon task create --mission ID --title TITLE --objective WORKER_OBJECTIVE [--kind KIND] [--delivery local|branch|pr] [--delivery-branch PUBLIC_BRANCH] [--validate COMMAND] [--review off|optional|required]
+  sophon task cancel TASK --reason REASON --confirmed
+  sophon task revise TASK --title TITLE --objective OBJECTIVE --confirmed [--validate COMMAND]
   sophon spawn TASK [--retry] [--herdr BIN] [--treehouse BIN] [--git BIN] [--herdr-session NAME]
   sophon revise TASK --reason REASON --objective CORRECTION [--accept-external-head] [--herdr BIN] [--treehouse BIN] [--git BIN] [--gh-axi BIN] [--herdr-session NAME]
   sophon worker complete TASK --attempt N --head-sha SHA --result FILE [--git BIN] [--herdr BIN]
   sophon worker report TASK --attempt N --head-sha SHA --report FILE [--git BIN] [--herdr BIN]
   sophon worker progress TASK --attempt N --phase PHASE [--message NOTE]
-  sophon commander attach [--pane ID] [--workspace ID] [--tab ID] [--herdr BIN] [--herdr-session NAME]
+  sophon commander attach [--scope ROOT] [--pane ID] [--workspace ID] [--tab ID] [--herdr BIN] [--herdr-session NAME]
   sophon monitor run|start [--herdr BIN]
   sophon monitor status [--json]
   sophon monitor stop
@@ -1389,6 +1593,7 @@ func usage() {
   sophon verify-complete TASK [--git BIN] [--treehouse BIN] [--herdr BIN]
   sophon validate TASK [--git BIN] [--herdr BIN]
   sophon deliver TASK --confirmed [--git BIN] [--gh-axi BIN] [--read-the-code BIN]
+  sophon delivery select TASK --mode branch|pr --title PUBLIC_TITLE --branch PUBLIC_BRANCH --confirmed [--git BIN]
   sophon release TASK [--attempt N] [--treehouse BIN]
   sophon status [--json] [--all] [--herdr BIN] [--git BIN] [--gh-axi BIN] [--herdr-session NAME]
   sophon send TASK MESSAGE [--herdr BIN] [--herdr-session NAME]

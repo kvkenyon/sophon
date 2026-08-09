@@ -14,6 +14,117 @@ import (
 	"sophon/internal/store"
 )
 
+// SelectDelivery records the explicit, local-only transition from completed
+// local development to a public branch or PR posture. It verifies the current
+// remote and full public surface but performs no push or forge write; Deliver
+// still requires a separate fresh confirmation.
+func (f *Flow) SelectDelivery(ctx context.Context, taskID string, mode domain.DeliveryMode, publicTitle, publicBranch string, confirmed bool) (store.DeliverySelection, error) {
+	if !confirmed {
+		return store.DeliverySelection{}, errors.New("delivery selection requires explicit confirmation (--confirmed)")
+	}
+	if mode != domain.DeliveryBranch && mode != domain.DeliveryPR {
+		return store.DeliverySelection{}, errors.New("local development may transition only to branch or pr delivery")
+	}
+	if err := requireNonEmpty(taskID, publicTitle, publicBranch); err != nil {
+		return store.DeliverySelection{}, err
+	}
+	if f.deps.DeliveryGit == nil {
+		return store.DeliverySelection{}, errors.New("flow is not configured for delivery selection")
+	}
+	release, err := store.Acquire(ctx, "select delivery "+taskID)
+	if err != nil {
+		return store.DeliverySelection{}, err
+	}
+	defer release()
+	task, mission, err := f.taskAndMission(taskID)
+	if err != nil {
+		return store.DeliverySelection{}, err
+	}
+	mission, err = f.resolveMissionProject(ctx, mission)
+	if err != nil {
+		return store.DeliverySelection{}, err
+	}
+	if task.DeliveryMode != domain.DeliveryLocal {
+		return store.DeliverySelection{}, errors.New("task already has a public delivery posture")
+	}
+	if existing, err := store.ReadDeliverySelection(task.MissionID, task.ID); err == nil {
+		if existing.Mode == mode && existing.PublicTitle == publicTitle && existing.PublicBranch == publicBranch {
+			return existing, nil
+		}
+		return store.DeliverySelection{}, errors.New("local task already has a different immutable delivery selection")
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return store.DeliverySelection{}, err
+	}
+	attempt, err := currentAttempt(task)
+	if err != nil {
+		return store.DeliverySelection{}, err
+	}
+	outcome, err := store.ReadOutcome(task.MissionID, task.ID, attempt)
+	if err != nil {
+		return store.DeliverySelection{}, fmt.Errorf("delivery selection requires verified local completion: %w", err)
+	}
+	if strings.TrimSpace(task.ValidationCommand) != "" {
+		validation, validationErr := store.ReadValidation(task.MissionID, task.ID, attempt)
+		if validationErr != nil || !validation.Passed || !strings.EqualFold(validation.HeadSHA, outcome.HeadSHA) {
+			return store.DeliverySelection{}, errors.New("delivery selection requires passing validation for the verified local head")
+		}
+	}
+	spawn, err := store.ReadSpawn(task.MissionID, task.ID, attempt)
+	if err != nil {
+		return store.DeliverySelection{}, err
+	}
+	if err := f.deps.DeliveryGit.VerifyHead(ctx, spawn.WorktreePath, spawn.Branch, outcome.HeadSHA); err != nil {
+		return store.DeliverySelection{}, err
+	}
+	repository, err := f.deps.DeliveryGit.Repository(ctx, spawn.WorktreePath)
+	if err != nil {
+		return store.DeliverySelection{}, fmt.Errorf("delivery selection requires an explicitly configured remote: %w", err)
+	}
+	result, err := store.ReadResult(task.MissionID, task.ID, attempt)
+	if err != nil {
+		return store.DeliverySelection{}, err
+	}
+	commitBase := spawn.BaseSHA
+	if spawn.Revision > 1 {
+		if correction, correctionErr := store.ReadCorrection(task.MissionID, task.ID, spawn.Revision); correctionErr == nil && !store.CorrectionContinuesPullRequest(correction) {
+			commitBase, err = firstDeliveryBase(task, correction)
+			if err != nil {
+				return store.DeliverySelection{}, err
+			}
+		}
+	}
+	commitMessages, err := f.deps.DeliveryGit.CommitMessages(ctx, spawn.WorktreePath, commitBase, outcome.HeadSHA)
+	if err != nil {
+		return store.DeliverySelection{}, err
+	}
+	body := publicsurface.PullRequestBody(publicTitle, result)
+	if err := publicsurface.Preflight(publicBranch, publicTitle, body, commitMessages); err != nil {
+		return store.DeliverySelection{}, fmt.Errorf("public delivery preflight refused: %w", err)
+	}
+	selection := store.DeliverySelection{Version: 1, TaskID: task.ID, MissionID: task.MissionID,
+		FromMode: domain.DeliveryLocal, Mode: mode, PublicTitle: publicTitle, PublicBranch: publicBranch,
+		Repository: repository, HeadSHA: outcome.HeadSHA, SelectedAt: time.Now().UTC()}
+	return selection, store.CreateDeliverySelection(selection)
+}
+
+func effectiveDeliveryTask(task store.Task) (store.Task, *store.DeliverySelection, error) {
+	if task.DeliveryMode != domain.DeliveryLocal {
+		return task, nil, nil
+	}
+	selection, err := store.ReadDeliverySelection(task.MissionID, task.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return task, nil, nil
+	}
+	if err != nil {
+		return task, nil, err
+	}
+	effective := task
+	effective.DeliveryMode = selection.Mode
+	effective.DeliveryBranch = selection.PublicBranch
+	effective.Title = selection.PublicTitle
+	return effective, &selection, nil
+}
+
 // Deliver executes one explicitly confirmed delivery effect for the current
 // attempt/revision. First delivery creates the public surface; correction
 // delivery only fast-forwards the exact existing open PR branch.
@@ -32,6 +143,20 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 	task, err := store.FindTask(taskID)
 	if err != nil {
 		return store.Delivery{}, err
+	}
+	mission, err := store.ReadMission(task.MissionID)
+	if err != nil {
+		return store.Delivery{}, err
+	}
+	if _, err := f.resolveMissionProject(ctx, mission); err != nil {
+		return store.Delivery{}, err
+	}
+	task, selection, err := effectiveDeliveryTask(task)
+	if err != nil {
+		return store.Delivery{}, err
+	}
+	if task.DeliveryMode == domain.DeliveryLocal {
+		return store.Delivery{}, errors.New("local completion is not delivery; explicitly select branch or pr delivery first")
 	}
 	attempt, err := currentAttempt(task)
 	if err != nil {
@@ -121,6 +246,9 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 	repository, err := f.deps.DeliveryGit.Repository(ctx, spawn.WorktreePath)
 	if err != nil {
 		return store.Delivery{}, err
+	}
+	if selection != nil && selection.Repository != repository {
+		return store.Delivery{}, errors.New("configured remote no longer matches the immutable delivery selection")
 	}
 	if prior != nil && prior.State == store.DeliveryPending && prior.Repository != repository {
 		return store.Delivery{}, errors.New("pending delivery intent does not match current repository")

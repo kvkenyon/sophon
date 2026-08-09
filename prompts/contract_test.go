@@ -25,13 +25,63 @@ var requiredCommanderClauses = []string{
 	"invalid-evidence",
 	"already-running",
 	"--objective <worker-objective>",
-	"--delivery-branch <public-branch>",
+	"sophon workspace inspect <workspace-root>",
+	"sophon project list",
+	"--delivery local",
+	"sophon delivery select",
+	"Local completion is not delivery",
 	"Never write Sophon branding or orchestration details to public Git or forge",
 	"sophon revise",
 	"same task",
 	"same public branch",
 	"closed-unmerged",
 	"replacement pull request is inherently required",
+}
+
+func TestCommanderPromptOwnsProposalExecutionLanguageTable(t *testing.T) {
+	t.Setenv(OverrideEnv, "")
+	body, err := Compose(filepath.Join(t.TempDir(), "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phrase := range []string{
+		"decide what to build", "what should we build", "explore", "research", "recommend", "scope options", "talk it through",
+		"build this", "implement the accepted", "start development", "autonomously build the inventory service",
+		"Approval reference", "Ambiguous mixed", "Scope-only permission", "Unrelated confirmation",
+		"Create no mission, task, attempt, lease", "Never use the process current directory", "Project <key>:",
+	} {
+		if !strings.Contains(body, phrase) {
+			t.Errorf("proposal/execution contract omitted %q", phrase)
+		}
+	}
+}
+
+func TestStatusSkillPreservesExplicitProjectScope(t *testing.T) {
+	t.Setenv(OverrideEnv, "")
+	promptFS, root, err := Set("skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := fs.ReadFile(promptFS, root+"/status/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, clause := range []string{
+		"sophon project inspect <key> --workspace <root>",
+		"Always drain the global commander action queue",
+		"missions/tasks to the resolved canonical `project_key`",
+		"do not include sibling-project work",
+		"first render exactly `Project <key>:`",
+		"has no missions or tasks",
+	} {
+		if !strings.Contains(text, clause) {
+			t.Errorf("status skill omitted project-scope contract %q", clause)
+		}
+	}
+	if strings.Contains(text, "Do not supplement the derived result with chat history") {
+		t.Fatal("legacy no-probe status rule still overrides required project resolution")
+	}
 }
 
 // requiredWorkerClauses are the behavioral contracts every worker brief must
