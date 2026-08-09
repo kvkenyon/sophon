@@ -160,6 +160,18 @@ type fakeDeliveryGit struct {
 	repository  string
 	verifyErr   error
 	repositoryE error
+	messages    []string
+	messagesErr error
+}
+
+func (g *fakeDeliveryGit) CommitMessages(context.Context, string, string, string) ([]string, error) {
+	if g.messagesErr != nil {
+		return nil, g.messagesErr
+	}
+	if g.messages == nil {
+		return []string{"Add the feature"}, nil
+	}
+	return g.messages, nil
 }
 
 func (g *fakeDeliveryGit) VerifyHead(context.Context, string, string, string) error {
@@ -175,22 +187,30 @@ func (g *fakeDeliveryGit) Repository(context.Context, string) (string, error) {
 
 // fakeDeliveryRemote implements DeliveryRemote with a scriptable PR flow.
 type fakeDeliveryRemote struct {
-	mu        sync.Mutex
-	pushErr   error
-	headSHA   string
-	headErr   error
-	pr        *delivery.PullRequest
-	create    delivery.PullRequest
-	createErr error
-	pushes    int
-	creates   int
-	finds     int
+	mu           sync.Mutex
+	pushErr      error
+	headSHA      string
+	headErr      error
+	pr           *delivery.PullRequest
+	create       delivery.PullRequest
+	createErr    error
+	input        delivery.PullRequestInput
+	branch       string
+	branchExists bool
+	pushes       int
+	creates      int
+	finds        int
 }
 
-func (r *fakeDeliveryRemote) Push(context.Context, string, string, string, string) error {
+func (r *fakeDeliveryRemote) Push(_ context.Context, _, _, branch, headSHA string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pushes++
+	if r.pushErr == nil {
+		r.branch = branch
+		r.headSHA = headSHA
+		r.branchExists = true
+	}
 	return r.pushErr
 }
 
@@ -205,10 +225,20 @@ func (r *fakeDeliveryRemote) CreatePullRequest(_ context.Context, in delivery.Pu
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.creates++
+	r.input = in
 	if r.createErr != nil {
 		return delivery.PullRequest{}, r.createErr
 	}
 	return r.create, nil
+}
+
+func (r *fakeDeliveryRemote) BranchHead(context.Context, string, string, string) (string, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.headErr != nil {
+		return "", false, r.headErr
+	}
+	return r.headSHA, r.branchExists, nil
 }
 
 func (r *fakeDeliveryRemote) HeadSHA(context.Context, string, string, string) (string, error) {

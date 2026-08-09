@@ -23,6 +23,9 @@ var requiredCommanderClauses = []string{
 	"sophon status --all",
 	"invalid-evidence",
 	"already-running",
+	"--objective <worker-objective>",
+	"--delivery-branch <public-branch>",
+	"Never write Sophon branding or orchestration details to public Git or forge",
 }
 
 // requiredWorkerClauses are the behavioral contracts every worker brief must
@@ -38,6 +41,7 @@ var requiredWorkerClauses = []string{
 	"scope-mismatch",
 	"Never mutate shared state",
 	"Escalate only concrete decisions and blockers",
+	"Treat every commit subject and body as public product history",
 }
 
 // forbiddenBranding must never appear in any shipped prompt or rendered

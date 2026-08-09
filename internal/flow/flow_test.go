@@ -77,11 +77,34 @@ func (r *testRig) createMissionAndTask(t *testing.T, mode domain.DeliveryMode, v
 	if err != nil {
 		t.Fatal(err)
 	}
-	task, err := r.flow.CreateTask(ctx, mission.ID, "Add the feature", "", mode, validationCommand)
+	task, err := r.flow.CreateTask(ctx, mission.ID, "Add the feature", "Implement the complete product behavior.",
+		"feature/add-the-feature", "", mode, validationCommand)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return mission, task
+}
+
+func (r *testRig) prepareVerified(t *testing.T, mode domain.DeliveryMode) (store.Task, store.Spawn) {
+	t.Helper()
+	home, err := datahome.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, task := r.createMissionAndTask(t, mode, "")
+	spawn, err := r.flow.Spawn(context.Background(), task.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultPath := writeResult(t, home, spawn, validResult)
+	if _, err := r.flow.PublishResult(context.Background(), task.ID, 1, testHeadSHA, resultPath); err != nil {
+		t.Fatal(err)
+	}
+	r.leaseStatus(spawn)
+	if _, err := r.flow.VerifyComplete(context.Background(), task.ID); err != nil {
+		t.Fatal(err)
+	}
+	return task, spawn
 }
 
 const validResult = `{
@@ -146,7 +169,9 @@ func TestHappyPathBranchDelivery(t *testing.T) {
 	}
 	for _, want := range []string{"# Generated task brief", "sophon worker complete " + task.ID + " --attempt 1",
 		"sophon worker report " + task.ID + " --attempt 1", store.CompletionSubmissionName, store.ReportSubmissionName,
-		"`version`, `status`, `summary`, `verification`, `changed_files`, and `risks`"} {
+		"`version`, `status`, `summary`, `verification`, `changed_files`, and `risks`",
+		"Implement the complete product behavior.", "Public delivery title: Add the feature",
+		"Public delivery branch: `feature/add-the-feature`", "public-quality subject"} {
 		if !strings.Contains(string(brief), want) {
 			t.Fatalf("brief missing %q", want)
 		}
@@ -257,7 +282,7 @@ func TestHappyPathPRDelivery(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	rig.remote.pr = nil
-	rig.remote.create = delivery.PullRequest{Repository: testRepo, Branch: spawn.Branch,
+	rig.remote.create = delivery.PullRequest{Repository: testRepo, Branch: task.DeliveryBranch,
 		HeadSHA: testHeadSHA, URL: "https://github.com/acme/repo/pull/7", Number: 7}
 	receipt, err := rig.flow.Deliver(ctx, task.ID, true)
 	if err != nil {
@@ -266,6 +291,71 @@ func TestHappyPathPRDelivery(t *testing.T) {
 	if receipt.State != store.DeliveryDeliveredPR || receipt.PRNumber != 7 ||
 		receipt.PRURL != "https://github.com/acme/repo/pull/7" {
 		t.Fatalf("receipt = %+v", receipt)
+	}
+	if rig.remote.input.Branch != task.DeliveryBranch || rig.remote.input.Title != task.Title ||
+		!strings.Contains(rig.remote.input.Body, "## Summary") || strings.Contains(strings.ToLower(rig.remote.input.Body), "sophon") {
+		t.Fatalf("public pull request input = %+v", rig.remote.input)
+	}
+}
+
+func TestDeliverRefusesPublicBranchCollisionBeforeWrite(t *testing.T) {
+	useHome(t)
+	rig := newRig()
+	task, _ := rig.prepareVerified(t, domain.DeliveryBranch)
+	rig.remote.branchExists = true
+	rig.remote.headSHA = testBaseSHA
+
+	if _, err := rig.flow.Deliver(context.Background(), task.ID, true); err == nil ||
+		!strings.Contains(err.Error(), "already exists at a different head") {
+		t.Fatalf("collision error = %v", err)
+	}
+	if rig.remote.pushes != 0 || rig.remote.creates != 0 {
+		t.Fatalf("collision caused external writes: pushes=%d creates=%d", rig.remote.pushes, rig.remote.creates)
+	}
+	if _, err := store.ReadDelivery(task.MissionID, task.ID, 1); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("collision published intent: %v", err)
+	}
+}
+
+func TestBranchDeliveryAppliesCommitMessagePreflight(t *testing.T) {
+	useHome(t)
+	rig := newRig()
+	task, _ := rig.prepareVerified(t, domain.DeliveryBranch)
+	rig.delGit.messages = []string{"Sophon task task_f0bbc2200213c81f3b03223fb4dc454c attempt 1"}
+
+	if _, err := rig.flow.Deliver(context.Background(), task.ID, true); err == nil ||
+		!strings.Contains(err.Error(), "public commit message") {
+		t.Fatalf("commit preflight error = %v", err)
+	}
+	if rig.remote.pushes != 0 || rig.remote.creates != 0 {
+		t.Fatalf("preflight caused external writes: pushes=%d creates=%d", rig.remote.pushes, rig.remote.creates)
+	}
+}
+
+func TestCreateTaskRequiresExplicitPublicAndPrivateIntent(t *testing.T) {
+	useHome(t)
+	rig := newRig()
+	mission, err := rig.flow.CreateMission(context.Background(), "/repo", "Ship", "Mission context")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rig.flow.CreateTask(context.Background(), mission.ID, "Public title", "", "feature/public", "", "", ""); err == nil {
+		t.Fatal("missing detailed objective was accepted")
+	}
+	if _, err := rig.flow.CreateTask(context.Background(), mission.ID, "Public title", "Detailed objective", "", "", "", ""); err == nil {
+		t.Fatal("missing public delivery branch was accepted")
+	}
+	if _, err := rig.flow.CreateTask(context.Background(), mission.ID, "Bad\nTitle", "Detailed objective", "feature/public", "", "", ""); err == nil {
+		t.Fatal("multiline public title was accepted")
+	}
+	objective := "Detailed private setup may refer to Sophon, Treehouse, and a local /Users/alice/worktree without becoming public."
+	task, err := rig.flow.CreateTask(context.Background(), mission.ID, "HOME-111 Add client", objective,
+		"home-111/add-client", "", domain.DeliveryPR, "go test ./...")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Title != "HOME-111 Add client" || task.Objective != objective || task.DeliveryBranch != "home-111/add-client" {
+		t.Fatalf("task intent = %+v", task)
 	}
 }
 
@@ -386,7 +476,7 @@ func TestDeliveryCrashWindow(t *testing.T) {
 	}
 	// Reality: the PR exists now. Re-running converges without a second create.
 	rig.remote.createErr = nil
-	rig.remote.pr = &delivery.PullRequest{Repository: testRepo, Branch: spawn.Branch,
+	rig.remote.pr = &delivery.PullRequest{Repository: testRepo, Branch: task.DeliveryBranch,
 		HeadSHA: testHeadSHA, URL: "https://github.com/acme/repo/pull/9", Number: 9}
 	receipt, err := rig.flow.Deliver(ctx, task.ID, true)
 	if err != nil {

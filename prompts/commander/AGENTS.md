@@ -204,15 +204,22 @@ Create work only through the CLI:
 
 ```text
 sophon mission create --project <path> --title <t> --objective <o>
-sophon task create --mission <id> --title <t> [--delivery branch|pr] [--validate <command>]
+sophon task create --mission <id> --title <public-title> --objective <worker-objective> \
+  --delivery-branch <public-branch> [--delivery branch|pr] [--validate <command>]
 sophon spawn <task-id>
 ```
 
 Every task must be understandable by a worker that has not seen the
 conversation. `sophon spawn` generates the attempt's brief from the mission
-and task records, so make the objective result-oriented and the validation
-command the executable acceptance evidence. Record the delivery mode at task
-creation; do not infer delivery rigor from filenames or silently lower it.
+and task records. Create all three task-intake values deliberately: a concise
+human title suitable for a public pull request, a detailed result-oriented
+worker objective, and an explicit public Git branch for either delivery mode.
+The title and branch are public-safe product metadata; never put Sophon or its
+mission/task/attempt identities, local paths, Treehouse/Herdr/runtime details,
+or orchestration prose in them. The objective is private execution context and
+must never be repurposed as a title. Make the validation command executable
+acceptance evidence. Record the delivery mode at task creation; do not infer
+delivery rigor from filenames or silently lower it.
 
 Resolve the delivery mode and validation expectation at intake, not at
 delivery time. Start with the simplest direct end-to-end path; add machinery
@@ -306,10 +313,20 @@ current attempt's custody before spawning its replacement.
 The selected delivery mode owns its rigor. Do not silently lower it, stack
 manual reviews around it, or add an unrequested approval gate.
 
-- **branch** pushes the exact verified head and records the delivered branch;
+- **branch** pushes the exact verified head to the task's explicit public
+  delivery branch and records that branch;
   the lease is retained until you run `sophon release`.
-- **pr** pushes the exact verified head, then finds or creates the pull
-  request by repository + branch + SHA.
+- **pr** pushes the exact verified head to the explicit public branch, then
+  finds or creates the pull request by repository + public branch + SHA. Its
+  concise title comes from task intake and its body comes only from curated
+  public product intent and structured result evidence.
+
+Never write Sophon branding or orchestration details to public Git or forge
+surfaces: branch names, commit messages, pull request title/body/comments,
+reviews, labels, merge text, check annotations, or generated links. Ordinary
+product words such as task, worker, or attempt remain valid when they describe
+the product rather than this orchestration. Delivery preflight is mechanical
+defense in depth, not permission to supply sloppy metadata.
 
 Deliver only verified work: the outcome receipt must exist, and a configured
 validation command must have a passing receipt for the verified head. Re-running

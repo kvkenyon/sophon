@@ -28,10 +28,14 @@ type cliFixture struct {
 	home      string
 	project   string
 	git       string
+	gitLog    string
 	treehouse string
 	herdr     string
 	ghAxi     string
 	ghLog     string
+	ghTitle   string
+	ghBody    string
+	ghHead    string
 	herdrLog  string
 }
 
@@ -68,12 +72,17 @@ func newCLIFixture(t *testing.T) *cliFixture {
 	// The fake git wrapper delegates everything to the real binary except the
 	// delivery repository identity, which must normalize to host/owner/repo.
 	gitBinary := filepath.Join(root, "fake-git")
+	gitLog := filepath.Join(root, "git-calls")
 	writeCLIFile(t, gitBinary, fmt.Sprintf(`#!/bin/sh
+log=%s
 case " $* " in
-  *" remote get-url origin "*) printf 'git@github.com:sophon/test.git\n'; exit 0 ;;
+  *" push "*) printf '%%s\n' "$*" >> "$log" ;;
+esac
+case " $* " in
+  *" remote get-url origin "*) printf 'git@github.com:acme/product.git\n'; exit 0 ;;
 esac
 exec %s "$@"
-`, shellQuote(realGit)), 0o700)
+`, shellQuote(gitLog), shellQuote(realGit)), 0o700)
 
 	state := filepath.Join(root, "treehouse-state")
 	worktrees := filepath.Join(root, "worktrees")
@@ -193,34 +202,50 @@ esac
 `, shellQuote(herdrLog), shellQuote(herdrState)), 0o700)
 
 	ghLog := filepath.Join(root, "gh-axi-calls")
+	ghTitle := filepath.Join(root, "gh-title")
+	ghBody := filepath.Join(root, "gh-body")
+	ghHead := filepath.Join(root, "gh-head")
 	prState := filepath.Join(root, "gh-axi-pr")
 	ghBinary := filepath.Join(root, "fake-gh-axi")
 	writeCLIFile(t, ghBinary, fmt.Sprintf(`#!/bin/sh
 set -eu
 log=%s
 prstate=%s
+titlefile=%s
+bodyfile=%s
+headfile=%s
+printf '%%s\n' "$*" >> "$log"
 case "${1:-} ${2:-}" in
   "pr list")
     if [ -f "$prstate" ]; then
-      printf 'pull_requests[0]{number,url}\n7,https://github.com/sophon/test/pull/7\n'
+      printf 'pull_requests[0]{number,url}\n7,https://github.com/acme/product/pull/7\n'
     else
       printf 'count: 0\n'
     fi
     ;;
   "pr create")
-    echo create >> "$log"
+    shift 2
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --title) printf '%%s' "$2" > "$titlefile"; shift 2 ;;
+        --body) printf '%%s' "$2" > "$bodyfile"; shift 2 ;;
+        --head) printf '%%s' "$2" > "$headfile"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
     if [ -f "$prstate" ]; then
       exit 1
     fi
     touch "$prstate"
-    printf 'number: 7\nurl: https://github.com/sophon/test/pull/7\n'
+    printf 'number: 7\nurl: https://github.com/acme/product/pull/7\n'
     ;;
   *) exit 2 ;;
 esac
-`, shellQuote(ghLog), shellQuote(prState)), 0o700)
+`, shellQuote(ghLog), shellQuote(prState), shellQuote(ghTitle), shellQuote(ghBody), shellQuote(ghHead)), 0o700)
 
-	return &cliFixture{home: home, project: project, git: gitBinary,
-		treehouse: treehouseBinary, herdr: herdrBinary, ghAxi: ghBinary, ghLog: ghLog, herdrLog: herdrLog}
+	return &cliFixture{home: home, project: project, git: gitBinary, gitLog: gitLog,
+		treehouse: treehouseBinary, herdr: herdrBinary, ghAxi: ghBinary, ghLog: ghLog,
+		ghTitle: ghTitle, ghBody: ghBody, ghHead: ghHead, herdrLog: herdrLog}
 }
 
 func shellQuote(value string) string {
@@ -242,7 +267,8 @@ func (f *cliFixture) createMission(t *testing.T, title string) store.Mission {
 
 func (f *cliFixture) createTask(t *testing.T, missionID string, extra ...string) store.Task {
 	t.Helper()
-	args := append([]string{"task", "create", "--mission", missionID, "--title", "Task"}, extra...)
+	args := append([]string{"task", "create", "--mission", missionID, "--title", "Add product behavior",
+		"--objective", "Implement and verify the complete product behavior.", "--delivery-branch", "feature/add-product-behavior"}, extra...)
 	output := runCLI(t, args...)
 	var task store.Task
 	if err := json.Unmarshal(output, &task); err != nil {
@@ -277,6 +303,12 @@ func (f *cliFixture) spawnTask(t *testing.T, taskID string, extra ...string) sto
 // the attempt worktree, writes the strict result into the attempt directory,
 // and publishes it through `sophon worker complete`.
 func (f *cliFixture) completeWorker(t *testing.T, missionID, taskID string, attempt int) string {
+	return f.completeWorkerWith(t, missionID, taskID, attempt, "change",
+		`{"version":1,"status":"completed","summary":"changed",`+
+			`"verification":[{"command":"go test ./...","exit_code":0}],"changed_files":["change-`+fmt.Sprint(attempt)+`.txt"],"risks":[]}`)
+}
+
+func (f *cliFixture) completeWorkerWith(t *testing.T, missionID, taskID string, attempt int, commitMessage, resultJSON string) string {
 	t.Helper()
 	spawned, err := store.ReadSpawn(missionID, taskID, attempt)
 	if err != nil {
@@ -285,11 +317,10 @@ func (f *cliFixture) completeWorker(t *testing.T, missionID, taskID string, atte
 	name := fmt.Sprintf("change-%d.txt", attempt)
 	writeCLIFile(t, filepath.Join(spawned.WorktreePath, name), "change\n", 0o600)
 	runCLIGit(t, spawned.WorktreePath, "add", name)
-	runCLIGit(t, spawned.WorktreePath, "commit", "-m", "change")
+	runCLIGit(t, spawned.WorktreePath, "commit", "-m", commitMessage)
 	head := runCLIGit(t, spawned.WorktreePath, "rev-parse", "HEAD")
 	resultPath := store.AttemptPath(f.home, missionID, taskID, attempt, store.CompletionSubmissionName)
-	writeCLIFile(t, resultPath, `{"version":1,"status":"completed","summary":"changed",`+
-		`"verification":[{"command":"go test ./...","exit_code":0}],"changed_files":["`+name+`"],"risks":[]}`, 0o600)
+	writeCLIFile(t, resultPath, resultJSON, 0o600)
 	future := time.Now().Add(2 * time.Second)
 	if err := os.Chtimes(resultPath, future, future); err != nil {
 		t.Fatal(err)
@@ -596,6 +627,36 @@ func TestCLIStatusFiltersFourReleasedTasksAndRetainsAllHistory(t *testing.T) {
 	}
 }
 
+func TestCLITaskCreateRequiresSeparatePublicAndWorkerIntent(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "Task intake")
+	base := []string{"task", "create", "--mission", mission.ID, "--title", "HOME-111 Add client"}
+	if _, err := runCLIErr(t, append(base, "--delivery-branch", "home-111/add-client")...); err == nil {
+		t.Fatal("CLI accepted a task without --objective")
+	}
+	if _, err := runCLIErr(t, append(base, "--objective", "Implement the client")...); err == nil {
+		t.Fatal("CLI accepted a task without --delivery-branch")
+	}
+	if _, err := runCLIErr(t, "task", "create", "--mission", mission.ID, "--title", "Bad\nTitle",
+		"--objective", "Implement the client", "--delivery-branch", "home-111/add-client"); err == nil {
+		t.Fatal("CLI accepted a multiline public title")
+	}
+	if _, err := runCLIErr(t, "task", "create", "--mission", mission.ID, "--title", "HOME-111 Add client",
+		"--objective", "Implement the client", "--delivery-branch", "sophon/private/attempt-1"); err == nil {
+		t.Fatal("CLI accepted a private delivery branch")
+	}
+	created := runCLI(t, "task", "create", "--mission", mission.ID, "--title", "HOME-111 Add client",
+		"--objective", "Implement detailed client behavior", "--delivery-branch", "home-111/add-client", "--delivery", "pr")
+	var task store.Task
+	if err := json.Unmarshal(created, &task); err != nil {
+		t.Fatal(err)
+	}
+	if task.Title != "HOME-111 Add client" || task.Objective != "Implement detailed client behavior" ||
+		task.DeliveryBranch != "home-111/add-client" {
+		t.Fatalf("task = %+v", task)
+	}
+}
+
 func TestCLIStaleAttemptRefusalLeavesCurrentAttemptUntouched(t *testing.T) {
 	fixture := newCLIFixture(t)
 	mission := fixture.createMission(t, "Stale attempt")
@@ -640,7 +701,7 @@ func TestCLIPullRequestDeliveryIsIdempotent(t *testing.T) {
 		return delivered
 	}
 	first := deliver()
-	if first.State != store.DeliveryDeliveredPR || first.PRURL != "https://github.com/sophon/test/pull/7" || first.PRNumber != 7 {
+	if first.State != store.DeliveryDeliveredPR || first.PRURL != "https://github.com/acme/product/pull/7" || first.PRNumber != 7 {
 		t.Fatalf("first delivery = %+v", first)
 	}
 	second := deliver()
@@ -652,10 +713,142 @@ func TestCLIPullRequestDeliveryIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count := strings.Count(string(calls), "create"); count != 1 {
+	if count := strings.Count(string(calls), "pr create"); count != 1 {
 		t.Fatalf("gh-axi pr create calls = %d, want 1", count)
 	}
 	assertNoDatabaseFiles(t, fixture.home)
+}
+
+func TestCLIPublicDeliveryRefusesHistoricalLeakBeforeExternalWrites(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "Historical public leak")
+	objective := "Implement the full Tesla Fleet API BaseClient behavior, including every internal setup and validation instruction that belongs only in the worker objective."
+	output := runCLI(t, "task", "create", "--mission", mission.ID,
+		"--title", "HOME-111 Add Tesla fleet client", "--objective", objective,
+		"--delivery-branch", "home-111/tesla-fleet-client", "--delivery", "pr",
+		"--validate", "test -f change-1.txt")
+	var task store.Task
+	if err := json.Unmarshal(output, &task); err != nil {
+		t.Fatal(err)
+	}
+	fixture.spawnTask(t, task.ID)
+	oldBody := "Sophon task task_f0bbc2200213c81f3b03223fb4dc454c attempt 1"
+	fixture.completeWorkerWith(t, mission.ID, task.ID, 1, oldBody,
+		`{"version":1,"status":"completed","summary":"`+oldBody+`",`+
+			`"verification":[{"command":"go test ./...","exit_code":0}],"changed_files":["change-1.txt"],"risks":[]}`)
+	fixture.verifyComplete(t, task.ID)
+	runCLI(t, "validate", task.ID, "--git", fixture.git, "--herdr", fixture.herdr)
+
+	// Recreate an already-created historical intent carrying all original
+	// public inputs. New intake rejects this shape; delivery still must fail
+	// closed without treating old records as a compatibility contract.
+	task, err := store.ReadTask(mission.ID, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Title = objective + " " + objective
+	task.DeliveryBranch = "sophon/home-111-tesla-fleet-api-baseclient-taskf0bb/attempt-1"
+	if err := store.Publish(store.TaskPath(fixture.home, mission.ID, task.ID), task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCLIErr(t, "deliver", task.ID, "--confirmed", "--git", fixture.git, "--gh-axi", fixture.ghAxi); err == nil ||
+		!strings.Contains(err.Error(), "public delivery preflight refused") {
+		t.Fatalf("delivery error = %v", err)
+	}
+	if _, err := os.Stat(fixture.ghLog); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("forge was contacted before refusal: %v", err)
+	}
+	if _, err := os.Stat(fixture.gitLog); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("push was attempted before refusal: %v", err)
+	}
+	spawn, err := store.ReadSpawn(mission.ID, task.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("git", "--git-dir", filepath.Join(filepath.Dir(fixture.project), "origin.git"),
+		"show-ref", "--verify", "refs/heads/"+task.DeliveryBranch)
+	if err := command.Run(); err == nil {
+		t.Fatal("private delivery branch was pushed")
+	}
+	if _, err := store.ReadDelivery(mission.ID, task.ID, 1); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("delivery intent published before preflight: %v", err)
+	}
+	if spawn.Branch == task.DeliveryBranch {
+		t.Fatal("test did not preserve separate local and public branch identities")
+	}
+}
+
+func TestCLIPublicPullRequestDeliveryUsesCuratedProductEvidence(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "Public product delivery")
+	output := runCLI(t, "task", "create", "--mission", mission.ID,
+		"--title", "HOME-111 Add Tesla fleet client",
+		"--objective", "Implement the fleet API BaseClient, its behavior, and regression coverage.",
+		"--delivery-branch", "home-111/tesla-fleet-client", "--delivery", "pr",
+		"--validate", "test -f change-1.txt")
+	var task store.Task
+	if err := json.Unmarshal(output, &task); err != nil {
+		t.Fatal(err)
+	}
+	spawn := fixture.spawnTask(t, task.ID)
+	head := fixture.completeWorkerWith(t, mission.ID, task.ID, 1, "HOME-111 Add Tesla fleet client",
+		`{"version":1,"status":"completed","summary":"Added request handling and typed fleet responses",`+
+			`"verification":[{"command":"SOPHON_DATA_HOME=/Users/alice/.sophon go test ./...","exit_code":0}],`+
+			`"changed_files":["change-1.txt"],"risks":["Retries remain caller-managed"]}`)
+	fixture.verifyComplete(t, task.ID)
+	runCLI(t, "validate", task.ID, "--git", fixture.git, "--herdr", fixture.herdr)
+	deliveredJSON := runCLI(t, "deliver", task.ID, "--confirmed", "--git", fixture.git, "--gh-axi", fixture.ghAxi)
+	var delivered store.Delivery
+	if err := json.Unmarshal(deliveredJSON, &delivered); err != nil {
+		t.Fatal(err)
+	}
+	if delivered.Branch != task.DeliveryBranch || !strings.EqualFold(delivered.HeadSHA, head) {
+		t.Fatalf("delivery = %+v", delivered)
+	}
+	read := func(name, file string) string {
+		t.Helper()
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return string(data)
+	}
+	title := read("PR title", fixture.ghTitle)
+	body := read("PR body", fixture.ghBody)
+	branch := read("PR head", fixture.ghHead)
+	if title != task.Title || branch != task.DeliveryBranch || spawn.Branch == branch {
+		t.Fatalf("public metadata title=%q branch=%q local=%q", title, branch, spawn.Branch)
+	}
+	for _, want := range []string{"## Summary", "Added request handling and typed fleet responses", "## Verification", "`go test ./...` (passed)", "## Risks", "Retries remain caller-managed"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("PR body missing %q:\n%s", want, body)
+		}
+	}
+	publicValues := strings.Join([]string{title, body, branch}, "\n")
+	for _, private := range []string{"sophon", ".sophon", mission.ID, task.ID, "attempt-1", "/Users/", "treehouse", "herdr", "pane", "tab", "workspace", "generated prompt"} {
+		if strings.Contains(strings.ToLower(publicValues), strings.ToLower(private)) {
+			t.Fatalf("public values leaked %q:\n%s", private, publicValues)
+		}
+	}
+	remoteHead := runCLIGit(t, filepath.Join(filepath.Dir(fixture.project), "origin.git"), "rev-parse", "refs/heads/"+task.DeliveryBranch)
+	if !strings.EqualFold(remoteHead, head) {
+		t.Fatalf("remote head = %s, want %s", remoteHead, head)
+	}
+	if output := runCLIGit(t, filepath.Join(filepath.Dir(fixture.project), "origin.git"), "branch", "--list", spawn.Branch); output != "" {
+		t.Fatalf("private local branch became public: %s", output)
+	}
+
+	// A terminal retry returns the exact receipt and does not create another PR.
+	again := runCLI(t, "deliver", task.ID, "--confirmed", "--git", fixture.git, "--gh-axi", fixture.ghAxi)
+	if string(again) != string(deliveredJSON) {
+		t.Fatalf("repeat delivery changed receipt:\n%s\n%s", deliveredJSON, again)
+	}
+	if calls := read("forge calls", fixture.ghLog); strings.Count(calls, "pr create") != 1 {
+		t.Fatalf("forge calls = %q", calls)
+	}
+	if calls := read("Git calls", fixture.gitLog); strings.Count(calls, " push ") != 1 {
+		t.Fatalf("Git calls = %q", calls)
+	}
 }
 
 func TestCLIDeliverRefusals(t *testing.T) {
@@ -791,8 +984,8 @@ func TestCLIDispatchAndUsageErrors(t *testing.T) {
 		{"commander subcommand", []string{"commander"}, "expected: sophon commander"},
 		{"prompt subcommand", []string{"prompt"}, "expected: sophon prompt"},
 		{"mission create missing fields", []string{"mission", "create", "--project", fixture.project}, "required argument is empty"},
-		{"task create unknown mission", []string{"task", "create", "--mission", "mission_missing", "--title", "x"}, "not found"},
-		{"task create bad delivery", []string{"task", "create", "--mission", "mission_missing", "--title", "x", "--delivery", "gate"}, "unknown delivery mode"},
+		{"task create unknown mission", []string{"task", "create", "--mission", "mission_missing", "--title", "x", "--objective", "do x", "--delivery-branch", "feature/x"}, "not found"},
+		{"task create bad delivery", []string{"task", "create", "--mission", "mission_missing", "--title", "x", "--objective", "do x", "--delivery-branch", "feature/x", "--delivery", "gate"}, "unknown delivery mode"},
 		{"spawn arity", []string{"spawn", "one", "two"}, "exactly one task ID"},
 		{"worker complete arity", []string{"worker", "complete"}, "exactly one task ID"},
 		{"worker complete missing result", []string{"worker", "complete", "task_x", "--attempt", "1", "--head-sha", "abc"}, "result path are required"},

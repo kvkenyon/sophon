@@ -23,7 +23,8 @@ func useHome(t *testing.T) string {
 }
 
 func sampleTask(missionID, taskID string) Task {
-	return Task{ID: taskID, MissionID: missionID, Title: "Add feature", Kind: domain.TaskImplementation,
+	return Task{ID: taskID, MissionID: missionID, Title: "Add feature", Objective: "Implement the feature.",
+		DeliveryBranch: "feature/add-feature", Kind: domain.TaskImplementation,
 		DeliveryMode: domain.DeliveryBranch, CreatedAt: time.Now().UTC()}
 }
 
@@ -121,6 +122,24 @@ func TestCreateAndListMissionsAndTasks(t *testing.T) {
 	// A task under a missing mission is refused.
 	if err := CreateTask(sampleTask("mission_missing", "task_b")); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCreateTaskOwnsPublicIntentSchema(t *testing.T) {
+	useHome(t)
+	mission := Mission{ID: "mission_a", ProjectPath: "/repo", Title: "Ship", Objective: "Do it", CreatedAt: time.Now().UTC()}
+	if err := CreateMission(mission); err != nil {
+		t.Fatal(err)
+	}
+	invalid := sampleTask(mission.ID, "task_a")
+	invalid.Objective = ""
+	if err := CreateTask(invalid); err == nil {
+		t.Fatal("store accepted a task without its distinct worker objective")
+	}
+	invalid = sampleTask(mission.ID, "task_b")
+	invalid.DeliveryBranch = "sophon/private/attempt-1"
+	if err := CreateTask(invalid); err == nil {
+		t.Fatal("store accepted a private delivery branch")
 	}
 }
 

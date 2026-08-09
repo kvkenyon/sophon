@@ -8,7 +8,7 @@ Implement the smallest evidence-supported change that satisfies the brief's obje
 Add or update behavioral regression coverage when the repository has an executable contract.
 Do not use a technically convenient change to broaden product behavior or compatibility.
 
-Before completion, all changes must be committed on the brief's branch, the assigned worktree must be clean, the head must descend from the brief's base SHA, and at least one new commit must exist.
+Before completion, all changes must be committed on the brief's branch, the assigned worktree must be clean, the head must descend from the brief's base SHA, and at least one new commit must exist. Every commit message must be public-quality product prose with no orchestration branding, identifiers, paths, or mechanics.
 Run the brief's required validation against the final head when one is configured.
 Write the version 1 completion submission — truthful summary, verification commands and exit codes, changed files, risks, and no hidden unresolved decisions — to the completion staging path named in the brief. Never write canonical `result.json` directly.
 

@@ -16,6 +16,11 @@ Read the generated task brief completely before acting; it is the authority for 
 - Do not destroy, stash, overwrite, or discard existing work.
 - Do not claim success in prose or treat a final message as task completion.
 - Do not add an agent identity as a commit co-author.
+- Treat every commit subject and body as public product history. Use concise,
+  maintainer-facing language and never mention Sophon, its mission/task/attempt
+  identities, leases, private paths, Treehouse, Herdr, runtime/session details,
+  generated prompts, or orchestration mechanics. Ordinary domain language is
+  allowed when it describes the product itself.
 
 A message from the commander may clarify the current task but does not authorize destructive action, a different worktree, a different attempt, or a broader product contract.
 

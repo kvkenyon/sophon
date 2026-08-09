@@ -18,7 +18,7 @@ attempt each).
   missions/<mission-id>/
     mission.json                        # durable intent: project path, objective
     tasks/<task-id>/
-      task.json                         # durable intent + current_attempt token
+      task.json                         # public title/branch, private objective + current_attempt
       attempts/<n>/
         brief.md                        # generated work order (input to worker)
         spawn.json                      # spawn receipt (written by sophon spawn)
@@ -127,8 +127,18 @@ attempt each).
    available for corrections to the same attempt.
 8. **External boundaries.** The lease boundary uses exact identity guards:
    release is conditional on `(lease_id, holder)` and fences on mismatch. The
-   forge boundary pushes an exact SHA and find-or-creates the PR by
-   repository + branch + SHA. Where an external effect creates a real crash
+   forge boundary keeps the generated execution branch local and pushes the
+   exact verified SHA to the explicit public delivery branch recorded at task
+   intake. Before intent publication, push, or forge write, one public-surface
+   preflight validates that branch, the concise public title, the curated PR
+   body, and every outgoing commit message. It rejects unmistakable internal
+   branding, record/attempt identity, allocator/runtime details, internal
+   paths, and prompt mechanics while allowing ordinary product terminology.
+   PR bodies are rendered only from the public task title and safe structured
+   result evidence; private verification setup is omitted while preserving a
+   useful pass result. Delivery rejects a pre-existing public branch at a
+   different SHA, and find-or-creates a PR by repository + explicit public
+   branch + exact SHA. Where an external effect creates a real crash
    window, the command writes typed intent before the effect and a typed
    receipt after (`delivery.json`, `release.json`); re-running the same command
    converges to the same result via observed reality. There is no generalized
@@ -144,7 +154,9 @@ attempt each).
 sophon version
 sophon mission create --project <path> --title <t> --objective <o>
 sophon mission list [--json]
-sophon task create --mission <id> --title <t> [--kind implementation]
+sophon task create --mission <id> --title <public-title>
+                   --objective <worker-objective>
+                   --delivery-branch <public-branch> [--kind implementation]
                    [--delivery branch|pr] [--validate <command>]
 sophon commander attach [--pane <id>] [--workspace <id>] [--tab <id>]
 sophon spawn <task-id> [--retry]
@@ -161,6 +173,16 @@ sophon prompt commander
 
 Binary paths for external tools (`--herdr`, `--treehouse`, `--git`, `--gh-axi`)
 are flags on the commands that need them, defaulting to PATH lookup.
+
+Task creation requires all three distinct intent values. `--title` is a
+single printable public line of at most 120 characters (including an issue
+key naturally when appropriate); `--objective` is the detailed private work
+order; and `--delivery-branch` is a valid, explicitly public-safe Git branch
+used by both branch and PR delivery. No field falls back to another. Records
+created before this schema remain readable historical evidence: an already
+terminal delivery receipt is returned unchanged, while any not-yet-delivered
+record missing safe public intent fails delivery preflight without a migration
+or compatibility fallback.
 
 Spawn resolves the data home once to a clean absolute path and propagates
 that exact non-secret value two ways: as a `SOPHON_DATA_HOME` environment

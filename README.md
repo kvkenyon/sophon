@@ -32,9 +32,11 @@ Start a commander session from the rendered prompt (for example, paste the outpu
 sophon mission create --project /path/to/repo --title "Rate limiting" \
   --objective "Add per-client rate limiting to the API with regression tests"
 
-# 2. Create a task: one substantive outcome, its delivery mode and validation.
-sophon task create --mission <mission-id> --title "Token-bucket limiter" \
-  --delivery pr --validate "go test ./..."
+# 2. Create a task with separate public metadata and private worker detail.
+sophon task create --mission <mission-id> --title "API: add token-bucket limiter" \
+  --objective "Implement per-client token-bucket limiting with unit and integration coverage" \
+  --delivery-branch "api/token-bucket-limiter" --delivery pr \
+  --validate "go test ./..."
 
 # 3. Spawn attempt 1: lease, branch, generated brief, worker pane.
 sophon spawn <task-id>
@@ -86,6 +88,12 @@ After durable publication the CLI best-effort wakes the attached commander. A va
 - **Crash-safe external effects.** Delivery and release write typed intent before the effect and a receipt after; re-running converges to the same result.
 - **Operational status plus durable history.** Normal status filters exact current-attempt releases and released-only missions; `status --all` shows immutable history and distinguishes released-delivered from released-undelivered work. No records are deleted.
 - **Volatile liveness routing, never truth.** `sophon commander attach` records only a best-effort wake/placement address; publication wakes, grouped worker tabs, and retired worker panes are liveness and presentation, while every fact still derives from files.
+- **Hard public boundary.** Task intake records a concise public title and
+  explicit public delivery branch separately from the detailed worker
+  objective. Delivery pushes the verified SHA to that branch, renders PR
+  evidence for maintainers, and refuses before any write if the branch,
+  title, body, or commit messages disclose internal branding, identities,
+  runtime details, or local paths.
 
 ## Documentation
 

@@ -10,6 +10,7 @@ import (
 	"sophon/internal/domain"
 	"sophon/internal/herdr"
 	"sophon/internal/id"
+	"sophon/internal/publicsurface"
 	"sophon/internal/store"
 	"sophon/internal/treehouse"
 )
@@ -35,9 +36,15 @@ func (f *Flow) CreateMission(ctx context.Context, projectPath, title, objective 
 
 // CreateTask publishes durable task intent under a mission. Empty kind
 // defaults to implementation; empty delivery mode defaults to branch.
-func (f *Flow) CreateTask(ctx context.Context, missionID, title string, kind domain.TaskKind,
+func (f *Flow) CreateTask(ctx context.Context, missionID, title, objective, deliveryBranch string, kind domain.TaskKind,
 	mode domain.DeliveryMode, validationCommand string) (store.Task, error) {
-	if err := requireNonEmpty(missionID, title); err != nil {
+	if err := requireNonEmpty(missionID, title, objective, deliveryBranch); err != nil {
+		return store.Task{}, fmt.Errorf("create task: %w", err)
+	}
+	if err := publicsurface.TaskTitle(title); err != nil {
+		return store.Task{}, fmt.Errorf("create task: %w", err)
+	}
+	if err := publicsurface.Branch(deliveryBranch); err != nil {
 		return store.Task{}, fmt.Errorf("create task: %w", err)
 	}
 	if kind == "" {
@@ -63,8 +70,9 @@ func (f *Flow) CreateTask(ctx context.Context, missionID, title string, kind dom
 	if err != nil {
 		return store.Task{}, err
 	}
-	task := store.Task{ID: taskID, MissionID: missionID, Title: title, Kind: kind,
-		DeliveryMode: mode, ValidationCommand: validationCommand, CreatedAt: time.Now().UTC()}
+	task := store.Task{ID: taskID, MissionID: missionID, Title: title, Objective: objective,
+		DeliveryBranch: deliveryBranch, Kind: kind, DeliveryMode: mode,
+		ValidationCommand: validationCommand, CreatedAt: time.Now().UTC()}
 	return task, store.CreateTask(task)
 }
 

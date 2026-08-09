@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
 	"encoding/csv"
 	"errors"
@@ -56,6 +57,30 @@ func (g CommandGit) Repository(ctx context.Context, worktree string) (string, er
 	return normalized, nil
 }
 
+// CommitMessages returns every commit message that will become public when
+// the verified head is pushed. The base is excluded and the head included.
+func (g CommandGit) CommitMessages(ctx context.Context, worktree, baseSHA, headSHA string) ([]string, error) {
+	if !fullSHA.MatchString(baseSHA) || !fullSHA.MatchString(headSHA) {
+		return nil, errors.New("full base and head SHAs are required to inspect commit messages")
+	}
+	output, err := exec.CommandContext(ctx, g.binary(), "-C", worktree, "log", "--format=%B%x00", baseSHA+".."+headSHA).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("inspect delivery commit messages: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	parts := bytes.Split(output, []byte{0})
+	messages := make([]string, 0, len(parts))
+	for _, part := range parts {
+		message := strings.TrimSpace(string(part))
+		if message != "" {
+			messages = append(messages, message)
+		}
+	}
+	if len(messages) == 0 {
+		return nil, errors.New("verified delivery contains no public commits")
+	}
+	return messages, nil
+}
+
 func (g CommandGit) output(ctx context.Context, worktree string, args ...string) (string, error) {
 	commandArgs := append([]string{"-C", worktree}, args...)
 	output, err := exec.CommandContext(ctx, g.binary(), commandArgs...).CombinedOutput()
@@ -92,7 +117,8 @@ func (r CommandRemote) Push(ctx context.Context, repository, worktree, branch, h
 		return errors.New("worktree origin changed after delivery preparation")
 	}
 	refspec := strings.ToLower(headSHA) + ":refs/heads/" + branch
-	output, err := exec.CommandContext(ctx, r.gitBinary(), "-C", worktree, "push", "origin", refspec).CombinedOutput()
+	lease := "--force-with-lease=refs/heads/" + branch + ":"
+	output, err := exec.CommandContext(ctx, r.gitBinary(), "-C", worktree, "push", lease, "origin", refspec).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git push exact SHA: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -108,7 +134,7 @@ func (r CommandRemote) FindPullRequest(ctx context.Context, repository, worktree
 		return nil, nil
 	}
 	output, err := r.gh(ctx, worktree, "pr", "list", "--state", "all", "--head", branch,
-		"--limit", "10", "--fields", "url")
+		"--limit", "10", "--fields", "number,url")
 	if err != nil {
 		return nil, err
 	}
@@ -142,23 +168,38 @@ func (r CommandRemote) CreatePullRequest(ctx context.Context, in PullRequestInpu
 }
 
 func (r CommandRemote) HeadSHA(ctx context.Context, repository, worktree, branch string) (string, error) {
-	actual, err := CommandGit{Binary: r.GitBinary}.Repository(ctx, worktree)
+	head, exists, err := r.BranchHead(ctx, repository, worktree, branch)
 	if err != nil {
 		return "", err
 	}
+	if !exists {
+		return "", fmt.Errorf("remote branch %q does not exist", branch)
+	}
+	return head, nil
+}
+
+// BranchHead observes an explicit public branch without mutating it.
+func (r CommandRemote) BranchHead(ctx context.Context, repository, worktree, branch string) (string, bool, error) {
+	actual, err := CommandGit{Binary: r.GitBinary}.Repository(ctx, worktree)
+	if err != nil {
+		return "", false, err
+	}
 	if actual != repository {
-		return "", errors.New("worktree origin does not match the prepared delivery repository")
+		return "", false, errors.New("worktree origin does not match the prepared delivery repository")
 	}
 	output, err := exec.CommandContext(ctx, r.gitBinary(), "-C", worktree, "ls-remote", "--heads", "origin",
 		"refs/heads/"+branch).CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("inspect remote branch: %w: %s", err, strings.TrimSpace(string(output)))
+		return "", false, fmt.Errorf("inspect remote branch: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	fields := strings.Fields(string(output))
-	if len(fields) != 2 || !fullSHA.MatchString(fields[0]) {
-		return "", fmt.Errorf("remote branch %q did not resolve to one full SHA", branch)
+	if len(fields) == 0 {
+		return "", false, nil
 	}
-	return strings.ToLower(fields[0]), nil
+	if len(fields) != 2 || !fullSHA.MatchString(fields[0]) {
+		return "", false, fmt.Errorf("remote branch %q did not resolve to one full SHA", branch)
+	}
+	return strings.ToLower(fields[0]), true, nil
 }
 
 func (r CommandRemote) gh(ctx context.Context, worktree string, args ...string) (string, error) {

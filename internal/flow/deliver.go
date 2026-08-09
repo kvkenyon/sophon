@@ -10,6 +10,7 @@ import (
 	"sophon/internal/datahome"
 	"sophon/internal/delivery"
 	"sophon/internal/domain"
+	"sophon/internal/publicsurface"
 	"sophon/internal/store"
 )
 
@@ -77,14 +78,41 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 	if err := f.deps.DeliveryGit.VerifyHead(ctx, spawn.WorktreePath, spawn.Branch, outcome.HeadSHA); err != nil {
 		return store.Delivery{}, err
 	}
+	result, err := store.ReadResult(task.MissionID, taskID, attempt)
+	if err != nil {
+		return store.Delivery{}, fmt.Errorf("read verified result for public delivery: %w", err)
+	}
+	body := publicsurface.PullRequestBody(task.Title, result)
+	commitMessages, err := f.deps.DeliveryGit.CommitMessages(ctx, spawn.WorktreePath, spawn.BaseSHA, outcome.HeadSHA)
+	if err != nil {
+		return store.Delivery{}, err
+	}
+	if err := publicsurface.Preflight(task.DeliveryBranch, task.Title, body, commitMessages); err != nil {
+		return store.Delivery{}, fmt.Errorf("public delivery preflight refused: %w", err)
+	}
+	if prior != nil && prior.State == store.DeliveryPending &&
+		(prior.Branch != task.DeliveryBranch || prior.Mode != task.DeliveryMode) {
+		return store.Delivery{}, errors.New("pending delivery intent does not match current public branch and mode")
+	}
 	repository, err := f.deps.DeliveryGit.Repository(ctx, spawn.WorktreePath)
 	if err != nil {
 		return store.Delivery{}, err
 	}
-	// Typed intent before any external effect; a pending intent for the same
-	// head keeps its original timestamp while converging.
+	if prior != nil && prior.State == store.DeliveryPending && prior.Repository != repository {
+		return store.Delivery{}, errors.New("pending delivery intent does not match current repository")
+	}
+	// Read-only collision observation precedes the typed intent. Every external
+	// write follows it; a pending intent for the same head keeps its original
+	// timestamp while converging.
+	remoteHead, branchExists, err := f.deps.DeliveryRemote.BranchHead(ctx, repository, spawn.WorktreePath, task.DeliveryBranch)
+	if err != nil {
+		return store.Delivery{}, err
+	}
+	if branchExists && !strings.EqualFold(remoteHead, outcome.HeadSHA) {
+		return store.Delivery{}, fmt.Errorf("public delivery branch %q already exists at a different head", task.DeliveryBranch)
+	}
 	intent := store.Delivery{TaskID: taskID, Attempt: attempt, Mode: task.DeliveryMode,
-		Repository: repository, Branch: spawn.Branch, HeadSHA: outcome.HeadSHA,
+		Repository: repository, Branch: task.DeliveryBranch, HeadSHA: outcome.HeadSHA,
 		State: store.DeliveryPending, IntentAt: time.Now().UTC()}
 	if prior != nil && prior.State == store.DeliveryPending {
 		intent.IntentAt = prior.IntentAt
@@ -92,15 +120,17 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 	if err := store.Publish(deliveryPath, intent); err != nil {
 		return store.Delivery{}, fmt.Errorf("publish delivery intent: %w", err)
 	}
-	if err := f.deps.DeliveryRemote.Push(ctx, repository, spawn.WorktreePath, spawn.Branch, outcome.HeadSHA); err != nil {
-		return store.Delivery{}, fmt.Errorf("push exact head: %w", err)
+	if !branchExists {
+		if err := f.deps.DeliveryRemote.Push(ctx, repository, spawn.WorktreePath, task.DeliveryBranch, outcome.HeadSHA); err != nil {
+			return store.Delivery{}, fmt.Errorf("push exact head: %w", err)
+		}
 	}
-	remoteHead, err := f.deps.DeliveryRemote.HeadSHA(ctx, repository, spawn.WorktreePath, spawn.Branch)
+	remoteHead, err = f.deps.DeliveryRemote.HeadSHA(ctx, repository, spawn.WorktreePath, task.DeliveryBranch)
 	if err != nil {
 		return store.Delivery{}, err
 	}
 	if !strings.EqualFold(remoteHead, outcome.HeadSHA) {
-		return store.Delivery{}, fmt.Errorf("%w: remote branch %s is %s after push", ErrHeadMismatch, spawn.Branch, remoteHead)
+		return store.Delivery{}, fmt.Errorf("%w: remote branch %s is %s after push", ErrHeadMismatch, task.DeliveryBranch, remoteHead)
 	}
 	now := time.Now().UTC()
 	receipt := intent
@@ -109,7 +139,7 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 	case domain.DeliveryBranch:
 		receipt.State = store.DeliveryDeliveredBranch
 	case domain.DeliveryPR:
-		pr, err := f.findOrCreatePullRequest(ctx, task, attempt, repository, spawn.WorktreePath, outcome.HeadSHA)
+		pr, err := f.findOrCreatePullRequest(ctx, task, repository, spawn.WorktreePath, outcome.HeadSHA, body)
 		if err != nil {
 			return store.Delivery{}, err
 		}
@@ -129,9 +159,9 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 // findOrCreatePullRequest resolves the PR by repository + branch + SHA,
 // creating it when absent and reconciling through observed reality when the
 // create races an existing PR.
-func (f *Flow) findOrCreatePullRequest(ctx context.Context, task store.Task, attempt int,
-	repository, worktree, headSHA string) (*delivery.PullRequest, error) {
-	branch := taskBranchFor(task, attempt)
+func (f *Flow) findOrCreatePullRequest(ctx context.Context, task store.Task,
+	repository, worktree, headSHA, body string) (*delivery.PullRequest, error) {
+	branch := task.DeliveryBranch
 	pr, err := f.deps.DeliveryRemote.FindPullRequest(ctx, repository, worktree, branch, headSHA)
 	if err != nil {
 		return nil, err
@@ -142,7 +172,7 @@ func (f *Flow) findOrCreatePullRequest(ctx context.Context, task store.Task, att
 	created, err := f.deps.DeliveryRemote.CreatePullRequest(ctx, delivery.PullRequestInput{
 		Repository: repository, Worktree: worktree, Branch: branch,
 		HeadSHA: headSHA, Title: task.Title,
-		Body: fmt.Sprintf("Sophon task %s attempt %d", task.ID, attempt)})
+		Body: body})
 	if err == nil {
 		return &created, nil
 	}
@@ -151,8 +181,4 @@ func (f *Flow) findOrCreatePullRequest(ctx context.Context, task store.Task, att
 		return reconciled, nil
 	}
 	return nil, fmt.Errorf("create pull request: %w", err)
-}
-
-func taskBranchFor(task store.Task, attempt int) string {
-	return TaskBranch(task.Title, task.ID, attempt)
 }

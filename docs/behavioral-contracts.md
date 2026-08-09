@@ -59,6 +59,12 @@ no managed runtime, no resume machinery. Its contract:
   delivery and explicit release, and a cleanup failure is a bounded
   diagnostic, never a verification failure. Worker tab grouping inside the
   commander's Herdr workspace is likewise presentation only.
+- **Explicit public delivery intent.** Task creation records a concise public
+  title, a detailed private worker objective, and an explicit public delivery
+  branch as separate required values. The commander never derives public
+  metadata from internal IDs, attempt state, private paths, or prompt prose,
+  and never writes Sophon branding or orchestration mechanics to a public Git
+  or forge surface.
 
 Conditional procedures live in the materialized skills under `prompts/skills/`
 (recap, status, operator-authority, decision-lifecycle, diagnostic-reasoning,
@@ -97,6 +103,10 @@ in its own leased Treehouse worktree. Its contract:
   blockers it cannot resolve within the brief, by stopping, preserving work,
   and reporting the evidence — never by addressing the operator, and never by
   answering its own decision blocker or fabricating a result.
+- **Public-quality commits.** Although the execution branch is private, every
+  commit may later be pushed by exact SHA. Subjects and bodies therefore use
+  maintainer-facing product language and exclude Sophon branding, internal
+  identities, local/runtime details, and orchestration prose.
 
 ## Why this holds without a daemon
 

@@ -40,15 +40,15 @@ func TestStatusDerivesActionQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plain, err := rig.flow.CreateTask(ctx, mission.ID, "Plain task", "", "", "")
+	plain, err := rig.flow.CreateTask(ctx, mission.ID, "Plain task", "Implement the plain behavior.", "feature/plain", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	validated, err := rig.flow.CreateTask(ctx, mission.ID, "Validated task", "", "", "go test ./...")
+	validated, err := rig.flow.CreateTask(ctx, mission.ID, "Validated task", "Implement validated behavior.", "feature/validated", "", "", "go test ./...")
 	if err != nil {
 		t.Fatal(err)
 	}
-	failed, err := rig.flow.CreateTask(ctx, mission.ID, "Failing task", "", "", "go test ./...")
+	failed, err := rig.flow.CreateTask(ctx, mission.ID, "Failing task", "Implement failing behavior.", "feature/failing", "", "", "go test ./...")
 	if err != nil {
 		t.Fatal(err)
 	}

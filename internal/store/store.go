@@ -22,6 +22,7 @@ import (
 	"sophon/internal/datahome"
 	"sophon/internal/domain"
 	"sophon/internal/herdr"
+	"sophon/internal/publicsurface"
 )
 
 var (
@@ -71,6 +72,8 @@ type Task struct {
 	ID                string              `json:"id"`
 	MissionID         string              `json:"mission_id"`
 	Title             string              `json:"title"`
+	Objective         string              `json:"objective"`
+	DeliveryBranch    string              `json:"delivery_branch"`
 	Kind              domain.TaskKind     `json:"kind"`
 	DeliveryMode      domain.DeliveryMode `json:"delivery_mode"`
 	ValidationCommand string              `json:"validation_command,omitempty"`
@@ -586,6 +589,24 @@ func CreateTask(task Task) error {
 	}
 	if _, err := ReadMission(task.MissionID); err != nil {
 		return err
+	}
+	if task.ID == "" || task.MissionID == "" || strings.TrimSpace(task.Objective) == "" || task.DeliveryBranch == "" {
+		return errors.New("task intent requires id, mission, detailed objective, and public delivery branch")
+	}
+	if task.Kind != domain.TaskImplementation {
+		return fmt.Errorf("task intent has unknown kind %q", task.Kind)
+	}
+	if task.DeliveryMode != domain.DeliveryBranch && task.DeliveryMode != domain.DeliveryPR {
+		return fmt.Errorf("task intent has unknown delivery mode %q", task.DeliveryMode)
+	}
+	if task.CurrentAttempt != 0 || task.CreatedAt.IsZero() {
+		return errors.New("new task intent requires attempt zero and a creation time")
+	}
+	if err := publicsurface.TaskTitle(task.Title); err != nil {
+		return fmt.Errorf("validate task public title: %w", err)
+	}
+	if err := publicsurface.Branch(task.DeliveryBranch); err != nil {
+		return fmt.Errorf("validate task public delivery branch: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Join(TaskDir(homeDir, task.MissionID, task.ID), "attempts"), 0o700); err != nil {
 		return fmt.Errorf("create task directory: %w", err)

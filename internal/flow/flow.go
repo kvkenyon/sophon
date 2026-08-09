@@ -54,6 +54,7 @@ type Git interface {
 type DeliveryGit interface {
 	VerifyHead(context.Context, string, string, string) error
 	Repository(context.Context, string) (string, error)
+	CommitMessages(context.Context, string, string, string) ([]string, error)
 }
 
 // DeliveryRemote matches internal/delivery.CommandRemote's forge boundary.
@@ -62,6 +63,7 @@ type DeliveryRemote interface {
 	FindPullRequest(context.Context, string, string, string, string) (*delivery.PullRequest, error)
 	CreatePullRequest(context.Context, delivery.PullRequestInput) (delivery.PullRequest, error)
 	HeadSHA(context.Context, string, string, string) (string, error)
+	BranchHead(context.Context, string, string, string) (string, bool, error)
 }
 
 // Validator runs the task's validation command in a worktree.

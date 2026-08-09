@@ -218,7 +218,9 @@ func taskCommand(ctx context.Context, args []string) error {
 func taskCreate(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("task create", flag.ContinueOnError)
 	missionID := flags.String("mission", "", "mission ID")
-	title := flags.String("title", "", "task title")
+	title := flags.String("title", "", "concise public task and pull request title")
+	objective := flags.String("objective", "", "detailed worker objective")
+	deliveryBranch := flags.String("delivery-branch", "", "explicit public-safe branch to push")
 	kind := flags.String("kind", string(domain.TaskImplementation), "task kind")
 	delivery := flags.String("delivery", string(domain.DeliveryBranch), "delivery mode (branch|pr)")
 	validate := flags.String("validate", "", "required validation command")
@@ -229,7 +231,7 @@ func taskCreate(ctx context.Context, args []string) error {
 	if len(positional) != 0 {
 		return errors.New("task create does not accept positional arguments")
 	}
-	created, err := flow.New(flow.Deps{}).CreateTask(ctx, *missionID, *title,
+	created, err := flow.New(flow.Deps{}).CreateTask(ctx, *missionID, *title, *objective, *deliveryBranch,
 		domain.TaskKind(*kind), domain.DeliveryMode(*delivery), *validate)
 	if err != nil {
 		return err
@@ -542,7 +544,7 @@ func usage() {
   sophon version
   sophon mission create --project PATH --title TITLE --objective OBJECTIVE
   sophon mission list [--json]
-  sophon task create --mission ID --title TITLE [--kind KIND] [--delivery branch|pr] [--validate COMMAND]
+  sophon task create --mission ID --title PUBLIC_TITLE --objective WORKER_OBJECTIVE --delivery-branch PUBLIC_BRANCH [--kind KIND] [--delivery branch|pr] [--validate COMMAND]
   sophon spawn TASK [--retry] [--herdr BIN] [--treehouse BIN] [--git BIN] [--herdr-session NAME]
   sophon worker complete TASK --attempt N --head-sha SHA --result FILE [--git BIN] [--herdr BIN]
   sophon worker report TASK --attempt N --head-sha SHA --report FILE [--git BIN] [--herdr BIN]
