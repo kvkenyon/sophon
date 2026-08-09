@@ -17,6 +17,9 @@ var requiredCommanderClauses = []string{
 	"sophon commander attach",
 	"--confirmed",
 	"operator confirmation",
+	"action queue first",
+	"Drain the action queue to a fixed point",
+	"ready for my verification",
 }
 
 // requiredWorkerClauses are the behavioral contracts every worker brief must
@@ -47,6 +50,27 @@ func TestCommanderPromptCarriesBehavioralContracts(t *testing.T) {
 		if !strings.Contains(body, clause) {
 			t.Errorf("rendered commander prompt omitted %q", clause)
 		}
+	}
+}
+
+// The drain procedure must run every verify-complete before any validate,
+// and reporting comes only after the queue is empty.
+func TestCommanderPromptOrdersDrainBeforeReporting(t *testing.T) {
+	t.Setenv(OverrideEnv, "")
+	body, err := Compose(filepath.Join(t.TempDir(), "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain := strings.Index(body, "Drain the action queue to a fixed point")
+	if drain < 0 {
+		t.Fatal("rendered commander prompt omitted the drain procedure")
+	}
+	rest := body[drain:]
+	verify := strings.Index(rest, "sophon verify-complete")
+	validate := strings.Index(rest, "sophon validate")
+	report := strings.Index(rest, "Only then")
+	if verify < 0 || validate < 0 || report < 0 || verify > validate || validate > report {
+		t.Errorf("drain ordering broken: verify at %d, validate at %d, report at %d", verify, validate, report)
 	}
 }
 

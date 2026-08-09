@@ -180,11 +180,27 @@ func TestNotifyCommanderIsBestEffort(t *testing.T) {
 	}
 	if len(fake.submissions) != 1 || !strings.HasPrefix(fake.submissions[0], "w9:p1: ") ||
 		!strings.Contains(fake.submissions[0], "task_x") || !strings.Contains(fake.submissions[0], "ready") ||
-		!strings.Contains(fake.submissions[0], "sophon status") {
+		!strings.Contains(fake.submissions[0], "sophon status") ||
+		!strings.Contains(fake.submissions[0], "sophon verify-complete task_x") {
 		t.Fatalf("commander wake = %v", fake.submissions)
+	}
+	if strings.Contains(fake.submissions[0], "sophon validate") {
+		t.Fatalf("wake for an unknown task must not promise validation: %v", fake.submissions[0])
 	}
 	if len(requested) != 1 || requested[0] != "fm-lab-x" {
 		t.Fatalf("notify routed to sessions %v, want [fm-lab-x]", requested)
+	}
+
+	// A task with a configured validation command gets the exact validate
+	// command in its wake.
+	_, validated := rig.createMissionAndTask(t, "", "go test ./...")
+	if err := rig.flow.NotifyCommander(ctx, validated.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.submissions) != 2 ||
+		!strings.Contains(fake.submissions[1], "sophon verify-complete "+validated.ID) ||
+		!strings.Contains(fake.submissions[1], "sophon validate "+validated.ID) {
+		t.Fatalf("validated task wake = %v", fake.submissions)
 	}
 
 	// Delivery failure surfaces as a bounded diagnostic error.

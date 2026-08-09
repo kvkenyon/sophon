@@ -87,10 +87,20 @@ func (f *Flow) AttachCommander(ctx context.Context, in AttachRequest) (store.Com
 
 // CommanderWakeMessage is the fixed Sophon-generated wake delivered after a
 // durable result publication. Workers never author operator-facing prose;
-// the message only identifies the task and points at derived status.
-func CommanderWakeMessage(taskID string, attempt int) string {
+// the message names the exact task and commands and orders the commander to
+// drain every derived verify-complete/validate action before replying or
+// waiting. needsValidation adds the exact validate command for a task with a
+// configured validation command.
+func CommanderWakeMessage(taskID string, attempt int, needsValidation bool) string {
+	validate := ""
+	if needsValidation {
+		validate = fmt.Sprintf(", then `sophon validate %s`", taskID)
+	}
 	return fmt.Sprintf("Sophon: task %s attempt %d published a durable result and now derives ready. "+
-		"Run `sophon status` and continue supervision (verify-complete, validation, delivery decision).", taskID, attempt)
+		"This is an action, not a report: before replying or waiting, run `sophon status`, "+
+		"run `sophon verify-complete %s`%s, and keep draining every verify-complete and validate "+
+		"action status lists until none remain. Verification and validation are commander-owned "+
+		"routine work; never report a task as ready for your verification.", taskID, attempt, taskID, validate)
 }
 
 // NotifyCommander best-effort wakes the registered commander after a durable
@@ -115,7 +125,13 @@ func (f *Flow) NotifyCommander(ctx context.Context, taskID string, attempt int) 
 	panes := f.deps.NewSessionPanes(registration.Session)
 	session := herdr.Session{SessionName: registration.Session, PaneID: registration.PaneID,
 		Runtime: herdr.Runtime(registration.Runtime)}
-	if _, err := panes.Submit(ctx, session, CommanderWakeMessage(taskID, attempt)); err != nil {
+	// The validate clause needs the task record; a lookup failure only narrows
+	// the instruction to the always-required status/verify-complete drain.
+	needsValidation := false
+	if task, err := store.FindTask(taskID); err == nil {
+		needsValidation = strings.TrimSpace(task.ValidationCommand) != ""
+	}
+	if _, err := panes.Submit(ctx, session, CommanderWakeMessage(taskID, attempt, needsValidation)); err != nil {
 		return fmt.Errorf("wake commander pane %s in session %s: %w", registration.PaneID, registration.Session, err)
 	}
 	return nil

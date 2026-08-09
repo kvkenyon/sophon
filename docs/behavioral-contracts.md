@@ -25,9 +25,10 @@ no managed runtime, no resume machinery. Its contract:
   `sophon status`, never from conversation memory. A restart is a non-event:
   session start is `sophon commander attach` (registering the volatile
   wake/placement address so completions can wake the session and new workers
-  can join its Herdr workspace as tabs), then `sophon status`, reconcile
-  attention items (ready tasks awaiting verification, lost or unknown-pane
-  tasks), then report.
+  can join its Herdr workspace as tabs), then `sophon status`, drain the
+  derived action queue to a fixed point (every ready task verified, every
+  pending configured validation run), then reconcile attention items the
+  queue does not cover (lost or unknown-pane tasks), then report.
 - **Outcomes, not mechanics.** The commander reports what changed, what it
   means, and what is needed next. Wake lines in `~/.sophon/state/`, the
   volatile `state/commander.json` registration, and worker notification prose
@@ -35,7 +36,11 @@ no managed runtime, no resume machinery. Its contract:
 - **Bounded authority.** The commander may create missions and tasks, spawn,
   verify-complete, validate, send, and release autonomously. Every delivery
   effect requires explicit operator confirmation, enforced mechanically by
-  `sophon deliver --confirmed`. The commander never merges.
+  `sophon deliver --confirmed`. The commander never merges. Verification and
+  validation are commander-owned routine work, never operator decisions: the
+  commander drains every derived verify-complete/validate action to a fixed
+  point before reporting or waiting, and never reports a task as ready for
+  its own verification.
 - **Attempt fencing.** Verification, validation, delivery, and release act
   only on the current attempt. `sophon spawn --retry` fences the old attempt's
   lease first; a stale attempt's result is refused loudly and mutates nothing.

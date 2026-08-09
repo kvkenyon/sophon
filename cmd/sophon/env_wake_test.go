@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"sophon/internal/flow"
 	"sophon/internal/store"
 )
 
@@ -109,7 +110,8 @@ func TestCLIWorkerCompletionWakesAttachedCommander(t *testing.T) {
 
 	wake := logDelta(t, fixture.herdrLog, before)
 	if !strings.Contains(wake, "prompt w1:p1 ") || !strings.Contains(wake, task.ID) ||
-		!strings.Contains(wake, "ready") || !strings.Contains(wake, "sophon status") {
+		!strings.Contains(wake, "ready") || !strings.Contains(wake, "sophon status") ||
+		!strings.Contains(wake, "sophon verify-complete "+task.ID) {
 		t.Fatalf("commander wake missing or malformed in Herdr log:\n%s", wake)
 	}
 	if status := fixture.taskStatus(t, task.ID); status.State != store.StateReady {
@@ -438,5 +440,54 @@ func TestCLISpawnWithoutCommanderFallsBackToIsolatedWorkspace(t *testing.T) {
 	}
 	if log := readLogLines(t, fixture.herdrLog); !strings.Contains(log, "workspace-create ") {
 		t.Fatalf("fallback spawn did not create an isolated workspace:\n%s", log)
+	}
+}
+
+// TestCLIStatusListsDrainActions pins status as an action queue: every ready
+// task lists its exact verify-complete command, a verified task with pending
+// validation lists its exact validate command after the remaining verify
+// commands, and drained actions disappear. A commander reading this output
+// never has to invent the next deterministic step.
+func TestCLIStatusListsDrainActions(t *testing.T) {
+	fixture := newCLIFixture(t)
+	mission := fixture.createMission(t, "Status action queue")
+	plain := fixture.createTask(t, mission.ID)
+	validated := fixture.createTask(t, mission.ID, "--validate", "test -f change-1.txt")
+	fixture.spawnTask(t, plain.ID)
+	fixture.spawnTask(t, validated.ID)
+	fixture.completeWorker(t, mission.ID, plain.ID, 1)
+	fixture.completeWorker(t, mission.ID, validated.ID, 1)
+
+	text := string(runCLI(t, "status"))
+	for _, task := range []store.Task{plain, validated} {
+		if !strings.Contains(text, "ACTION\tsophon verify-complete "+task.ID) {
+			t.Fatalf("status omitted the verify-complete action for %s:\n%s", task.ID, text)
+		}
+	}
+	report := fixture.statusReport(t)
+	if len(report.Actions) != 2 {
+		t.Fatalf("status actions = %+v, want 2 verify-complete actions", report.Actions)
+	}
+
+	// Verifying the validated task swaps its action to validate, after the
+	// remaining verify action.
+	fixture.verifyComplete(t, validated.ID)
+	report = fixture.statusReport(t)
+	if len(report.Actions) != 2 ||
+		report.Actions[0] != (flow.Action{TaskID: plain.ID, Kind: flow.ActionVerifyComplete,
+			Command: "sophon verify-complete " + plain.ID}) ||
+		report.Actions[1] != (flow.Action{TaskID: validated.ID, Kind: flow.ActionValidate,
+			Command: "sophon validate " + validated.ID}) {
+		t.Fatalf("status actions after verify = %+v", report.Actions)
+	}
+
+	// A passing validation and the last verification drain the queue.
+	runCLI(t, "validate", validated.ID, "--git", fixture.git, "--herdr", fixture.herdr)
+	fixture.verifyComplete(t, plain.ID)
+	if report = fixture.statusReport(t); len(report.Actions) != 0 {
+		t.Fatalf("status actions after drain = %+v, want empty", report.Actions)
+	}
+	if text = string(runCLI(t, "status")); strings.Contains(text, "ACTION\t") {
+		t.Fatalf("drained status still lists actions:\n%s", text)
 	}
 }

@@ -79,6 +79,15 @@ duplicated, or contradictory wake lines change nothing; never relay worker
 notification prose as current truth. When a decision depends on current
 reality, run `sophon status` and act on the derivation.
 
+`sophon status` is an action queue first and an operator report second. Every
+entry is a commander-owned deterministic action printed as the exact command
+to run: `sophon verify-complete <task-id>` for each `ready` task, then
+`sophon validate <task-id>` for each `verified` task whose configured
+validation has no receipt yet. Verification and validation are routine work
+you own, not operator decisions and not deferrable: never report a task as
+"ready for my verification", never end your turn, and never emit a status
+summary while a listed verify-complete or validate action remains undrained.
+
 `state/commander.json` is the volatile attach registration: it routes
 completion wakes to your pane and groups new worker tabs into your workspace.
 It is liveness and presentation routing only, never truth; a fresh attach
@@ -111,16 +120,24 @@ declaring anything complete:
    it is missing. Attach records a volatile notification and placement
    address only — never state, never ownership of anything.
 2. Run `sophon status` (add `--json` when you need machine-readable detail).
-3. Reconcile every attention item the derivation surfaces:
-   - **ready** tasks await verification: inspect the result and run
-     `sophon verify-complete`.
+3. Drain the action queue to a fixed point before reporting anything:
+   - for every current `ready` task, inspect its structured result and run
+     `sophon verify-complete <exact-task-id>` immediately;
+   - run status again, and for every `verified` task with a configured
+     validation and no validation receipt, run `sophon validate
+     <exact-task-id>` immediately;
+   - keep re-running status and draining until no verify-complete or
+     validate action remains;
+   - process every actionable task, not just the first: one task's failure
+     is reported with its evidence and never hides independent ready work
+     that can still be processed safely.
+4. Only then reconcile anything the queue does not cover and report:
    - **unknown-pane** or **lost** tasks need reconciliation before any
      intervention; load `worker-recovery`.
-   - **verified** tasks with a configured validation command need
-     `sophon validate`; verified tasks otherwise await a delivery decision
-     with the operator.
-4. Report to the operator concisely: what state the work is in, what you are
-   doing about it, and what (if anything) needs their decision.
+   - **verified** tasks whose validation is complete (or unconfigured)
+     await a delivery decision with the operator.
+   Report concisely: verified and validated outcomes, concrete failures with
+   evidence, and what (if anything) needs the operator's decision.
 
 If there is no mission yet, greet the operator briefly and ask what we are
 working on. After they describe it, infer a concise title and concrete
@@ -208,6 +225,13 @@ change you observe — classify it as progress, completion evidence, a
 recoverable execution issue, a decision, or a failure; run `sophon status` to
 confirm current truth when the fact can have changed; perform the smallest
 authorized CLI action; then return to quiet supervision.
+
+A worker completion wake and any operator request to check the workers are
+drain triggers, not report triggers: run `sophon status` and drain its action
+queue to the fixed point exactly as at session start before you reply,
+summarize, or wait. You may report a task as ready for delivery only after
+its verification and required validation are complete; while either is
+pending, the correct response is the action, never a readiness announcement.
 
 **Never sleep-poll.** Sophon does not move unless you or the operator invoke
 commands. When nothing needs action, stop and wait for the operator or the

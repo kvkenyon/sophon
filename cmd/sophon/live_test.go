@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -257,6 +258,18 @@ func labPaneRead(t *testing.T, herdrBinary, sessionName, paneID string, lines in
 	return string(output)
 }
 
+// labPaneVisible reads a lab pane's current viewport (no scrollback), for
+// assertions about the agent's latest visible report.
+func labPaneVisible(t *testing.T, herdrBinary, sessionName, paneID string) string {
+	t.Helper()
+	output, err := exec.Command(herdrBinary, "pane", "read", paneID,
+		"--source", "visible", "--session", sessionName).CombinedOutput()
+	if err != nil {
+		t.Fatalf("read lab pane %s viewport: %v: %s", paneID, err, output)
+	}
+	return string(output)
+}
+
 // labTabList reports the tab IDs currently present in an exact lab workspace.
 func labTabList(t *testing.T, herdrBinary, sessionName, workspaceID string) map[string]bool {
 	t.Helper()
@@ -299,4 +312,191 @@ func waitFor(t *testing.T, deadline time.Duration, condition func() bool, what s
 		case <-ticker.C:
 		}
 	}
+}
+
+// TestLiveCommanderDrainsReadyWorkInHerdrLab is the guarded behavior proof for
+// the faithful failure the captain observed: a live commander listed two
+// ready tasks "ready for my verification" and stopped. With the real
+// commander contract loaded into a real Codex pane, an operator's "check the
+// workers" must drive verification of every ready task and validation of the
+// configured one before the commander responds or idles, and a completion
+// wake must drive the same drain without any operator message. Run with:
+//
+//	SOPHON_HERDR_LAB=1 HERDR_LAB_HELPER=/path/to/fm-herdr-lab.sh go test ./cmd/sophon -run TestLiveCommanderDrains -timeout 20m
+func TestLiveCommanderDrainsReadyWorkInHerdrLab(t *testing.T) {
+	_, sessionName := herdrLab(t)
+	treehouseBinary, err := exec.LookPath("treehouse")
+	if err != nil {
+		t.Skip("treehouse binary not on PATH")
+	}
+	herdrBinary, err := exec.LookPath("herdr")
+	if err != nil {
+		t.Skip("herdr binary not on PATH")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary is required")
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain is required to build the CLI under test")
+	}
+
+	home := t.TempDir()
+	t.Setenv("SOPHON_DATA_HOME", home)
+	t.Setenv("HERDR_SESSION", "")
+	t.Setenv("HERDR_PANE_ID", "")
+	t.Setenv("HERDR_WORKSPACE_ID", "")
+	t.Setenv("HERDR_TAB_ID", "")
+	t.Setenv("SOPHON_PROMPT_DIR", "")
+	ctx := context.Background()
+
+	project := filepath.Join(t.TempDir(), "project")
+	if err := os.Mkdir(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runCLIGit(t, project, "init", "-b", "main")
+	runCLIGit(t, project, "config", "user.name", "Sophon Lab")
+	runCLIGit(t, project, "config", "user.email", "lab@example.invalid")
+	writeCLIFile(t, filepath.Join(project, "base.txt"), "base\n", 0o600)
+	runCLIGit(t, project, "add", "base.txt")
+	runCLIGit(t, project, "commit", "-m", "base")
+
+	fixture := &cliFixture{home: home, project: project, git: "git",
+		treehouse: treehouseBinary, herdr: herdrBinary, ghAxi: "gh-axi"}
+
+	// The commander pane runs the real CLI built from this tree.
+	sophonBin := filepath.Join(t.TempDir(), "sophon")
+	if output, err := exec.Command("go", "build", "-o", sophonBin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build sophon for the commander pane: %v: %s", err, output)
+	}
+
+	// The real commander contract, plus the lab facts that differ from a
+	// normal installation (binary not on PATH, explicit lab Herdr session).
+	promptCommand := exec.Command(sophonBin, "prompt", "commander")
+	promptCommand.Env = append(os.Environ(), "SOPHON_DATA_HOME="+home)
+	promptBody, err := promptCommand.Output()
+	if err != nil {
+		t.Fatalf("compose commander prompt: %v", err)
+	}
+	brief := string(promptBody) + fmt.Sprintf(`
+## Lab environment addendum
+
+This session runs in an isolated Herdr lab; these facts override the generic
+references above:
+
+- The Sophon CLI is not on PATH. Invoke it by its exact path %s wherever the
+  contract says to run a sophon command (for example: %s status).
+- SOPHON_DATA_HOME is already set in your launch environment; never override
+  or unset it.
+- Append --herdr-session %s to status and send commands so pane observation
+  targets this lab session. Other commands need no Herdr flags.
+`, sophonBin, sophonBin, sessionName)
+
+	adapter := herdr.NewCommandAdapter(herdrBinary, sessionName, "sophon")
+	commander, err := adapter.StartCodex(ctx, herdr.StartRequest{
+		AgentName: "lab-drain-commander", Attempt: 1, WorktreePath: project,
+		Brief: brief, DataHome: home})
+	if err != nil {
+		t.Fatalf("launch lab commander: %v", err)
+	}
+	waitIdle := func(what string) {
+		t.Helper()
+		waitFor(t, 5*time.Minute, func() bool {
+			state, err := adapter.Observe(ctx, commander)
+			return err == nil && state == herdr.StateIdle
+		}, what)
+	}
+	waitIdle("commander pane to settle after its contract brief")
+
+	// The work lands only after the commander settled, matching the captain's
+	// scenario.
+	mission := fixture.createMission(t, "Commander drains ready work")
+	taskValidated := fixture.createTask(t, mission.ID, "--validate", "test -f change-1.txt")
+	taskPlain := fixture.createTask(t, mission.ID)
+
+	attach := func() {
+		t.Helper()
+		runCLI(t, "commander", "attach", "--pane", commander.PaneID,
+			"--workspace", commander.WorkspaceID, "--tab", commander.TabID,
+			"--herdr", herdrBinary, "--herdr-session", sessionName)
+	}
+
+	spawnTask := func(taskID string) store.Spawn {
+		t.Helper()
+		output := runCLI(t, "spawn", taskID, "--herdr", herdrBinary, "--treehouse", treehouseBinary,
+			"--git", "git", "--herdr-session", sessionName)
+		var spawned store.Spawn
+		if err := json.Unmarshal(output, &spawned); err != nil {
+			t.Fatal(err)
+		}
+		return spawned
+	}
+	quietAndComplete := func(taskID string, spawned store.Spawn) {
+		t.Helper()
+		if err := adapter.Cancel(ctx, spawned.Pane); err != nil {
+			t.Fatalf("quiet lab worker: %v", err)
+		}
+		runCLIGit(t, spawned.WorktreePath, "checkout", "--", ".")
+		runCLIGit(t, spawned.WorktreePath, "clean", "-fd")
+		fixture.completeWorker(t, mission.ID, taskID, 1)
+	}
+
+	// With the registration dropped, worker completions stay durable and
+	// unwoken: both tasks derive ready and nothing notifies the pane.
+	if err := os.Remove(store.CommanderPath(home)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("drop commander registration to simulate an undelivered wake: %v", err)
+	}
+	spawnValidated := spawnTask(taskValidated.ID)
+	spawnPlain := spawnTask(taskPlain.ID)
+	quietAndComplete(taskValidated.ID, spawnValidated)
+	quietAndComplete(taskPlain.ID, spawnPlain)
+	attach() // restores routing; attach itself sends no wake
+
+	// Acceptance 1-3: the operator request alone must drain both ready tasks
+	// (and the configured validation) before the commander reports or idles.
+	if _, err := adapter.Submit(ctx, commander, "check the workers"); err != nil {
+		t.Fatalf("ask the commander to check the workers: %v", err)
+	}
+	waitFor(t, 10*time.Minute, func() bool {
+		plain := fixture.taskStatus(t, taskPlain.ID)
+		validated := fixture.taskStatus(t, taskValidated.ID)
+		if plain.State != store.StateVerified || validated.State != store.StateVerified {
+			return false
+		}
+		record, err := store.ReadValidation(mission.ID, taskValidated.ID, 1)
+		return err == nil && record.Passed
+	}, "commander to verify both ready tasks and validate the configured one")
+	waitIdle("commander pane to deliver its final report")
+
+	// The terminal evidence retired exactly the two worker panes; the
+	// commander pane survives.
+	for _, spawned := range []store.Spawn{spawnValidated, spawnPlain} {
+		state, err := adapter.Observe(ctx, spawned.Pane)
+		if err != nil || state != herdr.StateLost {
+			t.Fatalf("worker pane after drain = %s, %v; want retired (lost)", state, err)
+		}
+	}
+	if state, err := adapter.Observe(ctx, commander); err != nil || state == herdr.StateLost {
+		t.Fatalf("commander pane after drain = %s, %v; want alive", state, err)
+	}
+
+	// The final report must never contain the faithful-failure phrasing.
+	// Check the visible viewport only: scrollback contains the contract echo,
+	// which quotes the phrase inside its own prohibition.
+	pane := labPaneVisible(t, herdrBinary, sessionName, commander.PaneID)
+	if strings.Contains(strings.Join(strings.Fields(pane), ""), "readyformyverification") {
+		t.Fatalf("commander reported the forbidden passive phrasing:\n%s", pane)
+	}
+
+	// Acceptance 4: a completion wake drives the same drain with no operator
+	// message at all.
+	taskWoken := fixture.createTask(t, mission.ID)
+	spawnWoken := spawnTask(taskWoken.ID)
+	quietAndComplete(taskWoken.ID, spawnWoken) // registration live: this wakes the commander
+	waitFor(t, 8*time.Minute, func() bool {
+		return fixture.taskStatus(t, taskWoken.ID).State == store.StateVerified
+	}, "completion wake to drive verification without operator intervention")
+	waitFor(t, 2*time.Minute, func() bool {
+		tabs := labTabList(t, herdrBinary, sessionName, commander.WorkspaceID)
+		return tabs[commander.TabID] && !tabs[spawnWoken.Pane.TabID]
+	}, "woken worker tab retired, commander tab surviving")
 }

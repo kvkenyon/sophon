@@ -1,6 +1,6 @@
 ---
 name: status
-description: Fresh read-only snapshot for /status, a status report, catch-up, or a request to see current work; current state comes only from sophon status.
+description: Fresh snapshot for /status, a status report, catch-up, or a request to see current work; current state comes only from sophon status, after any routine verification/validation drain.
 user-invocable: true
 metadata:
   internal: true
@@ -9,17 +9,17 @@ metadata:
 # Status
 
 Generate a complete bounded current snapshot so the operator can resume in one read.
-This skill is read-only.
-It never spawns, retries, steers, answers a decision, verifies, validates, delivers, releases a lease, or mutates any record.
+Except for the routine drain below, this skill is read-only.
+It never spawns, retries, steers, answers a decision, delivers, releases a lease, or mutates any record beyond that drain.
 
 ## Gather
 
-Run `sophon status --json` exactly once at invocation time and use its derived result as the snapshot authority.
-Do not supplement it with chat history, wake-line prose, worker output, filesystem scanning, repository probes, or ad hoc GitHub queries.
+Run `sophon status --json` at invocation time and use its derived result as the snapshot authority.
+When the result lists verify-complete or validate actions, those are commander-owned routine work, not discretionary observations: drain them to the fixed point first (verify every ready task, run every pending configured validation, re-deriving between steps), then run `sophon status --json` once more so the snapshot reflects the drained state.
+Do not supplement the derived result with chat history, wake-line prose, worker output, filesystem scanning, repository probes, or ad hoc GitHub queries.
 Task state is derived at read time: `queued`, `active` (augmented by live pane observation into `running`, `idle`, `lost`, or `unknown-pane`), `ready`, `verified`, and `delivered`.
 Wake lines are notifications, never state; do not quote them as truth.
-Do not turn an observation into an action from inside this skill.
-Plain `/status` writes nothing.
+Apart from that drain, do not turn an observation into an action from inside this skill.
 
 ## Response contract
 
@@ -29,7 +29,7 @@ Render exactly these four sections in this order, each present even when empty:
    Empty state: "Nothing needs your attention right now."
 2. **Recently Completed** — the bounded recent verified and delivered tasks from the current snapshot.
    Empty state: "No recent completions are in the current snapshot."
-3. **Underway** — active work progressing without operator action, plus `ready` tasks awaiting the commander's own verification, one concise line per task.
+3. **Underway** — active work progressing without operator action, plus any `ready` task whose verification just failed (reported with its concrete evidence), one concise line per task.
    Empty state: "Nothing is underway."
 4. **Up Next** — queued tasks not yet spawned.
    Empty state: "Nothing is queued."

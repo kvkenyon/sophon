@@ -441,6 +441,12 @@ func statusCommand(ctx context.Context, args []string) error {
 			fmt.Printf("%s\t%s\t%s\t%d\t%s\n", mission.Mission.ID, task.Task.ID, task.State, task.Attempt, task.Detail)
 		}
 	}
+	// The action queue is the primary output: a commander drains every listed
+	// command, re-derives, and repeats until the queue is empty before it
+	// reports or waits.
+	for _, action := range report.Actions {
+		fmt.Printf("ACTION\t%s\n", action.Command)
+	}
 	return nil
 }
 

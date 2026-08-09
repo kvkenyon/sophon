@@ -64,14 +64,22 @@ attempt each).
    lines never change derived status. A result completed while no commander
    session exists simply waits on disk and surfaces as `ready` to the next
    session — no recovery transition exists.
+   The same derivation also yields the commander action queue: every `ready`
+   task maps to an exact `sophon verify-complete <task-id>` action and every
+   `verified` task whose configured validation has no receipt yet maps to an
+   exact `sophon validate <task-id>` action, printed by `sophon status` as
+   the commands to run (verify actions first). An existing validation
+   receipt — pass or fail — is terminal for the queue; a failed validation is
+   correction routing, never a blind re-run.
 6. **Volatile commander routing.** `sophon commander attach` records the live
    commander's exact Herdr session/workspace/tab/pane in
    `state/commander.json`. The record is liveness and presentation routing
    only: after `sophon worker complete` durably publishes `result.json`, the
-   CLI best-effort submits a fixed Sophon-generated wake (task identity plus
-   "run derived status") to the registered pane, and `sophon spawn` groups a
-   new worker as a tab in the registered workspace of the same explicit Herdr
-   session. A missing, malformed, stale, dead, or duplicate target is a
+   CLI best-effort submits a fixed Sophon-generated wake (exact task identity
+   and commands, with an unambiguous instruction to drain derived
+   verification, required validation, and status before replying or waiting)
+   to the registered pane, and `sophon spawn` groups a new worker as a tab in
+   the registered workspace of the same explicit Herdr session. A missing, malformed, stale, dead, or duplicate target is a
    bounded diagnostic, never a task failure; spawn then falls back to an
    isolated workspace and the completion still derives `ready` from disk. A
    fresh attach replaces only this volatile address — no recovery transition,

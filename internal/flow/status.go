@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"sophon/internal/datahome"
@@ -66,19 +67,46 @@ type MissionStatus struct {
 	Tasks   []store.TaskStatus `json:"tasks"`
 }
 
-// Report is the full read-time status across every mission.
+// Action kinds a commander can execute deterministically, derived from
+// records alone. Verification and validation are commander-owned routine
+// work; delivery decisions and recovery judgment never appear here.
+const (
+	ActionVerifyComplete = "verify-complete"
+	ActionValidate       = "validate"
+)
+
+// Action is one currently authorized deterministic commander action with the
+// exact command that performs it. The list is an action queue: a commander
+// drains every entry, re-derives, and repeats until none remain before it
+// reports or waits.
+type Action struct {
+	TaskID  string `json:"task_id"`
+	Kind    string `json:"kind"`
+	Command string `json:"command"`
+}
+
+// Report is the full read-time status across every mission plus the derived
+// action queue. The queue is truth from the same records, never a hint.
 type Report struct {
 	Missions []MissionStatus `json:"missions"`
+	Actions  []Action        `json:"actions"`
 }
 
 // Status derives every task's state from records and augments active tasks
 // with live pane observation. It takes no lock and never reads wake lines.
+// It also derives the commander action queue: every ready task yields an
+// exact verify-complete action and every verified task whose configured
+// validation has no receipt yet yields an exact validate action — verify
+// actions first, then validate actions. An existing validation receipt
+// (pass or fail) is terminal for the queue: a failure needs commander
+// judgment (correction routing), never a blind re-run.
 func (f *Flow) Status(ctx context.Context) (Report, error) {
 	missions, err := store.ListMissions()
 	if err != nil {
 		return Report{}, err
 	}
 	report := Report{Missions: make([]MissionStatus, 0, len(missions))}
+	var verify, validate []Action
 	for _, mission := range missions {
 		entry := MissionStatus{Mission: mission}
 		tasks, err := store.ListTasks(mission.ID)
@@ -94,9 +122,22 @@ func (f *Flow) Status(ctx context.Context) (Report, error) {
 				status = f.augmentActive(ctx, status)
 			}
 			entry.Tasks = append(entry.Tasks, status)
+			switch {
+			case status.State == store.StateReady:
+				verify = append(verify, Action{TaskID: task.ID, Kind: ActionVerifyComplete,
+					Command: "sophon verify-complete " + task.ID})
+			case status.State == store.StateVerified && strings.TrimSpace(task.ValidationCommand) != "":
+				if _, err := store.ReadValidation(task.MissionID, task.ID, status.Attempt); errors.Is(err, store.ErrNotFound) {
+					validate = append(validate, Action{TaskID: task.ID, Kind: ActionValidate,
+						Command: "sophon validate " + task.ID})
+				} else if err != nil {
+					return Report{}, err
+				}
+			}
 		}
 		report.Missions = append(report.Missions, entry)
 	}
+	report.Actions = append(verify, validate...)
 	return report, nil
 }
 

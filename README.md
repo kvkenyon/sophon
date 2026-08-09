@@ -40,6 +40,9 @@ sophon task create --mission <mission-id> --title "Token-bucket limiter" \
 sophon spawn <task-id>
 
 # 4. Watch derived state. queued → active → ready → verified → delivered.
+#    Status is an action queue first: it also prints the exact next commands
+#    (verify-complete for every ready task, validate for every verified task
+#    whose configured validation has no receipt yet).
 sophon status
 
 # 5. When the task is ready, prove the attempt and run validation.

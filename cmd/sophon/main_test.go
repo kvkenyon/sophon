@@ -185,7 +185,7 @@ case "$1 $2" in
   "agent get")
     if paneclosed "$3"; then printf '{"error":{"code":"pane_not_found"}}\n'; else printf '{"result":{"agent":{"pane_id":"%%s","agent_status":"idle","state_change_seq":1}}}\n' "$3"; fi
     ;;
-  "agent prompt") printf 'prompt %%s %%.160s\n' "$3" "$4" >> "$log"; printf '{"result":{"agent":{"pane_id":"%%s","agent_session":{"value":"codex-session-cli"}},"ok":true}}\n' "$3" ;;
+  "agent prompt") printf 'prompt %%s %%.400s\n' "$3" "$4" >> "$log"; printf '{"result":{"agent":{"pane_id":"%%s","agent_session":{"value":"codex-session-cli"}},"ok":true}}\n' "$3" ;;
   *) exit 2 ;;
 esac
 `, shellQuote(herdrLog), shellQuote(herdrState)), 0o700)
