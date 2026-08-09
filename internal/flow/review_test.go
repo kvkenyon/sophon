@@ -142,25 +142,32 @@ func TestRequiredReviewLiveFixtureCorrectionAndExactHeadApproval(t *testing.T) {
 	if len(report.Actions) != 2 || report.Actions[0].Kind != ActionReviewReconcile || report.Actions[1].Kind != ActionApplyReview {
 		t.Fatalf("requested-change actions = %+v", report.Actions)
 	}
-	if _, err := rig.flow.ApplyReviewFeedback(ctx, task.ID, 1); err != nil {
+	route, err := rig.flow.ApplyReviewFeedback(ctx, task.ID, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rig.panes.wakes) == 0 {
-		t.Fatal("review correction was not routed")
+	if route.TargetRevision != 2 || route.TargetAttempt != 2 || route.Method != store.ReviewRouteRevision {
+		t.Fatalf("review route = %+v", route)
 	}
-	steer := rig.panes.wakes[len(rig.panes.wakes)-1]
-	if strings.Contains(steer, "testing") || strings.Contains(steer, "make the explanation") || !strings.Contains(steer, "sequence 1") {
-		t.Fatalf("worker steer leaked arbitrary comment bodies or lost sequence: %q", steer)
+	correction, err := store.ReadCorrection(task.MissionID, task.ID, 2)
+	if err != nil || store.CorrectionSource(correction) != store.CorrectionSourceReadCode ||
+		correction.ReviewAttempt != 1 || correction.ReviewSession != liveSession ||
+		len(correction.ReviewFeedback) != 1 || correction.ReviewFeedback[0] != 1 {
+		t.Fatalf("review correction = %+v, %v", correction, err)
 	}
-	if _, err := rig.flow.Deliver(ctx, task.ID, true); !errors.Is(err, ErrReviewRequired) {
-		t.Fatalf("old approval survived requested changes: %v", err)
+	if strings.Contains(correction.Objective, "testing") || strings.Contains(correction.Objective, "make the explanation") ||
+		!strings.Contains(correction.Objective, "sequence") {
+		t.Fatalf("correction intent leaked arbitrary comment bodies or lost sequence: %q", correction.Objective)
+	}
+	if review := DeriveReview(mustReloadTask(t, task)); review.ApprovalEligible {
+		t.Fatalf("old approval survived requested changes: %+v", review)
 	}
 
-	// A correction is a new fenced attempt/revision. Old bindings, comments,
+	// A correction is a new attempt/revision created by the landed revision
+	// owner. Old bindings, comments,
 	// and approval stay as history and cannot approve the new exact head.
 	rig.git.headSHA = newHeadSHA
-	rig.git.snapshot = gitSnapshot(newHeadSHA, "", true)
-	spawn2, err := rig.flow.Spawn(ctx, task.ID, true)
+	spawn2, err := store.ReadSpawn(task.MissionID, task.ID, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +200,7 @@ func TestRequiredReviewLiveFixtureCorrectionAndExactHeadApproval(t *testing.T) {
 	}
 	approval := readcode.Event{SchemaVersion: 1, SessionID: secondSession, Sequence: 1,
 		ID: "55555555-5555-4555-8555-555555555555", CreatedAt: "2026-08-08T12:02:00Z",
-		BaseSHA: liveBaseSHA, HeadSHA: newHeadSHA, Type: "approval", ApprovedHeadSHA: newHeadSHA}
+		BaseSHA: liveHeadSHA, HeadSHA: newHeadSHA, Type: "approval", ApprovedHeadSHA: newHeadSHA}
 	rig.review.polls = []readcode.PollResult{{SchemaVersion: 1, SessionID: secondSession, After: 0,
 		NextCursor: 1, Events: []readcode.Event{approval}}}
 	rig.review.status.EventCount, rig.review.status.LastSequence = 1, 1
@@ -215,6 +222,9 @@ func TestRequiredReviewLiveFixtureCorrectionAndExactHeadApproval(t *testing.T) {
 	}
 	if rig.remote.pushes != 1 {
 		t.Fatalf("confirmed exact-head delivery pushes = %d", rig.remote.pushes)
+	}
+	if len(rig.delGit.commitBases) == 0 || rig.delGit.commitBases[len(rig.delGit.commitBases)-1] != liveBaseSHA {
+		t.Fatalf("first delivery after review correction preflighted bases %v, want original %s", rig.delGit.commitBases, liveBaseSHA)
 	}
 }
 
@@ -283,6 +293,80 @@ func TestReviewIngestReplayConflictGapAndImmediateDeliveryDrift(t *testing.T) {
 	}
 	if rig.remote.pushes != 0 {
 		t.Fatal("cursor drift reached external delivery effect")
+	}
+}
+
+func TestReviewCorrectionUsesSameRevisionOwnerAfterWorkerRelease(t *testing.T) {
+	useHome(t)
+	rig := newRig()
+	ctx := context.Background()
+	task, _ := prepareRequiredReview(t, rig)
+	configureReviewRevision(rig, liveSession, testHeadSHA)
+	if _, err := rig.flow.ReviewOpen(ctx, task.ID, 1, true); err != nil {
+		t.Fatal(err)
+	}
+	feedback := liveFeedbackAndApproval(testBaseSHA, testHeadSHA)[:1]
+	rig.review.polls = []readcode.PollResult{{SchemaVersion: 1, SessionID: liveSession, After: 0,
+		NextCursor: 1, Events: feedback}}
+	rig.review.status.EventCount, rig.review.status.LastSequence = 1, 1
+	if _, err := rig.flow.ReviewReconcile(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rig.flow.ClassifyReviewFeedback(ctx, task.ID, 1, store.ReviewDispositionRequestedChanges); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rig.flow.ReleaseLeaseAttempt(ctx, task.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	route, err := rig.flow.ApplyReviewFeedback(ctx, task.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawn, err := store.ReadSpawn(task.MissionID, task.ID, route.TargetAttempt)
+	if err != nil || spawn.Revision != 2 || spawn.BaseSHA != testHeadSHA {
+		t.Fatalf("released-worker correction spawn = %+v, %v", spawn, err)
+	}
+	correction, err := store.ReadCorrection(task.MissionID, task.ID, 2)
+	if err != nil || store.CorrectionSource(correction) != store.CorrectionSourceReadCode ||
+		store.CorrectionContinuesPullRequest(correction) {
+		t.Fatalf("released-worker correction = %+v, %v", correction, err)
+	}
+}
+
+func TestReviewCorrectionOnDeliveredPRRetainsExactContinuationIdentity(t *testing.T) {
+	rig, _, task, spawn, delivered := prepareOpenPRForRevision(t)
+	ctx := context.Background()
+	if _, err := rig.flow.SetReviewPosture(ctx, task.ID, domain.ReviewOptional); err != nil {
+		t.Fatal(err)
+	}
+	configureReviewRevision(rig, liveSession, testHeadSHA)
+	if _, err := rig.flow.ReviewOpen(ctx, task.ID, spawn.Attempt, true); err != nil {
+		t.Fatal(err)
+	}
+	feedback := liveFeedbackAndApproval(testBaseSHA, testHeadSHA)[:1]
+	rig.review.polls = []readcode.PollResult{{SchemaVersion: 1, SessionID: liveSession, After: 0,
+		NextCursor: 1, Events: feedback}}
+	rig.review.status.EventCount, rig.review.status.LastSequence = 1, 1
+	if _, err := rig.flow.ReviewReconcile(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rig.flow.ClassifyReviewFeedback(ctx, task.ID, 1, store.ReviewDispositionRequestedChanges); err != nil {
+		t.Fatal(err)
+	}
+	route, err := rig.flow.ApplyReviewFeedback(ctx, task.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	correction, err := store.ReadCorrection(task.MissionID, task.ID, route.TargetRevision)
+	if err != nil || store.CorrectionSource(correction) != store.CorrectionSourceReadCode ||
+		!store.CorrectionContinuesPullRequest(correction) || correction.PRURL != delivered.PRURL ||
+		correction.PRNumber != delivered.PRNumber || correction.PublicBranch != delivered.Branch ||
+		correction.BaseSHA != delivered.HeadSHA {
+		t.Fatalf("delivered-PR review correction = %+v, %v", correction, err)
+	}
+	correctionSpawn, err := store.ReadSpawn(task.MissionID, task.ID, route.TargetAttempt)
+	if err != nil || correctionSpawn.Revision != 2 || correctionSpawn.BaseSHA != delivered.HeadSHA {
+		t.Fatalf("delivered-PR review spawn = %+v, %v", correctionSpawn, err)
 	}
 }
 

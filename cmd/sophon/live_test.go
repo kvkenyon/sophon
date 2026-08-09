@@ -208,6 +208,93 @@ func TestLiveCorrectionRevisionPlacementInHerdrLab(t *testing.T) {
 	runCLI(t, "release", task.ID, "--attempt", "2", "--treehouse", treehouseBinary)
 }
 
+// TestLiveReviewCorrectionRevisionPlacementInHerdrLab proves that classified
+// browser feedback uses the same landed revision/spawn owner as other
+// corrections, while starting from the exact undelivered reviewed head. The
+// durable product event is constructed through the public Sophon store API;
+// packed-product ingestion and browser submission are proved separately.
+func TestLiveReviewCorrectionRevisionPlacementInHerdrLab(t *testing.T) {
+	herdrBinary, sessionName := herdrLab(t)
+	treehouseBinary, err := exec.LookPath("treehouse")
+	if err != nil {
+		t.Skip("treehouse binary not on PATH")
+	}
+	fixture := newCLIFixture(t)
+	fixture.herdr = herdrBinary
+	fixture.treehouse = treehouseBinary
+	adapter := herdr.NewCommandAdapter(herdrBinary, sessionName, "sophon")
+	ctx := context.Background()
+
+	mission := fixture.createMission(t, "Exact reviewed-head correction placement")
+	task := fixture.createTask(t, mission.ID, "--review", "required")
+	spawnJSON := runCLI(t, "spawn", task.ID, "--herdr", herdrBinary, "--treehouse", treehouseBinary,
+		"--git", fixture.git, "--herdr-session", sessionName)
+	var firstSpawn store.Spawn
+	if err := json.Unmarshal(spawnJSON, &firstSpawn); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Cancel(ctx, firstSpawn.Pane); err != nil {
+		t.Fatalf("quiet first review worker: %v", err)
+	}
+	runCLIGit(t, firstSpawn.WorktreePath, "checkout", "--", ".")
+	runCLIGit(t, firstSpawn.WorktreePath, "clean", "-fd")
+	firstHead := fixture.completeWorker(t, mission.ID, task.ID, 1)
+	fixture.verifyComplete(t, task.ID)
+
+	current, err := store.ReadTask(mission.ID, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := store.ReviewBinding{Version: store.ReviewRecordVersion, Product: store.ReviewProduct,
+		ProductSchemaVersion: store.ReviewProductSchema, TaskID: task.ID, Attempt: 1,
+		SessionID: "77d91f3ddc544f34e70c1158", BaseSHA: firstSpawn.BaseSHA, HeadSHA: firstHead,
+		OpenedAt: time.Now().UTC()}
+	if err := store.PublishReviewBindingForTask(current, binding); err != nil {
+		t.Fatal(err)
+	}
+	event := store.ReviewEvent{Version: store.ReviewRecordVersion, ProductSchema: store.ReviewProductSchema,
+		TaskID: task.ID, Attempt: 1, SessionID: binding.SessionID, Sequence: 1,
+		ProductEventID: "11111111-1111-4111-8111-111111111111", Type: "feedback",
+		CreatedAt: time.Now().UTC(), BaseSHA: binding.BaseSHA, HeadSHA: binding.HeadSHA,
+		Comments: []store.ReviewComment{{ID: "22222222-2222-4222-8222-222222222222", Scope: "general",
+			Body: "untrusted live browser correction body", CreatedAt: time.Now().UTC()}}}
+	if err := store.PublishReviewEvent(current, binding, event); err != nil {
+		t.Fatal(err)
+	}
+	runCLI(t, "review", "classify", task.ID, "--sequence", "1", "--disposition", "requested-changes", "--json")
+	applyJSON := runCLI(t, "review", "apply", task.ID, "--sequence", "1", "--json",
+		"--herdr", herdrBinary, "--treehouse", treehouseBinary, "--git", fixture.git,
+		"--gh-axi", fixture.ghAxi, "--herdr-session", sessionName)
+	var route store.ReviewRoute
+	if err := json.Unmarshal(applyJSON, &route); err != nil {
+		t.Fatal(err)
+	}
+	correctionSpawn, err := store.ReadSpawn(mission.ID, task.ID, route.TargetAttempt)
+	if err != nil || correctionSpawn.Revision != 2 || correctionSpawn.Attempt != 2 ||
+		!strings.EqualFold(correctionSpawn.BaseSHA, firstHead) || correctionSpawn.Pane.SessionName != sessionName {
+		t.Fatalf("live reviewed-head correction placement = %+v route=%+v err=%v", correctionSpawn, route, err)
+	}
+	correction, err := store.ReadCorrection(mission.ID, task.ID, 2)
+	if err != nil || store.CorrectionSource(correction) != store.CorrectionSourceReadCode ||
+		correction.ReviewAttempt != 1 || len(correction.ReviewFeedback) != 1 || correction.ReviewFeedback[0] != 1 {
+		t.Fatalf("live review correction intent = %+v, %v", correction, err)
+	}
+	brief, err := os.ReadFile(store.AttemptPath(fixture.home, mission.ID, task.ID, 2, "brief.md"))
+	if err != nil || strings.Contains(string(brief), event.Comments[0].Body) ||
+		!strings.Contains(string(brief), "review feedback "+task.ID+" --attempt 1") {
+		t.Fatalf("live review correction brief leaked body or lost pointer: %v\n%s", err, brief)
+	}
+	if err := adapter.Cancel(ctx, correctionSpawn.Pane); err != nil {
+		t.Fatalf("quiet review correction worker: %v", err)
+	}
+	runCLIGit(t, correctionSpawn.WorktreePath, "checkout", "--", ".")
+	runCLIGit(t, correctionSpawn.WorktreePath, "clean", "-fd")
+	fixture.completeWorker(t, mission.ID, task.ID, 2)
+	fixture.verifyComplete(t, task.ID)
+	runCLI(t, "release", task.ID, "--attempt", "1", "--treehouse", treehouseBinary)
+	runCLI(t, "release", task.ID, "--attempt", "2", "--treehouse", treehouseBinary)
+}
+
 // TestLiveCommanderWakeGroupingAndRetirementInHerdrLab proves the full fix
 // end to end against a real Herdr lab session: a live commander attaches,
 // two workers group as tabs into its exact workspace with the resolved data

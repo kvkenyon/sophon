@@ -270,6 +270,9 @@ func (f *Flow) augmentPullRequest(ctx context.Context, mission store.Mission, st
 		status.Detail = "cannot read correction identity: " + err.Error()
 		return status
 	}
+	if !store.CorrectionContinuesPullRequest(correction) {
+		return status
+	}
 	expected := store.Delivery{Repository: correction.Repository, Branch: correction.PublicBranch,
 		HeadSHA: correction.BaseSHA, BaseRepository: correction.BaseRepository, BaseBranch: correction.BaseBranch,
 		PRURL: correction.PRURL, PRNumber: correction.PRNumber, State: store.DeliveryDeliveredPR}

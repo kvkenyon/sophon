@@ -32,10 +32,30 @@ func (f *Flow) Revise(ctx context.Context, taskID, reason, objective string, acc
 		return store.Spawn{}, err
 	}
 	defer release()
+	return f.reviseLocked(ctx, taskID, reason, objective, acceptExternalHead, nil)
+}
 
+type reviewCorrectionLink struct {
+	binding   store.ReviewBinding
+	sequences []int
+}
+
+// reviseLocked is the landed existing-PR revision owner. Review feedback uses
+// it with a typed link so it cannot create a parallel revision lifecycle. The
+// caller holds Sophon's shared mutation lock.
+func (f *Flow) reviseLocked(ctx context.Context, taskID, reason, objective string, acceptExternalHead bool, review *reviewCorrectionLink) (store.Spawn, error) {
+	if f.deps.Git == nil || f.deps.Leases == nil || f.deps.Panes == nil ||
+		f.deps.DeliveryGit == nil || f.deps.DeliveryRemote == nil {
+		return store.Spawn{}, errors.New("flow is not fully configured for correction revision")
+	}
 	task, mission, err := f.taskAndMission(taskID)
 	if err != nil {
 		return store.Spawn{}, err
+	}
+	if review != nil {
+		if err := validateReviewCorrectionLink(task, *review); err != nil {
+			return store.Spawn{}, err
+		}
 	}
 	if task.DeliveryMode != domain.DeliveryPR {
 		return store.Spawn{}, errors.New("correction revisions require an existing pull-request delivery")
@@ -128,6 +148,12 @@ func (f *Flow) Revise(ctx context.Context, taskID, reason, objective string, acc
 		PRURL: pr.URL, PRNumber: pr.Number, BaseRepository: pr.BaseRepository,
 		BaseBranch: pr.BaseBranch, BaseSHA: strings.ToLower(baseSHA), AcceptedAt: time.Now().UTC(),
 	}
+	if review != nil {
+		correction.Source = store.CorrectionSourceReadCode
+		correction.ReviewAttempt = review.binding.Attempt
+		correction.ReviewSession = review.binding.SessionID
+		correction.ReviewFeedback = append([]int(nil), review.sequences...)
+	}
 	if existing, readErr := store.ReadCorrection(task.MissionID, task.ID, correction.Revision); readErr == nil {
 		// Crash recovery for the only pre-pointer window: an exact immutable
 		// intent may already exist even though task.json still names the prior
@@ -141,6 +167,12 @@ func (f *Flow) Revise(ctx context.Context, taskID, reason, objective string, acc
 		return store.Spawn{}, readErr
 	} else if err := store.CreateCorrection(correction); err != nil {
 		return store.Spawn{}, fmt.Errorf("publish correction intent: %w", err)
+	}
+	if review != nil {
+		if err := publishReviewCorrectionRoutes(task, review.binding, review.sequences,
+			correction.Revision, priorAttempt+1, correction.AcceptedAt); err != nil {
+			return store.Spawn{}, err
+		}
 	}
 	// The immutable correction intent is durable before task identity advances
 	// and before any Treehouse, Git, or Herdr allocation effect.

@@ -80,10 +80,12 @@ attempt each).
    revision; attempts are replaceable executions within it. `task.json` carries
    only `current_revision`/`current_attempt` pointers. `sophon spawn` creates
    revision 1/attempt 1; `spawn --retry` fences the prior exact lease and bumps
-   only the attempt. It cannot extend a delivered revision. `sophon revise`
-   is the sole next-revision owner: after exact open-PR observation it publishes
-   immutable `correction.json`, advances both pointers, then allocates at that
-   recorded head. An exact retry can recover the narrow intent-before-pointer
+   only the attempt. It cannot extend a delivered revision. Typed correction
+   intake is the sole next-revision owner: `sophon revise` observes an exact
+   open PR, while `sophon review apply` binds classified review sequences to
+   their exact local or already-delivered head. Both publish immutable
+   `correction.json`, advance both pointers, then allocate at the recorded
+   head. An exact retry can recover the narrow intent-before-pointer
    crash window; differing pending intent refuses. A retry inside a correction
    revision reuses its immutable correction base. Stale revision/attempt
    evidence is preserved and refused.
@@ -165,8 +167,9 @@ attempt each).
    exact pane is success), refuses malformed recorded identity, and needs no
    cleanup receipt because the tab close is directly observable and a retry
    converges via reality. Until the terminal boundary the worker pane stays
-   available for recovery within the same attempt; accepted feedback after
-   delivery allocates a new revision and worker at the exact open-PR head.
+   available for recovery within the same attempt; accepted feedback allocates
+   a new revision and worker at the exact reviewed head. When that head was
+   already delivered to an open PR, the correction keeps its exact PR identity.
 9. **External boundaries.** The lease boundary uses exact identity guards:
    release is conditional on `(lease_id, holder)` and fences on mismatch. The
    forge boundary keeps generated execution branches private and pushes an

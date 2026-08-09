@@ -96,12 +96,19 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 		return store.Delivery{}, fmt.Errorf("read verified result for public delivery: %w", err)
 	}
 	body := publicsurface.PullRequestBody(task.Title, result)
-	commitMessages, err := f.deps.DeliveryGit.CommitMessages(ctx, spawn.WorktreePath, spawn.BaseSHA, outcome.HeadSHA)
+	commitBase := spawn.BaseSHA
+	if correctionErr == nil && !store.CorrectionContinuesPullRequest(correction) {
+		commitBase, err = firstDeliveryBase(task, correction)
+		if err != nil {
+			return store.Delivery{}, err
+		}
+	}
+	commitMessages, err := f.deps.DeliveryGit.CommitMessages(ctx, spawn.WorktreePath, commitBase, outcome.HeadSHA)
 	if err != nil {
 		return store.Delivery{}, err
 	}
 	preflight := publicsurface.Preflight
-	if correctionErr == nil {
+	if correctionErr == nil && store.CorrectionContinuesPullRequest(correction) {
 		preflight = publicsurface.PreflightExistingBranch
 	}
 	if err := preflight(task.DeliveryBranch, task.Title, body, commitMessages); err != nil {
@@ -124,7 +131,7 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 		return store.Delivery{}, errors.New("pending delivery intent does not match current revision and attempt")
 	}
 	var receipt store.Delivery
-	if correctionErr == nil {
+	if correctionErr == nil && store.CorrectionContinuesPullRequest(correction) {
 		receipt, err = f.deliverCorrection(ctx, task, spawn, outcome, correction, prior, repository, deliveryPath)
 	} else {
 		receipt, err = f.deliverFirst(ctx, task, spawn, outcome, prior, repository, body, deliveryPath)
@@ -137,6 +144,28 @@ func (f *Flow) Deliver(ctx context.Context, taskID string, confirmed bool) (stor
 	}
 	store.AppendWake(taskID, fmt.Sprintf("delivered: revision %d attempt %d (%s)", revision, attempt, receipt.State))
 	return receipt, nil
+}
+
+// firstDeliveryBase walks Read-the-Code-sourced local correction revisions
+// back to revision 1. Public sanitization must inspect the entire as-yet
+// undelivered commit chain, not only the latest reviewed delta.
+func firstDeliveryBase(task store.Task, correction store.Correction) (string, error) {
+	priorAttempt := correction.PriorAttempt
+	for priorAttempt > 0 {
+		spawn, err := store.ReadSpawn(task.MissionID, task.ID, priorAttempt)
+		if err != nil {
+			return "", fmt.Errorf("resolve first-delivery revision base: %w", err)
+		}
+		if spawn.Revision <= 1 {
+			return spawn.BaseSHA, nil
+		}
+		prior, err := store.ReadCorrection(task.MissionID, task.ID, spawn.Revision)
+		if err != nil || store.CorrectionContinuesPullRequest(prior) {
+			return "", errors.New("local review correction history does not lead to an undelivered first revision")
+		}
+		priorAttempt = prior.PriorAttempt
+	}
+	return "", errors.New("local review correction history has no first-delivery base")
 }
 
 func (f *Flow) deliverFirst(ctx context.Context, task store.Task, spawn store.Spawn, outcome store.Outcome,

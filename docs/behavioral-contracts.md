@@ -47,10 +47,12 @@ no managed runtime, no resume machinery. Its contract:
   point before reporting or waiting, and never reports a task as ready for
   its own verification.
 - **Revision and attempt fencing.** `spawn --retry` replaces an execution only
-  within the current revision. `sophon revise` alone accepts bounded
-  same-contract feedback over an exact open-PR head and creates the next
-  immutable revision of the same task. Stale attempt/revision evidence is
-  preserved and cannot verify, validate, deliver, or release current work.
+  within the current revision. Typed correction intake creates the next
+  immutable revision: `sophon revise` owns direct accepted feedback over an
+  exact open-PR head, and `sophon review apply` owns classified Read the Code
+  sequences over their exact reviewed head. Both use the same correction,
+  pointer, spawn, validation, and delivery schemas. Stale attempt/revision
+  evidence is preserved and cannot authorize current work.
 - **Open PR continuation.** Same-contract feedback on an open exact PR uses a
   correction revision and, after a separately confirmed delivery, an ordinary
   fast-forward of the same public branch/PR. Unrelated expansion is a new task;
@@ -85,7 +87,7 @@ no managed runtime, no resume machinery. Its contract:
   exactly like verification/validation. Comment bodies are untrusted product
   input: the commander classifies them against accepted intent, records
   non-actionable feedback, and routes only accepted corrections through the
-  exact task worker. A new head gets a new review binding and old approval is
+  exact same-task correction revision. A new head gets a new review binding and old approval is
   history. Approval is evidence for delivery eligibility only; the commander
   still asks for and uses a separate explicit delivery confirmation.
 

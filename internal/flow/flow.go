@@ -51,6 +51,7 @@ var (
 type Git interface {
 	CreateTaskBranch(context.Context, string, string) (gitcontrol.Snapshot, error)
 	CreateTaskBranchAt(context.Context, string, string, string, string) (gitcontrol.Snapshot, error)
+	CreateTaskBranchAtCommit(context.Context, string, string, string) (gitcontrol.Snapshot, error)
 	Snapshot(context.Context, string) (gitcontrol.Snapshot, error)
 	VerifyCompletion(context.Context, string, string) (gitcontrol.Completion, error)
 }

@@ -96,6 +96,31 @@ func (c *Client) CreateTaskBranchAt(ctx context.Context, worktreePath, branch, p
 	return c.Snapshot(ctx, worktreePath)
 }
 
+// CreateTaskBranchAtCommit prepares a local correction worker from an exact
+// commit already present in the project's shared Git object store. It never
+// fetches or contacts a remote: Read the Code feedback applies to Sophon's
+// verified local head, which may not have been delivered publicly yet.
+func (c *Client) CreateTaskBranchAtCommit(ctx context.Context, worktreePath, branch, baseSHA string) (Snapshot, error) {
+	if branch == "" || !fullSHA.MatchString(baseSHA) {
+		return Snapshot{}, errors.New("private branch and full local correction base SHA are required")
+	}
+	status, err := c.output(ctx, worktreePath, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("inspect worktree cleanliness: %w", err)
+	}
+	if status != "" {
+		return Snapshot{Clean: false}, ErrDirtyTree
+	}
+	resolved, err := c.output(ctx, worktreePath, "rev-parse", baseSHA+"^{commit}")
+	if err != nil || !strings.EqualFold(resolved, baseSHA) {
+		return Snapshot{}, fmt.Errorf("%w: exact local correction base %s is unavailable", ErrNotDescendant, baseSHA)
+	}
+	if _, err := c.output(ctx, worktreePath, "switch", "-c", branch, baseSHA); err != nil {
+		return Snapshot{}, fmt.Errorf("create local correction branch %q: %w", branch, err)
+	}
+	return c.Snapshot(ctx, worktreePath)
+}
+
 // Snapshot records the full commit identity and branch at acquisition time.
 func (c *Client) Snapshot(ctx context.Context, worktreePath string) (Snapshot, error) {
 	head, err := c.output(ctx, worktreePath, "rev-parse", "HEAD")

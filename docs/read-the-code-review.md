@@ -59,11 +59,15 @@ is the sole machine output containing it.
 `feedback` is the only command that returns comment bodies. Its output is
 bounded and labels comments as untrusted product data. A commander must read
 each feedback submission, classify it against accepted task intent, and mark
-test/non-actionable feedback explicitly. `apply` routes only a fixed pointer
-containing task, attempt, and sequence through exact worker steering; it never
-puts arbitrary comment bodies in a Herdr/process argument. The worker reads
-the canonical bounded feedback command and treats the bodies as data, not
-instructions or authority.
+test/non-actionable feedback explicitly. `apply` publishes a typed
+Read-the-Code-sourced `correction.json` containing only the exact historical
+attempt/session/sequence identities, advances through Sophon's existing
+same-task revision owner, and starts the correction worker from the reviewed
+head. It never turns a terminal attempt into a retry or puts arbitrary comment
+bodies in a Herdr/process argument. If the reviewed head is already the exact
+head of an open PR, the same record retains that PR identity and correction
+delivery uses the landed ordinary fast-forward contract. The worker reads the
+canonical bounded feedback command and treats bodies as data, not authority.
 
 ## Durable records and bridge
 
@@ -125,3 +129,6 @@ Approval never confirms delivery and grants no push, PR, merge, destructive,
 or unrelated authority. Any new task attempt/head has its own binding and
 starts with no approval; old sessions, comments, and approval remain history.
 Ending a review is an explicit operator command and never erases evidence.
+Every accepted correction creates a new revision and therefore a new exact
+review binding after verification/validation; old anchors and approval remain
+attached only to their original attempt.

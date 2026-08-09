@@ -122,8 +122,10 @@ verification or validation is routine cleanup, never a lost worker.
 Revision and attempt fencing are separate rules. A verified product revision
 is immutable. `sophon spawn` creates its first attempt; `sophon spawn --retry`
 only replaces an attempt inside that same revision, fencing the previous lease
-by exact identity. Only `sophon revise` accepts bounded correction feedback
-over an exact open-PR head and creates the next revision of the same task.
+by exact identity. Typed correction intake creates the next revision of the
+same task: `sophon revise` owns direct bounded feedback over an exact open-PR
+head, while `sophon review apply` owns classified Read the Code sequences over
+their exact reviewed head. Both use the same immutable revision lifecycle.
 Verification, validation, delivery, and release stay pinned to exact revision,
 attempt, and head identity. Stale evidence is preserved and refused.
 
@@ -316,9 +318,10 @@ For review-enabled work, continue the same fixed-point drain after validation:
    classify`: `requested-changes` only for a substantive accepted correction,
    otherwise `non-actionable`. Ask the operator only when feedback expands or
    conflicts with accepted product intent.
-3. Drain the resulting `apply-review-feedback` action. Sophon routes a fixed
-   task/attempt/sequence pointer through exact worker steering; it never puts
-   arbitrary comment bodies or browser capabilities in a worker message.
+3. Drain the resulting `apply-review-feedback` action. Sophon creates the next
+   same-task correction revision at the reviewed head and gives its worker a
+   fixed task/attempt/sequence pointer; it never puts arbitrary comment bodies
+   or browser capabilities in a worker message or retries the terminal attempt.
    Preserve old review evidence, require a new exact committed head, then run
    verification and configured validation normally. Open a new review binding
    for the new revision; never mutate or reattach old line anchors.
@@ -343,8 +346,9 @@ retires the exact finished worker pane. This is routine, quiet cleanup: the
 branch, lease, and every record remain, and a cleanup failure is a bounded
 diagnostic you may retry by re-running the same command, never a verification
 or validation failure. Until that boundary the worker stays available for
-recovery within the same attempt. Accepted feedback after delivery starts a
-new correction revision and worker at the exact open-PR head.
+recovery within the same attempt. Accepted Read the Code feedback starts a new
+correction revision and worker at the exact reviewed head; an already-delivered
+open PR retains its exact continuation identity.
 
 A stale-attempt refusal, head mismatch, lease conflict, or failed validation
 is a stop-and-investigate result, never an obstacle to route around.

@@ -586,7 +586,7 @@ func reviewApply(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("review apply", flag.ContinueOnError)
 	sequence := flags.Int("sequence", 0, "exact requested-change feedback sequence")
 	jsonOutput := flags.Bool("json", false, "emit versioned JSON")
-	tools.bind(flags, "herdr", "herdr-session")
+	tools.bind(flags, "herdr", "treehouse", "git", "gh-axi", "herdr-session")
 	positional, err := parseFlags(flags, args)
 	if err != nil {
 		return err
@@ -601,7 +601,8 @@ func reviewApply(ctx context.Context, args []string) error {
 	if *jsonOutput {
 		return encode(record)
 	}
-	fmt.Printf("task %s review feedback sequence %d routed to exact attempt %d worker\n", record.TaskID, record.Sequence, record.Attempt)
+	fmt.Printf("task %s review feedback sequence %d routed from attempt %d to correction revision %d attempt %d\n",
+		record.TaskID, record.Sequence, record.Attempt, record.TargetRevision, record.TargetAttempt)
 	return nil
 }
 
@@ -1381,7 +1382,7 @@ func usage() {
   sophon review status TASK [--json]
   sophon review feedback TASK [--attempt N] [--after N] [--limit N] [--json]
   sophon review classify TASK --sequence N --disposition requested-changes|non-actionable [--json]
-  sophon review apply TASK --sequence N [--json] [--herdr BIN] [--herdr-session NAME]
+  sophon review apply TASK --sequence N [--json] [--herdr BIN] [--treehouse BIN] [--git BIN] [--gh-axi BIN] [--herdr-session NAME]
   sophon review acknowledge TASK --sequence N [--json]
   sophon review reconcile TASK [--json] [--read-the-code BIN]
   sophon review end TASK [--json] [--read-the-code BIN]

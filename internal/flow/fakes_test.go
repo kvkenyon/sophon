@@ -97,6 +97,17 @@ func (g *fakeGit) CreateTaskBranchAt(_ context.Context, worktree, branch, public
 	return gitcontrol.Snapshot{Head: baseSHA, Branch: branch, Clean: true}, nil
 }
 
+func (g *fakeGit) CreateTaskBranchAtCommit(_ context.Context, worktree, branch, baseSHA string) (gitcontrol.Snapshot, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.createErr != nil {
+		return gitcontrol.Snapshot{}, g.createErr
+	}
+	g.branch = branch
+	g.baseSHA = baseSHA
+	return gitcontrol.Snapshot{Head: baseSHA, Branch: branch, Clean: true}, nil
+}
+
 func (g *fakeGit) Snapshot(_ context.Context, worktree string) (gitcontrol.Snapshot, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -227,9 +238,11 @@ type fakeDeliveryGit struct {
 	messagesErr   error
 	fetchErr      error
 	descendantErr error
+	commitBases   []string
 }
 
-func (g *fakeDeliveryGit) CommitMessages(context.Context, string, string, string) ([]string, error) {
+func (g *fakeDeliveryGit) CommitMessages(_ context.Context, _ string, baseSHA, _ string) ([]string, error) {
+	g.commitBases = append(g.commitBases, baseSHA)
 	if g.messagesErr != nil {
 		return nil, g.messagesErr
 	}

@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"sophon/internal/datahome"
 	"sophon/internal/domain"
@@ -173,6 +174,7 @@ type Release struct {
 // this typed record and is never copied into mutable task prose.
 type Correction struct {
 	Version        int       `json:"version"`
+	Source         string    `json:"source,omitempty"`
 	TaskID         string    `json:"task_id"`
 	MissionID      string    `json:"mission_id"`
 	Revision       int       `json:"revision"`
@@ -187,7 +189,32 @@ type Correction struct {
 	BaseRepository string    `json:"base_repository"`
 	BaseBranch     string    `json:"base_branch"`
 	BaseSHA        string    `json:"base_sha"`
+	ReviewAttempt  int       `json:"review_attempt,omitempty"`
+	ReviewSession  string    `json:"review_session_id,omitempty"`
+	ReviewFeedback []int     `json:"review_feedback_sequences,omitempty"`
 	AcceptedAt     time.Time `json:"accepted_at"`
+}
+
+const (
+	CorrectionSourcePullRequest = "pull-request"
+	CorrectionSourceReadCode    = "read-the-code"
+)
+
+// CorrectionSource returns the typed correction owner. Empty is the legacy
+// spelling for pull-request corrections created before the source field.
+func CorrectionSource(correction Correction) string {
+	if correction.Source == "" {
+		return CorrectionSourcePullRequest
+	}
+	return correction.Source
+}
+
+// CorrectionContinuesPullRequest distinguishes correction transport from its
+// authority source. Read the Code can request a correction either before
+// first delivery (local base) or on an already-delivered open pull request.
+func CorrectionContinuesPullRequest(correction Correction) bool {
+	return correction.Repository != "" || correction.PublicBranch != "" || correction.PRURL != "" ||
+		correction.PRNumber != 0 || correction.BaseRepository != "" || correction.BaseBranch != ""
 }
 
 // CommanderRegistration is the volatile wake and placement address of the
@@ -611,7 +638,13 @@ func ReadCorrection(missionID, taskID string, revision int) (Correction, error) 
 	if err != nil {
 		return correction, err
 	}
-	return correction, read(CorrectionPath(homeDir, missionID, taskID, revision), &correction)
+	if err := read(CorrectionPath(homeDir, missionID, taskID, revision), &correction); err != nil {
+		return correction, err
+	}
+	if err := validateCorrection(correction); err != nil {
+		return Correction{}, err
+	}
+	return correction, nil
 }
 
 // CreateCorrection publishes immutable correction intent. An identical retry
@@ -621,14 +654,8 @@ func CreateCorrection(correction Correction) error {
 	if err != nil {
 		return err
 	}
-	if correction.Version != 1 || correction.TaskID == "" || correction.MissionID == "" ||
-		correction.Revision < 2 || correction.PriorRevision < 1 || correction.PriorRevision >= correction.Revision ||
-		correction.PriorAttempt < 1 || strings.TrimSpace(correction.Reason) == "" ||
-		strings.TrimSpace(correction.Objective) == "" || correction.Repository == "" ||
-		correction.PublicBranch == "" || correction.PRURL == "" || correction.PRNumber < 1 ||
-		correction.BaseRepository == "" || correction.BaseBranch == "" || correction.BaseSHA == "" ||
-		correction.AcceptedAt.IsZero() {
-		return errors.New("correction intent is incomplete")
+	if err := validateCorrection(correction); err != nil {
+		return err
 	}
 	path := CorrectionPath(homeDir, correction.MissionID, correction.TaskID, correction.Revision)
 	encoded, err := json.MarshalIndent(correction, "", "  ")
@@ -645,6 +672,47 @@ func CreateCorrection(correction Correction) error {
 		return fmt.Errorf("inspect correction intent: %w", err)
 	}
 	return PublishBytes(path, encoded)
+}
+
+func validateCorrection(correction Correction) error {
+	if correction.Version != 1 || correction.TaskID == "" || correction.MissionID == "" ||
+		correction.Revision < 2 || correction.PriorRevision < 1 || correction.PriorRevision >= correction.Revision ||
+		correction.PriorAttempt < 1 || strings.TrimSpace(correction.Reason) == "" || len(correction.Reason) > 1024 ||
+		!utf8.ValidString(correction.Reason) || hasUnsafeControl(correction.Reason) ||
+		strings.TrimSpace(correction.Objective) == "" || len(correction.Objective) > 32<<10 ||
+		!utf8.ValidString(correction.Objective) || hasUnsafeControl(correction.Objective) ||
+		!reviewSHA.MatchString(strings.ToLower(correction.BaseSHA)) ||
+		correction.AcceptedAt.IsZero() {
+		return errors.New("correction intent is incomplete")
+	}
+	switch CorrectionSource(correction) {
+	case CorrectionSourcePullRequest:
+		if correction.Repository == "" || correction.PublicBranch == "" || correction.PRURL == "" ||
+			correction.PRNumber < 1 || correction.BaseRepository == "" || correction.BaseBranch == "" ||
+			correction.ReviewAttempt != 0 || correction.ReviewSession != "" || len(correction.ReviewFeedback) != 0 {
+			return errors.New("pull-request correction intent is incomplete or mixes review identity")
+		}
+	case CorrectionSourceReadCode:
+		if correction.ReviewAttempt != correction.PriorAttempt || !reviewSessionID.MatchString(correction.ReviewSession) ||
+			len(correction.ReviewFeedback) == 0 {
+			return errors.New("Read the Code correction intent is incomplete")
+		}
+		if CorrectionContinuesPullRequest(correction) &&
+			(correction.Repository == "" || correction.PublicBranch == "" || correction.PRURL == "" ||
+				correction.PRNumber < 1 || correction.BaseRepository == "" || correction.BaseBranch == "") {
+			return errors.New("Read the Code correction has partial public PR identity")
+		}
+		prior := 0
+		for _, sequence := range correction.ReviewFeedback {
+			if sequence <= prior {
+				return errors.New("Read the Code correction feedback sequences must be positive, unique, and ordered")
+			}
+			prior = sequence
+		}
+	default:
+		return fmt.Errorf("unknown correction source %q", correction.Source)
+	}
+	return nil
 }
 
 // ReadCommander loads the volatile commander registration, mapping absence to

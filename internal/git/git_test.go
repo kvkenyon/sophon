@@ -102,6 +102,30 @@ func TestCreateTaskBranchAtFetchesExactPublicCorrectionBase(t *testing.T) {
 	}
 }
 
+func TestCreateTaskBranchAtCommitUsesExactLocalObjectWithoutRemote(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-b", "main")
+	runGit(t, repo, "config", "user.name", "Sophon Test")
+	runGit(t, repo, "config", "user.email", "test@example.invalid")
+	writeFile(t, filepath.Join(repo, "file.txt"), "base\n")
+	runGit(t, repo, "add", "file.txt")
+	runGit(t, repo, "commit", "-m", "base")
+	base := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "checkout", "--detach", "HEAD")
+
+	snapshot, err := NewClient().CreateTaskBranchAtCommit(ctx, repo, "private/review-correction", base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Head != base || snapshot.Branch != "private/review-correction" || !snapshot.Clean {
+		t.Fatalf("local correction snapshot = %+v", snapshot)
+	}
+	if _, err := NewClient().CreateTaskBranchAtCommit(ctx, repo, "other", strings.Repeat("f", 40)); !errors.Is(err, ErrNotDescendant) {
+		t.Fatalf("missing local commit error = %v, want ErrNotDescendant", err)
+	}
+}
+
 func TestVerifyCompletionRejectsUnrelatedHead(t *testing.T) {
 	ctx := context.Background()
 	repo := t.TempDir()

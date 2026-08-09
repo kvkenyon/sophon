@@ -130,13 +130,18 @@ type ReviewDecision struct {
 // ReviewRoute proves a requested-change classification was routed through
 // the exact current worker steering boundary. It contains no comment text.
 type ReviewRoute struct {
-	Version   int       `json:"version"`
-	TaskID    string    `json:"task_id"`
-	Attempt   int       `json:"attempt"`
-	SessionID string    `json:"session_id"`
-	Sequence  int       `json:"sequence"`
-	RoutedAt  time.Time `json:"routed_at"`
+	Version        int       `json:"version"`
+	TaskID         string    `json:"task_id"`
+	Attempt        int       `json:"attempt"`
+	SessionID      string    `json:"session_id"`
+	Sequence       int       `json:"sequence"`
+	TargetRevision int       `json:"target_revision"`
+	TargetAttempt  int       `json:"target_attempt"`
+	Method         string    `json:"method"`
+	RoutedAt       time.Time `json:"routed_at"`
 }
+
+const ReviewRouteRevision = "correction-revision"
 
 // ReviewApprovalAcknowledgement is commander awareness only. Delivery uses
 // the product approval event itself and never this receipt as authority.
@@ -553,7 +558,9 @@ func ReadReviewRoute(missionID, taskID string, attempt, sequence int) (ReviewRou
 		return ReviewRoute{}, err
 	}
 	if record.Version != ReviewRecordVersion || record.TaskID != taskID || record.Attempt != attempt ||
-		record.Sequence != sequence || !reviewSessionID.MatchString(record.SessionID) || record.RoutedAt.IsZero() {
+		record.Sequence != sequence || !reviewSessionID.MatchString(record.SessionID) ||
+		record.TargetRevision < 2 || record.TargetAttempt <= record.Attempt ||
+		record.Method != ReviewRouteRevision || record.RoutedAt.IsZero() {
 		return ReviewRoute{}, fmt.Errorf("%w: invalid review route", ErrInvalidEvidence)
 	}
 	return record, nil
@@ -561,7 +568,9 @@ func ReadReviewRoute(missionID, taskID string, attempt, sequence int) (ReviewRou
 
 func PublishReviewRoute(task Task, record ReviewRoute) error {
 	if record.Version != ReviewRecordVersion || record.TaskID != task.ID || record.Attempt < 1 ||
-		record.Sequence < 1 || !reviewSessionID.MatchString(record.SessionID) || record.RoutedAt.IsZero() {
+		record.Sequence < 1 || !reviewSessionID.MatchString(record.SessionID) ||
+		record.TargetRevision < 2 || record.TargetAttempt <= record.Attempt ||
+		record.Method != ReviewRouteRevision || record.RoutedAt.IsZero() {
 		return fmt.Errorf("%w: invalid review route", ErrInvalidEvidence)
 	}
 	homeDir, err := home()

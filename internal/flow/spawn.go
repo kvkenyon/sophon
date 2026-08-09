@@ -152,9 +152,11 @@ func (f *Flow) spawnAttemptLocked(ctx context.Context, mission store.Mission, ta
 	var snapshot gitcontrol.Snapshot
 	if correction == nil {
 		snapshot, err = f.deps.Git.CreateTaskBranch(ctx, allocation.WorktreePath, branch)
-	} else {
+	} else if store.CorrectionContinuesPullRequest(*correction) {
 		snapshot, err = f.deps.Git.CreateTaskBranchAt(ctx, allocation.WorktreePath, branch,
 			correction.PublicBranch, correction.BaseSHA)
+	} else {
+		snapshot, err = f.deps.Git.CreateTaskBranchAtCommit(ctx, allocation.WorktreePath, branch, correction.BaseSHA)
 	}
 	if err != nil {
 		releaseLease()
