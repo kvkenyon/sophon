@@ -86,6 +86,8 @@ func run(ctx context.Context, args []string) error {
 		return sendCommand(ctx, args[1:])
 	case "prompt":
 		return promptCommand(ctx, args[1:])
+	case "pi":
+		return piCommand(ctx, args[1:])
 	default:
 		usage()
 		return fmt.Errorf("unknown command %q", args[0])
@@ -1535,20 +1537,31 @@ func promptCommander(_ context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	promptID, err := id.New("commander-prompt")
-	if err != nil {
-		return err
-	}
-	skillDir := filepath.Join(home, "skills", "commander", promptID)
-	if err := runtimeprompts.MaterializeSkills(skillDir, runtimeprompts.CommanderSkills); err != nil {
-		return fmt.Errorf("materialize commander skills: %w", err)
-	}
-	body, err := runtimeprompts.Compose(skillDir)
+	body, err := commanderPrompt(home)
 	if err != nil {
 		return err
 	}
 	fmt.Print(body)
 	return nil
+}
+
+// commanderPrompt renders the exact prompt used by both the direct prompt
+// command and the unmanaged Pi commander. Keeping one renderer prevents the
+// conversational entry point from quietly drifting from the documented CLI.
+func commanderPrompt(home string) (string, error) {
+	promptID, err := id.New("commander-prompt")
+	if err != nil {
+		return "", err
+	}
+	skillDir := filepath.Join(home, "skills", "commander", promptID)
+	if err := runtimeprompts.MaterializeSkills(skillDir, runtimeprompts.CommanderSkills); err != nil {
+		return "", fmt.Errorf("materialize commander skills: %w", err)
+	}
+	body, err := runtimeprompts.Compose(skillDir)
+	if err != nil {
+		return "", err
+	}
+	return body, nil
 }
 
 func encode(value any) error {
@@ -1597,5 +1610,6 @@ func usage() {
   sophon release TASK [--attempt N] [--treehouse BIN]
   sophon status [--json] [--all] [--herdr BIN] [--git BIN] [--gh-axi BIN] [--herdr-session NAME]
   sophon send TASK MESSAGE [--herdr BIN] [--herdr-session NAME]
-  sophon prompt commander`)
+  sophon prompt commander
+  sophon pi --workspace ROOT [--pi BIN] [--extension PATH] [-- PI_OPTIONS...]`)
 }

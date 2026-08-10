@@ -20,8 +20,12 @@ The full behavioral contract is embedded in `prompts/commander/AGENTS.md` and re
 ## Install
 
 ```bash
-go build -o sophon ./cmd/sophon
+go build -o "$HOME/.local/bin/sophon" ./cmd/sophon
 ```
+
+Ensure `$HOME/.local/bin` is on `PATH`. The installed binary includes its Pi
+presentation assets, so `sophon pi --workspace ROOT` needs neither a source
+checkout beside it nor a globally installed Sophon Pi package.
 
 External tools (`herdr`, `treehouse`, `git`, `gh-axi`) are resolved from PATH by default and can be overridden by command flags. Read the Code is separately configured with `--read-the-code PATH` or `SOPHON_READ_THE_CODE=PATH`; Sophon never downloads or installs it.
 
@@ -37,8 +41,13 @@ sophon project create api --workspace /work/product
 sophon project clone web --workspace /work/product --source /fixtures/web.git
 sophon project list --workspace /work/product
 
-# Start one commander at /work/product, render its prompt, then attach its
-# volatile wake/placement address once for the whole workspace.
+# Preferred conversational entry: Sophon validates the workspace, launches
+# an ordinary disposable Pi process at its root, and loads the commander
+# prompt plus Sophon's Pi presentation extension. Pi model/reasoning options
+# stay Pi's own options after `--`.
+sophon pi --workspace /work/product -- --model anthropic/claude-sonnet-4-6 --thinking high
+
+# Direct CLI setup remains available, including when using another commander.
 cd /work/product
 sophon prompt commander
 sophon commander attach --scope /work/product
@@ -55,6 +64,9 @@ sophon task create --mission <mission-id> --title "Build local API prototype" \
 sophon status
 sophon spawn <task-id>
 ```
+
+For Pi extension development, pass its source explicitly without installing
+or mutating Pi globally: `sophon pi --workspace /work/product --extension /path/to/integrations/pi/index.ts`.
 
 When a local task starts in a genuinely empty initialized repository, `spawn` publishes typed bootstrap intent, creates exactly one deterministic empty initial commit on the repository's intended branch, records an exact receipt, and then allocates the worker. It never creates scaffolding, a README, license, ignore file, remote, public branch, or product file. Any untracked, ignored, symlinked, unusual, or ambiguous content is a refusal for an operator decision.
 
