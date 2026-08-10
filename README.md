@@ -37,8 +37,13 @@ sophon project create api --workspace /work/product
 sophon project clone web --workspace /work/product --source /fixtures/web.git
 sophon project list --workspace /work/product
 
-# Start one commander at /work/product, render its prompt, then attach its
-# volatile wake/placement address once for the whole workspace.
+# Preferred conversational entry: Sophon validates the workspace, launches
+# an ordinary disposable Pi process at its root, and loads the commander
+# prompt plus Sophon's Pi presentation extension. Pi model/reasoning options
+# stay Pi's own options after `--`.
+sophon pi --workspace /work/product -- --model anthropic/claude-sonnet-4-6 --thinking high
+
+# Direct CLI setup remains available, including when using another commander.
 cd /work/product
 sophon prompt commander
 sophon commander attach --scope /work/product
@@ -55,6 +60,9 @@ sophon task create --mission <mission-id> --title "Build local API prototype" \
 sophon status
 sophon spawn <task-id>
 ```
+
+For Pi extension development, pass its source explicitly without installing
+or mutating Pi globally: `sophon pi --workspace /work/product --extension /path/to/integrations/pi/index.ts`.
 
 When a local task starts in a genuinely empty initialized repository, `spawn` publishes typed bootstrap intent, creates exactly one deterministic empty initial commit on the repository's intended branch, records an exact receipt, and then allocates the worker. It never creates scaffolding, a README, license, ignore file, remote, public branch, or product file. Any untracked, ignored, symlinked, unusual, or ambiguous content is a refusal for an operator decision.
 
