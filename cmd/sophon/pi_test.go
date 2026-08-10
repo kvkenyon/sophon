@@ -104,11 +104,23 @@ func TestPiCommandPropagatesExecFailure(t *testing.T) {
 	if err := os.WriteFile(extension, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	oldCWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// piCommand changes directory immediately before syscall.Exec. The test
+	// replacement returns to this process, so restore the process-wide fixture
+	// before TempDir removes the workspace beneath subsequent tests.
+	t.Cleanup(func() {
+		if err := os.Chdir(oldCWD); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
 	originalLookPath, originalExec := piLookPath, piExec
 	t.Cleanup(func() { piLookPath, piExec = originalLookPath, originalExec })
 	piLookPath = func(string) (string, error) { return "/fake/pi", nil }
 	piExec = func(string, []string, []string) error { return errors.New("exit status 23") }
-	err := piCommand(context.Background(), []string{"--workspace", root, "--extension", extension})
+	err = piCommand(context.Background(), []string{"--workspace", root, "--extension", extension})
 	if err == nil || !strings.Contains(err.Error(), "exit status 23") {
 		t.Fatalf("error = %v", err)
 	}
