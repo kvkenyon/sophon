@@ -20,8 +20,12 @@ The full behavioral contract is embedded in `prompts/commander/AGENTS.md` and re
 ## Install
 
 ```bash
-go build -o sophon ./cmd/sophon
+go build -o "$HOME/.local/bin/sophon" ./cmd/sophon
 ```
+
+Ensure `$HOME/.local/bin` is on `PATH`. The installed binary includes its Pi
+presentation assets, so `sophon pi --workspace ROOT` needs neither a source
+checkout beside it nor a globally installed Sophon Pi package.
 
 External tools (`herdr`, `treehouse`, `git`, `gh-axi`) are resolved from PATH by default and can be overridden by command flags. Read the Code is separately configured with `--read-the-code PATH` or `SOPHON_READ_THE_CODE=PATH`; Sophon never downloads or installs it.
 

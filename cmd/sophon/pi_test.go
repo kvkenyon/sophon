@@ -75,6 +75,35 @@ func TestPiCommandReplacesProcessWithCanonicalCommander(t *testing.T) {
 	}
 }
 
+func TestPiCommandUsesBundledPresentation(t *testing.T) {
+	root := initializedWorkspace(t)
+	home := t.TempDir()
+	t.Setenv("SOPHON_DATA_HOME", home)
+	originalLookPath, originalExec := piLookPath, piExec
+	t.Cleanup(func() { piLookPath, piExec = originalLookPath, originalExec })
+	piLookPath = func(string) (string, error) { return "/fake/pi", nil }
+	var argv []string
+	piExec = func(_ string, got []string, _ []string) error { argv = append([]string(nil), got...); return nil }
+	oldCWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldCWD) })
+
+	if err := piCommand(context.Background(), []string{"--workspace", root}); err != nil {
+		t.Fatal(err)
+	}
+	if len(argv) < 5 || argv[3] != "--extension" {
+		t.Fatalf("launcher argv = %q", argv)
+	}
+	if !strings.HasPrefix(argv[4], filepath.Join(home, "pi", "extensions")+string(filepath.Separator)) {
+		t.Fatalf("bundled extension = %q", argv[4])
+	}
+	if _, err := os.Stat(argv[4]); err != nil {
+		t.Fatalf("materialized extension: %v", err)
+	}
+}
+
 func TestPiCommandRefusesBeforeProcessReplacement(t *testing.T) {
 	originalExec := piExec
 	t.Cleanup(func() { piExec = originalExec })

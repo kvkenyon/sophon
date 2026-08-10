@@ -11,14 +11,14 @@ import (
 	"strings"
 	"syscall"
 
+	pipresentation "sophon/integrations/pi"
 	"sophon/internal/datahome"
 	"sophon/internal/workspace"
 )
 
 var (
-	piLookPath   = exec.LookPath
-	piExec       = syscall.Exec
-	piExecutable = os.Executable
+	piLookPath = exec.LookPath
+	piExec     = syscall.Exec
 )
 
 // piCommand starts an ordinary Pi process and then disappears. It deliberately
@@ -54,7 +54,7 @@ func piCommand(_ context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	extension, err := resolvePiExtension(*extensionPath)
+	extension, err := resolvePiExtension(*extensionPath, home)
 	if err != nil {
 		return err
 	}
@@ -111,14 +111,14 @@ func replacePiEnv(base []string, values ...string) []string {
 // resolvePiExtension is the only launcher-to-presentation boundary. The
 // presentation package owns the default source path; callers can override it
 // explicitly for development and tests without installing anything globally.
-func resolvePiExtension(explicit string) (string, error) {
+func resolvePiExtension(explicit, home string) (string, error) {
 	candidate := strings.TrimSpace(explicit)
 	if candidate == "" {
-		executable, err := piExecutable()
+		extension, err := pipresentation.Materialize(home)
 		if err != nil {
-			return "", fmt.Errorf("resolve Pi presentation extension: locate Sophon executable: %w", err)
+			return "", fmt.Errorf("materialize bundled Pi presentation extension: %w", err)
 		}
-		candidate = filepath.Join(filepath.Dir(executable), "integrations", "pi", "index.ts")
+		return extension, nil
 	}
 	abs, err := filepath.Abs(candidate)
 	if err != nil {
